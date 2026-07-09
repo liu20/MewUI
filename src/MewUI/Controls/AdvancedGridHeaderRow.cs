@@ -19,6 +19,9 @@ internal sealed class AdvancedGridHeaderRow : Panel
     // Phase 2:分组行单元格(每个合并表头分组一个),占上半行。仅 HasGroups 时非空。
     private readonly List<TextBlock> _groupCells = new();
     private List<HeaderGroup> _groups = new();
+    // 每列表头水平对齐("left"/"center"/"right"),由调用方按 columnList.headerAlign 传入。
+    // 索引与列序对齐;越界/空 → left。仅作用于列名 cell(_cells);分组标题 cell 保持居中。
+    private List<string> _headerAligns = new();
     private double _horizontalOffset;
     // Phase 2 固定列:左/右固定列数与总宽。0 = 无该侧固定。中间列跟水平偏移;固定列钉视口左/右。
     private int _frozenLeft;
@@ -151,6 +154,34 @@ internal sealed class AdvancedGridHeaderRow : Panel
         InvalidateVisual();
     }
 
+    /// <summary>
+    /// 设置每列表头水平对齐(对应 <c>columnList.headerAlign</c>)。索引与列序对齐,取值
+    /// <c>"left"</c>/<c>"center"</c>/<c>"right"</c>;越界/空/<c>null</c> 降级 <c>left</c>。
+    /// 仅作用于列名 cell(<see cref="_cells"/>);合并表头的分组标题 cell 保持居中不变。
+    /// 列重建(<see cref="SetColumns"/>)后自动重应用,使 cell 回收/新建后对齐跟进。
+    /// </summary>
+    public void SetColumnAlignments(IReadOnlyList<string>? aligns)
+    {
+        _headerAligns = aligns is null ? new() : new List<string>(aligns);
+        ApplyHeaderAlignments();
+        InvalidateVisual();
+    }
+
+    /// <summary>把 <see cref="_headerAligns"/> 应用到列名 cell(逐列设 HorizontalAlignment)。</summary>
+    private void ApplyHeaderAlignments()
+    {
+        for (int i = 0; i < _cells.Count; i++)
+        {
+            var a = i < _headerAligns.Count ? _headerAligns[i] : null;
+            _cells[i].HorizontalAlignment = a switch
+            {
+                "center" => HorizontalAlignment.Center,
+                "right" => HorizontalAlignment.Right,
+                _ => HorizontalAlignment.Left,
+            };
+        }
+    }
+
     public void SetColumns(IReadOnlyList<GridView.GridViewCore.ColumnDefinition> columns)
     {
         while (_cells.Count < columns.Count)
@@ -172,6 +203,9 @@ internal sealed class AdvancedGridHeaderRow : Panel
             _cells[i].Text = columns[i].Header;
             _cells[i].Margin = new Thickness(6, 0, 6, 0);
         }
+
+        // 列重建后重应用表头对齐(新建/回收的 cell 默认左对齐,需按 _headerAligns 跟进)。
+        ApplyHeaderAlignments();
     }
 
     protected override Size MeasureContent(Size availableSize)

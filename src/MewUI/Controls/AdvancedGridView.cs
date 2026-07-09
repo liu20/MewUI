@@ -843,6 +843,16 @@ public sealed class AdvancedGridView : ScrollableItemsBase, IFocusIntoViewHost, 
     internal bool HasHeaderGroups => _headerGroups.Count > 0;
 
     /// <summary>
+    /// 设置每列表头水平对齐(对应 JNPF <c>columnList.headerAlign</c>)。索引与列序对齐,取值
+    /// <c>"left"</c>/<c>"center"</c>/<c>"right"</c>;越界/空降级 <c>left</c>。仅作用于列名 cell;
+    /// 合并表头的分组标题保持居中。建列后调用;列重建时控件自动重应用。
+    /// </summary>
+    public void SetColumnAlignments(IReadOnlyList<string>? headerAligns)
+    {
+        _header.SetColumnAlignments(headerAligns);
+    }
+
+    /// <summary>
     /// Phase 2:设置固定列。<paramref name="left"/> = 左固定的列数(从第 0 列起),
     /// <paramref name="right"/> = 右固定的列数(贴 viewport 右边的最后 N 列)。
     /// 中间列(范围 [left, columns.Count-right))走虚拟化 presenter 水平滚动;固定列 overlay 始终钉视口左/右。
