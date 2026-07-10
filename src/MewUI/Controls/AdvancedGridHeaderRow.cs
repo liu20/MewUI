@@ -354,6 +354,17 @@ internal sealed class AdvancedGridHeaderRow : Panel
             {
                 _cells[i].Render(context);
             }
+
+            // 中间段分组标题 cell(分组起始列落在中间段 [frozenLeft, rightStart) 内)同样在 clip 下渲染,
+            // 避免分组标题文本溢出到固定列区。分组不跨固定列边界(complexHeader 约束),故按起始列判定段即可。
+            for (int gi = 0; gi < _groups.Count; gi++)
+            {
+                int start = _groups[gi].StartColumn;
+                if (start >= _frozenLeft && start < rightStart)
+                {
+                    _groupCells[gi].Render(context);
+                }
+            }
         }
         finally
         {
@@ -368,6 +379,16 @@ internal sealed class AdvancedGridHeaderRow : Panel
         for (int i = rightStart; i < _cells.Count; i++)
         {
             _cells[i].Render(context);
+        }
+
+        // 固定段分组标题 cell(分组起始列落在左段 < frozenLeft 或右段 >= rightStart)无 clip 渲染。
+        for (int gi = 0; gi < _groups.Count; gi++)
+        {
+            int start = _groups[gi].StartColumn;
+            if (start < _frozenLeft || start >= rightStart)
+            {
+                _groupCells[gi].Render(context);
+            }
         }
     }
 
