@@ -78,6 +78,10 @@ public abstract class Control : FrameworkElement
     private bool _forceApplyStyle;
     private bool _styleNameResolved;
 
+    // ContextVersion at the time _style was resolved; a mismatch means the ancestor
+    // chain changed since and the style must be re-resolved.
+    private int _styleContextVersion = -1;
+
     private Style? _style;
     private string? _styleName;
     private Dictionary<string, UIElement>? _parts;
@@ -214,7 +218,13 @@ public abstract class Control : FrameworkElement
             if (_styleName != value)
             {
                 _styleName = value;
-                _styleNameResolved = false; // force re-resolve on next Measure
+                _styleNameResolved = false;
+
+                // Attached: apply now (with transitions). Detached controls resolve on attach or first Measure.
+                if (FindVisualRoot() is Window)
+                {
+                    ResolveAndApplyStyle(animate: true);
+                }
             }
         }
     }
@@ -271,7 +281,7 @@ public abstract class Control : FrameworkElement
     /// </summary>
     protected void EnsureStyleResolved()
     {
-        if (!_styleNameResolved)
+        if (!_styleNameResolved || _styleContextVersion != ContextVersion)
         {
             ResolveAndApplyStyle();
         }
@@ -285,23 +295,29 @@ public abstract class Control : FrameworkElement
     }
 
     /// <summary>
-    /// Sets the style for this control.
-    /// </summary>
-    /// <summary>
-    /// Forces the next <see cref="OnRender"/> pass to snap style values immediately
-    /// instead of animating from the cached <see cref="_visualState"/>.
-    /// Used when a virtualization-pinned container re-enters the visible range
-    /// and its cached visual state may be stale (e.g. still has Focused/Active
-    /// flags from when it was off-screen).
+    /// Queues a visual-state reconciliation that re-applies style values even when the state
+    /// flags compare equal, snapping instead of animating. Used when a virtualization-pinned
+    /// container re-enters the visible range after a rebind: its cached visual state may be
+    /// stale, and animating from the previous item's visuals would cross-fade between items.
     /// </summary>
     internal void ForceStyleSnap()
     {
         _forceApplyStyle = true;
+        InvalidateVisualState();
     }
 
-    internal void SetStyle(Style? style)
+    internal void SetStyle(Style? style, bool snap = true)
     {
+        var oldStyle = _style;
         _style = style;
+        _styleContextVersion = ContextVersion;
+
+        // Values the old style set but the new one does not would otherwise linger
+        // with Source=Style after the swap.
+        if (oldStyle != null && !ReferenceEquals(oldStyle, style))
+        {
+            ClearStaleStyleValues(oldStyle, style);
+        }
 
         // Apply the full style chain (base setters + matching triggers) immediately so
         // layout-affecting properties and current-state visuals are correct before the
@@ -311,7 +327,7 @@ public abstract class Control : FrameworkElement
         // restore trigger-stamped values because bookkeeping was skipped here.
         var flags = ComputeVisualState().Flags;
         _visualState = new VisualState { Flags = flags };
-        ApplyStyleValues(flags, snap: true);
+        ApplyStyleValues(flags, snap || _forceApplyStyle);
         _forceApplyStyle = false;
 
         InvalidateVisual();
@@ -323,7 +339,8 @@ public abstract class Control : FrameworkElement
     /// 2. StyleSheet type rule (nearest container's type-matched rule)
     /// 3. Theme (type-based default)
     /// </summary>
-    internal void ResolveAndApplyStyle()
+    /// <param name="animate">When true, a runtime style swap applies with the new style's transitions.</param>
+    internal void ResolveAndApplyStyle(bool animate = false)
     {
         Style? resolved = null;
 
@@ -345,7 +362,7 @@ public abstract class Control : FrameworkElement
         if (resolved == null)
         {
             var controlType = GetType();
-            for (Element? current = Parent; current != null; current = current.Parent)
+            for (Element? current = ContextParent; current != null; current = current.ContextParent)
             {
                 if (current is FrameworkElement fe)
                 {
@@ -367,12 +384,15 @@ public abstract class Control : FrameworkElement
             }
         }
 
-        SetStyle(resolved);
+        // Transitions only make sense for a runtime swap on an attached, already-styled
+        // control; initial attach, theme change, and detached resolution snap.
+        bool snap = !animate || _style == null || FindVisualRoot() is not Window;
+        SetStyle(resolved, snap);
     }
 
     private Style? FindNamedStyle(string name)
     {
-        for (Element? current = this; current != null; current = current.Parent)
+        for (Element? current = this; current != null; current = current.ContextParent)
         {
             if (current is FrameworkElement fe && fe.StyleSheet != null)
             {
@@ -390,9 +410,10 @@ public abstract class Control : FrameworkElement
 
         if (newState != oldState || _forceApplyStyle)
         {
-            // _forceApplyStyle (style just set/changed, re-attachment, theme change) always snaps:
-            // these are hard resets, not interactive transitions. Otherwise the caller chooses -
-            // the visual-state drain snaps for offscreen elements, animates for on-screen.
+            // _forceApplyStyle (virtualization rebind via ForceStyleSnap) always snaps: a recycled
+            // container must re-apply even with equal flags and must not animate from the previous
+            // item's visuals. Otherwise the caller chooses - the visual-state update snaps for
+            // offscreen elements, animates for on-screen.
             bool effectiveSnap = snap || _forceApplyStyle;
             _forceApplyStyle = false;
             _visualState = newState;
@@ -574,6 +595,38 @@ public abstract class Control : FrameworkElement
             style = style.BasedOn;
         }
         return null;
+    }
+
+    /// <summary>
+    /// Clears Style-sourced values that the old style chain set but the new chain no longer
+    /// sets, so they fall back to default/inherited instead of lingering after a style swap.
+    /// </summary>
+    private void ClearStaleStyleValues(Style oldStyle, Style? newStyle)
+    {
+        for (Style? current = oldStyle; current != null; current = current.BasedOn)
+        {
+            for (int i = 0; i < current.Setters.Count; i++)
+            {
+                if (current.Setters[i] is Setter setter && !StyleChainSetsProperty(newStyle, setter.Property.Id))
+                {
+                    PropertyStore.ClearSource(setter.Property.Id, ValueSource.Style);
+                }
+            }
+        }
+    }
+
+    private static bool StyleChainSetsProperty(Style? style, int propertyId)
+    {
+        while (style != null)
+        {
+            for (int i = 0; i < style.Setters.Count; i++)
+            {
+                if (style.Setters[i] is Setter s && s.Property.Id == propertyId)
+                    return true;
+            }
+            style = style.BasedOn;
+        }
+        return false;
     }
 
     private void ApplySetter(SetterBase setter, ValueSource source, bool snap)

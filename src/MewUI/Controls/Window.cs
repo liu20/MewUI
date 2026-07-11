@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Runtime.CompilerServices;
 
 using Aprillz.MewUI.Animation;
@@ -77,7 +77,7 @@ public sealed class ClosingDeferral : IDisposable
 /// </summary>
 public partial class Window : ContentControl, ILayoutRoundingHost
 {
-    private readonly DispatcherMergeKey _layoutMergeKey = new(DispatcherPriority.Layout);
+    private readonly DispatcherMergeKey _updatePassMergeKey = new(DispatcherPriority.Layout);
     private readonly DispatcherMergeKey _renderMergeKey = new(DispatcherPriority.Render);
 
     private enum WindowLifetimeState
@@ -94,8 +94,10 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     private IWindowBackend? _backend;
     private WindowRenderTarget? _cachedRenderTarget;
     private IGraphicsContext? _renderContext;
+    // True while RenderFrame is inside RenderFrameCore; guards against reentrant paints.
+    private bool _renderFrameActive;
     private Action? _cachedInvalidateBackend;
-    private Action? _cachedLayoutAndRender;
+    private Action? _cachedUpdatePass;
     private LayoutPerformanceStats _lastLayoutPerformanceStats;
 
     private Size _clientSizeDip = new(DefaultWidth, DefaultHeight);
@@ -109,7 +111,6 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     private readonly List<UIElement> _mouseOverOldPath = new(capacity: 16);
     private readonly List<UIElement> _mouseOverNewPath = new(capacity: 16);
     private readonly List<UIElement> _visualStateDirtyList = new();
-    private bool _updatingVisualStates;
     private UIElement? _mouseOverElement;
     private UIElement? _capturedElement;
     private Point _lastMousePositionDip;
@@ -516,7 +517,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     }
 
     /// <summary>
-    /// Gets the owner window. Set via <see cref="Show(Window?)"/> or <see cref="ShowDialogAsync(Window?, bool)"/>.
+    /// Gets the owner window. Set via <see cref="Show(Window?)"/> or <see cref="ShowDialogAsync(Window?)"/>.
     /// Used for <see cref="WindowStartupLocation.CenterOwner"/> positioning and modal dialog ownership.
     /// </summary>
     public Window? Owner { get; private set; }
@@ -1134,10 +1135,10 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         _backend!.EnsureTheme(Theme.IsDark);
         _lifetimeState = WindowLifetimeState.Shown;
 
-        // Establish the OS-level owner relationship so the window stays above its owner in z-order and shares
-        // its lifetime (it was previously set only at the framework level, used for positioning, which left the
-        // native window independent and able to fall behind its owner). Modal ShowDialog does this separately.
-        if (owner != null && Handle != 0)
+        // Native ownership suppresses the child's own taskbar button on Windows. Keep the
+        // framework owner for positioning/lifetime, but only native-own auxiliary windows
+        // that opted out of the taskbar.
+        if (owner != null && !ShowInTaskbar && owner.Handle != 0 && Handle != 0)
         {
             _backend!.SetOwner(owner.Handle);
         }
@@ -1313,10 +1314,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     /// Shows the window as a modal dialog and completes when the dialog is closed.
     /// </summary>
     /// <param name="owner">Optional owner window to disable while the dialog is open.</param>
-    /// <param name="autoResolveOwner">When true (default) and <paramref name="owner"/> is null, the active
-    /// application window is used as owner. Pass false for an ownerless modal (e.g. a dialog that should get
-    /// its own taskbar button instead of floating over an owner).</param>
-    public Task ShowDialogAsync(Window? owner = null, bool autoResolveOwner = true)
+    public Task ShowDialogAsync(Window? owner = null)
     {
         if (_lifetimeState == WindowLifetimeState.Closed)
         {
@@ -1343,7 +1341,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
         try
         {
-            BeginModal(owner, autoResolveOwner);
+            BeginModal(owner);
         }
         catch (Exception ex)
         {
@@ -1361,10 +1359,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     /// application loop and must be called on the UI thread; otherwise use <see cref="ShowDialogAsync"/>.
     /// </summary>
     /// <param name="owner">Optional owner window to disable while the dialog is open.</param>
-    /// <param name="autoResolveOwner">When true (default) and <paramref name="owner"/> is null, the active
-    /// application window is used as owner. Pass false for an ownerless modal (e.g. a dialog that should get
-    /// its own taskbar button instead of floating over an owner).</param>
-    public void ShowDialog(Window? owner = null, bool autoResolveOwner = true)
+    public void ShowDialog(Window? owner = null)
     {
         if (_lifetimeState == WindowLifetimeState.Closed)
         {
@@ -1404,7 +1399,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
         try
         {
-            BeginModal(owner, autoResolveOwner);
+            BeginModal(owner);
             Application.Current.PlatformHost.RunNestedLoop(() => _lifetimeState != WindowLifetimeState.Closed);
         }
         finally
@@ -1417,7 +1412,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     /// Applies modal state and shows the window: marks it as a dialog, disables and parents to the owner,
     /// inherits the owner icon, then shows and activates. Shared by <see cref="ShowDialog"/> and <see cref="ShowDialogAsync"/>.
     /// </summary>
-    private void BeginModal(Window? owner, bool makeChild)
+    private void BeginModal(Window? owner)
     {
         _isDialogWindow = true;
         if (owner != null)
@@ -1429,11 +1424,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         if (owner != null && Icon == null && owner.Icon != null)
             Icon = owner.Icon;
 
-        Show(makeChild ? owner : null);
-        if (owner != null && _backend != null && Handle != 0)
-        {
-            _backend.SetOwner(owner.Handle);
-        }
+        Show(owner);
         Activate();
     }
 
@@ -1621,19 +1612,15 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     /// </summary>
     internal void RegisterVisualStateDirty(UIElement element)
     {
-        // Ignore re-entrant registrations made during a drain: those elements are being
-        // processed in the current pass already, and re-adding would grow the list mid-iteration.
-        if (_updatingVisualStates)
-        {
-            return;
-        }
-
+        // Registrations while UpdateVisualStates is running are allowed: its indexed loop
+        // re-reads Count, so entries appended mid-pass (e.g. a resolve dirtying a named part)
+        // are reconciled in the same pass.
         _visualStateDirtyList.Add(element);
     }
 
     /// <summary>
     /// Reconciles visual states for all elements that called <see cref="UIElement.InvalidateVisualState"/>
-    /// since the last drain. Offscreen elements snap (no animation); onscreen elements animate.
+    /// since the last update. Offscreen elements snap (no animation); onscreen elements animate.
     /// </summary>
     public void UpdateVisualStates()
     {
@@ -1642,39 +1629,32 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             return;
         }
 
-        _updatingVisualStates = true;
-        try
+        var viewport = new Rect(ClientSize);
+
+        for (int i = 0; i < _visualStateDirtyList.Count; i++)
         {
-            var viewport = new Rect(ClientSize);
+            var element = _visualStateDirtyList[i];
+            element.ClearVisualStateDirty();
 
-            for (int i = 0; i < _visualStateDirtyList.Count; i++)
+            // Skip elements that got detached before the update (visual root no longer this window).
+            if (element.FindVisualRoot() != this)
             {
-                var element = _visualStateDirtyList[i];
-                element.ClearVisualStateDirty();
-
-                // Skip elements that got detached before the drain (visual root no longer this window).
-                if (element.FindVisualRoot() != this)
-                {
-                    continue;
-                }
-
-                // Offscreen: snap to avoid wasting animations on invisible pixels.
-                // SkipViewportCull elements (e.g. transformed subtrees) always animate since their
-                // bounds don't reflect true visibility.
-                bool onscreen = element.SkipViewportCull || viewport.IntersectsWith(element.Bounds);
-                element.ResolveVisualStateFromDrain(snap: !onscreen);
+                continue;
             }
 
-            _visualStateDirtyList.Clear();
+            // Offscreen: snap to avoid wasting animations on invisible pixels.
+            // SkipViewportCull elements (e.g. transformed subtrees) always animate since their
+            // bounds don't reflect true visibility.
+            bool onscreen = element.SkipViewportCull || viewport.IntersectsWith(element.Bounds);
+            element.ResolveVisualStateInternal(snap: !onscreen);
         }
-        finally
-        {
-            _updatingVisualStates = false;
-        }
+
+        _visualStateDirtyList.Clear();
     }
 
     /// <summary>
-    /// Performs layout measurement and arrangement for the window content.
+    /// Runs the update pass for the window content: reconciles queued visual-state
+    /// invalidations, then performs measure/arrange when layout is dirty.
     /// </summary>
     public void PerformLayout()
     {
@@ -1692,8 +1672,8 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             return;
         }
 
-        // Drain queued visual-state invalidations before layout reads state-dependent properties
-        // (e.g. a style trigger may adjust size/padding based on IsEnabled).
+        // Reconcile queued visual-state invalidations before layout reads state-dependent
+        // properties (e.g. a style trigger may adjust size/padding based on IsEnabled).
         using (profiling ? ProfilerMarkers.VisualStateUpdate.Auto() : default)
         {
             UpdateVisualStates();
@@ -1936,19 +1916,25 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     public override void InvalidateMeasure()
     {
         base.InvalidateMeasure();
-        RequestLayout();
+        RequestUpdatePass();
     }
 
     /// <summary>
-    /// Invalidates arrangement and schedules a layout pass.
+    /// Invalidates arrangement and schedules an update pass.
     /// </summary>
     public override void InvalidateArrange()
     {
         base.InvalidateArrange();
-        RequestLayout();
+        RequestUpdatePass();
     }
 
-    internal void RequestLayout()
+    /// <summary>
+    /// Schedules the pre-render update pass: visual-state update, then measure/arrange when
+    /// layout is dirty, then a render. Both layout invalidation and visual-state invalidation
+    /// funnel here - the visual-state update is the first step of the pass, not a separate
+    /// pipeline stage.
+    /// </summary>
+    internal void RequestUpdatePass()
     {
         var dispatcher = ApplicationDispatcher;
         if (dispatcher == null)
@@ -1958,12 +1944,12 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             return;
         }
 
-        _cachedLayoutAndRender ??= () =>
+        _cachedUpdatePass ??= () =>
         {
             PerformLayout();
             RequestRender();
         };
-        (dispatcher as IDispatcherCore)?.PostMerged(_layoutMergeKey, _cachedLayoutAndRender, DispatcherPriority.Layout);
+        (dispatcher as IDispatcherCore)?.PostMerged(_updatePassMergeKey, _cachedUpdatePass, DispatcherPriority.Layout);
     }
 
     internal void RequestRender()
@@ -2205,6 +2191,16 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
     internal void RenderFrame(IWindowSurface surface)
     {
+        // Reentrant paint (e.g. a cross-thread sent WM_PAINT dispatched while this frame is
+        // still open, as with a window hosted in another process's tree) would nest
+        // BeginFrame on the cached context and corrupt the backend's begin/end pairing.
+        // Skip and repaint on the next dispatcher cycle instead.
+        if (_renderFrameActive)
+        {
+            RequestRender();
+            return;
+        }
+
         // Some platforms can render before Loaded is raised due to Run/Show/Dispatcher ordering.
         // Ensure Loaded is raised as soon as the dispatcher is available, and always before FirstFrameRendered.
         if (!_loadedRaised && Application.IsRunning && Application.Current.Dispatcher != null)
@@ -2224,7 +2220,15 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             _cachedRenderTarget = target;
         }
 
-        RenderFrameCore(target, clientSize);
+        _renderFrameActive = true;
+        try
+        {
+            RenderFrameCore(target, clientSize);
+        }
+        finally
+        {
+            _renderFrameActive = false;
+        }
     }
 
     internal void RenderFrameToSurface(IRenderSurface surface)
@@ -2676,7 +2680,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             Element = adorner
         });
 
-        RequestLayout();
+        RequestUpdatePass();
         RequestRender();
     }
 
@@ -2688,7 +2692,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             {
                 _adorners[i].Element.Parent = null;
                 _adorners.RemoveAt(i);
-                RequestLayout();
+                RequestUpdatePass();
                 RequestRender();
                 return true;
             }
@@ -2712,7 +2716,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
         if (removed > 0)
         {
-            RequestLayout();
+            RequestUpdatePass();
             RequestRender();
         }
 
@@ -2732,7 +2736,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         }
 
         _adorners.Clear();
-        RequestLayout();
+        RequestUpdatePass();
         RequestRender();
     }
 

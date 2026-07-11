@@ -12,11 +12,35 @@ namespace Aprillz.MewUI.Controls;
 public abstract class Element : MewObject
 {
     private Element? _cachedVisualRoot;
-    private bool _visualRootCacheValid;
-    private bool _dpiCacheValid;
+    private int _visualRootCacheVersion = -1;
+    private int _dpiCacheVersion = -1;
     private uint _cachedDpi;
+
+    // Version of this element's ancestor context. Bumped for the whole subtree when the
+    // parent chain changes; caches resolved through that chain stamp it and re-resolve on mismatch.
+    private int _contextVersion;
+
+    // _contextVersion at the time inherited values were last cached. A mismatch means the
+    // cached entries came from a previous chain and must be flushed before the next resolve.
+    private int _inheritedCacheVersion = -1;
+
+    internal int ContextVersion => _contextVersion;
     private Size _lastMeasureConstraint;
     private bool _hasMeasureConstraint;
+
+    private protected override bool IsInheritedCacheCurrent() => _inheritedCacheVersion == _contextVersion;
+
+    private void EnsureInheritedEpoch()
+    {
+        if (_inheritedCacheVersion != _contextVersion)
+        {
+            if (HasPropertyStore)
+            {
+                PropertyStore.ClearAllInherited();
+            }
+            _inheritedCacheVersion = _contextVersion;
+        }
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     protected static bool Set<T>(ref T field, T value)
@@ -74,6 +98,14 @@ public abstract class Element : MewObject
         {
             if (field != value)
             {
+                // Normalize a direct non-null to non-null reassignment into detach then attach,
+                // so no caller can bypass detach-side context handling (focus unwinding,
+                // style release, visual-root notifications).
+                if (field != null && value != null)
+                {
+                    Parent = null;
+                }
+
                 var oldRoot = FindVisualRoot();
 
                 // Detaching: release window-scoped state (focus) while the parent chain is still intact,
@@ -84,8 +116,7 @@ public abstract class Element : MewObject
                 }
 
                 field = value;
-                InvalidateVisualRootCacheDeep();
-                ClearDpiCacheDeep();
+                BumpContextVersionDeep();
                 OnParentChanged();
 
                 // A subtree already dirty (new elements default dirty, or invalidated while
@@ -112,6 +143,38 @@ public abstract class Element : MewObject
             }
         }
     }
+
+    private Element? _contextParentOverride;
+
+    /// <summary>
+    /// Optional resolution-context parent for elements visually hosted outside their
+    /// conceptual owner (e.g. overlay-hosted content owned by an element deeper in the tree).
+    /// Style and inherited-property resolution divert through it; layout, DPI, and
+    /// visual-root resolution keep following <see cref="Parent"/>.
+    /// </summary>
+    internal Element? ContextParentOverride
+    {
+        get => _contextParentOverride;
+        set
+        {
+            if (_contextParentOverride != value)
+            {
+                _contextParentOverride = value;
+
+                // Invalidate context-stamped caches resolved through the old chain, then
+                // eagerly diff cached inherited values so layout/observers react even when
+                // the override changes while the element stays attached (owner switch).
+                BumpContextVersionDeep();
+                RefreshInheritedSubtree();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Next element in the context resolution chain: the override when set,
+    /// otherwise the visual parent.
+    /// </summary>
+    internal Element? ContextParent => _contextParentOverride ?? Parent;
 
     /// <summary>
     /// Attaches a child element to this element. Use this in derived controls
@@ -362,7 +425,7 @@ public abstract class Element : MewObject
     /// </summary>
     public Element? FindVisualRoot()
     {
-        if (_visualRootCacheValid)
+        if (_visualRootCacheVersion == _contextVersion)
         {
             return _cachedVisualRoot;
         }
@@ -383,7 +446,7 @@ public abstract class Element : MewObject
         }
 
         _cachedVisualRoot = root;
-        _visualRootCacheValid = true;
+        _visualRootCacheVersion = _contextVersion;
         return root;
     }
 
@@ -394,7 +457,7 @@ public abstract class Element : MewObject
 
     internal uint GetDpiCached()
     {
-        if (_dpiCacheValid)
+        if (_dpiCacheVersion == _contextVersion)
         {
             return _cachedDpi;
         }
@@ -415,22 +478,23 @@ public abstract class Element : MewObject
         }
 
         _cachedDpi = dpi;
-        _dpiCacheValid = true;
+        _dpiCacheVersion = _contextVersion;
         return dpi;
     }
 
     internal double GetDpiScaleCached() => GetDpiCached() / 96.0;
 
-    internal void ClearDpiCache() => _dpiCacheValid = false;
+    internal void ClearDpiCache() => _dpiCacheVersion = -1;
 
-    internal void ClearDpiCacheDeep() => VisualTree.Visit(this, e => e.ClearDpiCache());
+    internal void ClearDpiCacheDeep() => VisualTree.Visit(this, static element => element.ClearDpiCache());
 
-    private void InvalidateVisualRootCacheDeep()
+    private void BumpContextVersionDeep()
     {
-        VisualTree.Visit(this, static e =>
+        VisualTree.Visit(this, static element =>
         {
-            e._visualRootCacheValid = false;
-            e._cachedVisualRoot = null;
+            element._contextVersion++;
+            // Drop the root reference so a detached subtree does not keep a closed Window alive.
+            element._cachedVisualRoot = null;
         });
     }
 
@@ -552,11 +616,13 @@ public abstract class Element : MewObject
     /// <inheritdoc/>
     protected override T ResolveInheritedValue<T>(MewProperty<T> property)
     {
-        for (var p = Parent; p != null; p = p.Parent)
+        EnsureInheritedEpoch();
+
+        for (var ancestor = ContextParent; ancestor != null; ancestor = ancestor.ContextParent)
         {
-            if (p.HasPropertyStore && p.PropertyStore.HasOwnValue(property.Id))
+            if (ancestor.HasPropertyStore && ancestor.PropertyStore.HasOwnValue(property.Id))
             {
-                var value = p.PropertyStore.GetValue(property);
+                var value = ancestor.PropertyStore.GetValue(property);
                 PropertyStore.SetInherited(property, value);
                 return value;
             }
@@ -572,17 +638,89 @@ public abstract class Element : MewObject
     /// </summary>
     internal object? ResolveInheritedValueBoxed(MewProperty property)
     {
-        for (var p = Parent; p != null; p = p.Parent)
+        EnsureInheritedEpoch();
+
+        for (var ancestor = ContextParent; ancestor != null; ancestor = ancestor.ContextParent)
         {
-            if (p.HasPropertyStore && p.PropertyStore.HasOwnValue(property.Id))
+            if (ancestor.HasPropertyStore && ancestor.PropertyStore.HasOwnValue(property.Id))
             {
-                var value = p.PropertyStore.GetBoxedValue(property);
+                var value = ancestor.PropertyStore.GetBoxedValue(property);
                 PropertyStore.SetInheritedBoxed(property, value);
                 return value;
             }
         }
 
         return property.GetBoxedDefaultForType(PropertyStore.OwnerType);
+    }
+
+    /// <summary>
+    /// Re-resolves cached inherited values for this subtree against the current context chain,
+    /// invalidating layout/render and notifying observers for values that actually changed.
+    /// The lazy epoch flush alone cannot do that: nothing re-reads a property whose change
+    /// must wake layout (Measure short-circuits on same constraints) or a binding.
+    /// </summary>
+    internal void RefreshInheritedSubtree()
+    {
+        List<int> inheritedIds = new();
+        List<object?> oldValues = new();
+
+        VisualTree.Visit(this, element =>
+        {
+            if (!element.HasPropertyStore)
+            {
+                return;
+            }
+
+            inheritedIds.Clear();
+            element.PropertyStore.GetInheritedPropertyIds(inheritedIds);
+            if (inheritedIds.Count == 0)
+            {
+                return;
+            }
+
+            // Capture all old values first: the first re-resolve flushes the element's
+            // whole inherited epoch, which would destroy the remaining old entries.
+            oldValues.Clear();
+            for (int i = 0; i < inheritedIds.Count; i++)
+            {
+                var property = MewPropertyRegistry.GetProperty(inheritedIds[i]);
+                oldValues.Add(property != null ? element.PropertyStore.GetBoxedValue(property) : null);
+            }
+
+            for (int i = 0; i < inheritedIds.Count; i++)
+            {
+                var property = MewPropertyRegistry.GetProperty(inheritedIds[i]);
+                if (property == null)
+                {
+                    continue;
+                }
+
+                object? newValue = element.ResolveInheritedValueBoxed(property);
+                if (Equals(oldValues[i], newValue))
+                {
+                    continue;
+                }
+
+                if (property.AffectsLayout)
+                {
+                    element.InvalidateMeasure();
+                }
+                else if (property.AffectsRender)
+                {
+                    element.InvalidateVisual();
+                }
+
+                if (element is Controls.Control control)
+                {
+                    control.InvalidateFontCache(property);
+                }
+
+                if (element.HasChangeObservers(property.Id))
+                {
+                    element.NotifyObserversBoxed(property, oldValues[i], newValue);
+                }
+            }
+        });
     }
 
     private Size ApplyLayoutRounding(Size size)

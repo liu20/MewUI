@@ -15,6 +15,9 @@ namespace Aprillz.MewUI.Platform.Win32;
 internal sealed class Win32WindowBackend : IWindowBackend
 {
     private static readonly EnvDebugLogger ImeLogger = new("MEWUI_IME_DEBUG", "[Win32][IME]");
+    private const int GwlHwndParent = -8;
+    private static readonly object HiddenTaskbarOwnerLock = new();
+    private static nint s_hiddenTaskbarOwner;
 
     private readonly Win32PlatformHost _host;
 
@@ -28,6 +31,7 @@ internal sealed class Win32WindowBackend : IWindowBackend
     private double _opacity = 1.0;
     private bool _allowsTransparency;
     private nint _dropTargetCom;
+    private nint _nativeOwnerHandle;
 
     private readonly TextInputSuppression _textInputSuppression = new();
     private nint _savedImeContext;
@@ -294,14 +298,24 @@ internal sealed class Win32WindowBackend : IWindowBackend
         if (value)
         {
             exStyle |= WS_EX_APPWINDOW;
-            exStyle &= ~WS_EX_TOOLWINDOW;
         }
         else
+        {
+            exStyle &= ~WS_EX_APPWINDOW;
+        }
+
+        if (Window.IsToolWindow && !Window.AllowsTransparency)
         {
             exStyle |= WS_EX_TOOLWINDOW;
             exStyle &= ~WS_EX_APPWINDOW;
         }
+        else
+        {
+            exStyle &= ~WS_EX_TOOLWINDOW;
+        }
+
         User32.SetWindowLongPtr(Handle, GWL_EXSTYLE, (nint)exStyle);
+        ApplyOwnerHandle();
         User32.SetWindowPos(Handle, 0, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED);
     }
 
@@ -806,7 +820,13 @@ internal sealed class Win32WindowBackend : IWindowBackend
                 return User32.DefWindowProc(Handle, msg, wParam, lParam);
 
             case WindowMessages.WM_SETFOCUS:
-                User32.CreateCaret(Handle, 0, 1, 20);
+                // The system caret exists only so caret-following IMEs and accessibility
+                // tools can track the input position; the visible caret is drawn by MewUI.
+                // HandleImeStartComposition creates it late for mid-window focus moves.
+                if (Window.FocusManager.FocusedElement is ITextInputClient)
+                {
+                    CreateInvisibleSystemCaret();
+                }
                 return 0;
 
             case WindowMessages.WM_KILLFOCUS:
@@ -899,6 +919,7 @@ internal sealed class Win32WindowBackend : IWindowBackend
         // AttachBackend calls SetAllowDrop(true) automatically if Window.AllowDrop was already set,
         // so we don't need to register the drop target here.
 
+        ApplyOwnerHandle();
         ApplyResizeMode();
         EnsureLayeredStyleIfNeeded();
         ValidateTransparencySupport();
@@ -1398,11 +1419,17 @@ internal sealed class Win32WindowBackend : IWindowBackend
             exStyle |= WindowStylesEx.WS_EX_LAYERED;
         }
 
-        // Tool/utility window: thin caption + excluded from the taskbar (it floats above its owner). Distinct
-        // from AllowsTransparency (frameless); the two are mutually exclusive so guard on the else path above.
+        if (Window.ShowInTaskbar)
+        {
+            exStyle |= WindowStylesEx.WS_EX_APPWINDOW;
+        }
+
+        // Tool/utility window: thin caption + excluded from the taskbar. ShowInTaskbar=false
+        // is handled separately by an owner HWND so normal dialog chrome stays unchanged.
         if (Window.IsToolWindow && !Window.AllowsTransparency)
         {
             exStyle |= WindowStylesEx.WS_EX_TOOLWINDOW;
+            exStyle &= ~WindowStylesEx.WS_EX_APPWINDOW;
         }
 
         // Input-transparent overlay (drag preview): clicks pass through (WS_EX_TRANSPARENT) and the window
@@ -1455,6 +1482,13 @@ internal sealed class Win32WindowBackend : IWindowBackend
 
         _host.UnregisterWindow(Handle);
         Window.DisposeVisualTree();
+
+        if (_invisibleCaretBitmap != 0)
+        {
+            Gdi32.DeleteObject(_invisibleCaretBitmap);
+            _invisibleCaretBitmap = 0;
+        }
+
         Handle = 0;
     }
 
@@ -1767,6 +1801,32 @@ internal sealed class Win32WindowBackend : IWindowBackend
             PixelWidth = pixelWidth;
             PixelHeight = pixelHeight;
             DpiScale = dpiScale;
+        }
+    }
+
+    // All-zero monochrome caret bitmap: the system renders a bitmap caret by XOR-ing it,
+    // so zero bits draw nothing even when an IME calls ShowCaret on the focused window.
+    private nint _invisibleCaretBitmap;
+
+    /// <summary>Creates the window's system caret with an invisible bitmap so caret-following
+    /// IMEs and accessibility tools get a position anchor without anything blinking on screen.</summary>
+    private unsafe void CreateInvisibleSystemCaret()
+    {
+        if (_invisibleCaretBitmap == 0)
+        {
+            // 1bpp 1x20: scanlines are WORD aligned, so 20 rows take 2 bytes each, all zero.
+            byte* bits = stackalloc byte[40];
+            new Span<byte>(bits, 40).Clear();
+            _invisibleCaretBitmap = Gdi32.CreateBitmap(1, 20, 1, 1, (nint)bits);
+        }
+
+        if (_invisibleCaretBitmap != 0)
+        {
+            User32.CreateCaret(Handle, _invisibleCaretBitmap, 0, 0);
+        }
+        else
+        {
+            User32.CreateCaret(Handle, 0, 1, 20);
         }
     }
 
@@ -2100,7 +2160,7 @@ internal sealed class Win32WindowBackend : IWindowBackend
         double dpiScale = GetDpiForWindow(Handle) / 96.0;
         int grip = Math.Max(1, (int)(12 * dpiScale)); // shadow extent area
 
-        if (Window.WindowState != Controls.WindowState.Maximized)
+        if (Window.WindowState != Controls.WindowState.Maximized && Window.WindowSize.IsResizable)
         {
             bool left = pt.x < grip;
             bool right = pt.x >= w - grip;
@@ -2270,6 +2330,10 @@ internal sealed class Win32WindowBackend : IWindowBackend
         {
             if (Window.FocusManager.FocusedElement is ITextCompositionClient client)
             {
+                // WM_SETFOCUS creates the caret only when a text input already had focus;
+                // focus may have moved to one afterwards, so ensure it exists before the
+                // IME starts tracking it. CreateCaret replaces any existing caret.
+                CreateInvisibleSystemCaret();
                 client.HandleTextCompositionStart(args);
                 PositionImeWindow(client);
             }
@@ -2597,13 +2661,13 @@ internal sealed class Win32WindowBackend : IWindowBackend
 
     public void SetOwner(nint ownerHandle)
     {
+        _nativeOwnerHandle = ownerHandle;
         if (Handle == 0)
         {
             return;
         }
 
-        const int GWL_HWNDPARENT = -8;
-        User32.SetWindowLongPtr(Handle, GWL_HWNDPARENT, ownerHandle);
+        ApplyOwnerHandle();
 
         // If the owner is topmost, an owned (non-topmost) window sits in the normal z-order band, which is
         // entirely below the topmost band, so it would be hidden behind the owner. Match the owner's topmost
@@ -2623,6 +2687,47 @@ internal sealed class Win32WindowBackend : IWindowBackend
             {
                 User32.SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             }
+        }
+    }
+
+    private void ApplyOwnerHandle()
+    {
+        if (Handle == 0)
+        {
+            return;
+        }
+
+        nint effectiveOwner = Window.ShowInTaskbar
+            ? 0
+            : (_nativeOwnerHandle != 0 ? _nativeOwnerHandle : EnsureHiddenTaskbarOwner());
+
+        User32.SetWindowLongPtr(Handle, GwlHwndParent, effectiveOwner);
+    }
+
+    private static nint EnsureHiddenTaskbarOwner()
+    {
+        lock (HiddenTaskbarOwnerLock)
+        {
+            if (s_hiddenTaskbarOwner != 0 && User32.IsWindow(s_hiddenTaskbarOwner))
+            {
+                return s_hiddenTaskbarOwner;
+            }
+
+            s_hiddenTaskbarOwner = User32.CreateWindowEx(
+                0,
+                Win32PlatformHost.WindowClassName,
+                "AprillzMewUI_TaskbarOwner",
+                WindowStyles.WS_OVERLAPPED | WindowStyles.WS_DISABLED,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                Kernel32.GetModuleHandle(null),
+                0);
+
+            return s_hiddenTaskbarOwner;
         }
     }
 

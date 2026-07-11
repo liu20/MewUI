@@ -50,6 +50,16 @@ internal sealed class X11WindowBackend : IWindowBackend
     private DragDropEffects _xdndLastEffect;
     private bool _allowDrop;
     private long _lastRenderTick;
+    private bool _resizeRenderPending;
+    private bool _hasPendingConfigure;
+    private double _pendingConfigureWidthDip;
+    private double _pendingConfigureHeightDip;
+    private nint _netWmSyncRequestAtom;
+    private nint _netWmSyncRequestCounterAtom;
+    // EWMH frame-sync counter (_NET_WM_SYNC_REQUEST). 0 when the SYNC extension is unavailable.
+    private nint _frameSyncCounter;
+    private bool _hasPendingFrameSyncValue;
+    private long _pendingFrameSyncValue;
     private X11GLVisualInfo? _glVisualInfo;
 
     private readonly ClickCountTracker _clickCountTracker = new();
@@ -584,8 +594,10 @@ internal sealed class X11WindowBackend : IWindowBackend
         const int AllocNone = 0;
         const ulong CWBackPixel = 1UL << 1;
         const ulong CWBorderPixel = 1UL << 3;
+        const ulong CWBitGravity = 1UL << 4;
         const ulong CWEventMask = 1UL << 11;
         const ulong CWColormap = 1UL << 13;
+        const int NorthWestGravity = 1;
 
         long windowEventMask =
             X11EventMask.ExposureMask | X11EventMask.StructureNotifyMask |
@@ -598,22 +610,27 @@ internal sealed class X11WindowBackend : IWindowBackend
         {
             colormap = NativeX11.XCreateColormap(Display, root, chosen.Visual, AllocNone),
             event_mask = (nint)windowEventMask,
+            // A window whose visual depth differs from its parent's needs an explicit border
+            // pixel, otherwise XCreateWindow fails with BadMatch.
+            border_pixel = 0,
+            // Preserve existing content on resize. The default (ForgetGravity) makes the server
+            // clear the WHOLE window to the background on every resize step, which flickers;
+            // with NorthWest gravity only newly grown regions receive the background fill.
+            bit_gravity = NorthWestGravity,
         };
 
-        ulong valueMask = CWEventMask | CWColormap;
+        ulong valueMask = CWEventMask | CWColormap | CWBorderPixel | CWBackPixel | CWBitGravity;
         if (_allowsTransparency)
         {
             attrs.background_pixel = 0;
-            attrs.border_pixel = 0;
-            valueMask |= CWBackPixel | CWBorderPixel;
         }
         else
         {
-            // Opaque window: with no background pixel the server leaves the client area undefined from map until
-            // the first paint, briefly showing the desktop behind it. Seed the same color the window clears to on
-            // paint, so the surface is filled on map and any resize-edge fill is effectively invisible.
+            // Seed the background with the color the window clears to on paint, so resize-grown
+            // regions and the pre-first-frame window show background instead of black (XWayland
+            // zero-fills fresh buffers). Safe now that opaque windows get a 24-bit visual; the
+            // earlier "white flash" came from packing an alpha-less pixel into an ARGB visual.
             attrs.background_pixel = PackVisualPixel(Window.EffectiveOpaqueBackground, chosen.RedMask, chosen.GreenMask, chosen.BlueMask);
-            valueMask |= CWBackPixel;
         }
 
         // Input-transparent overlay: override-redirect = WM-unmanaged (no decoration/focus/taskbar), app-raised.
@@ -672,9 +689,20 @@ internal sealed class X11WindowBackend : IWindowBackend
         _xdndSelectionAtom = NativeX11.XInternAtom(Display, "XdndSelection", false);
         _textUriListAtom = NativeX11.XInternAtom(Display, "text/uri-list", false);
         _xdndSelectionPropertyAtom = NativeX11.XInternAtom(Display, "MEWUI_XDND_SELECTION", false);
+        _netWmSyncRequestAtom = NativeX11.XInternAtom(Display, "_NET_WM_SYNC_REQUEST", false);
+        _netWmSyncRequestCounterAtom = NativeX11.XInternAtom(Display, "_NET_WM_SYNC_REQUEST_COUNTER", false);
+        InitializeFrameSync();
         if (_wmProtocolsAtom != 0 && _wmDeleteWindowAtom != 0)
         {
-            NativeX11.XSetWMProtocols(Display, Handle, ref _wmDeleteWindowAtom, 1);
+            if (_frameSyncCounter != 0)
+            {
+                Span<nint> protocols = [_wmDeleteWindowAtom, _netWmSyncRequestAtom];
+                NativeX11.XSetWMProtocols(Display, Handle, ref protocols[0], protocols.Length);
+            }
+            else
+            {
+                NativeX11.XSetWMProtocols(Display, Handle, ref _wmDeleteWindowAtom, 1);
+            }
         }
 
         ApplyXdndAware();
@@ -1253,11 +1281,20 @@ internal sealed class X11WindowBackend : IWindowBackend
                 var cfg = ev.xconfigure;
                 var widthDip = cfg.width / Window.DpiScale;
                 var heightDip = cfg.height / Window.DpiScale;
-                Window.SetClientSizeDip(widthDip, heightDip);
-                Window.PerformLayout();
-                Window.Invalidate();
-                Window.RaiseClientSizeChanged(widthDip, heightDip);
+                var compareSize = _hasPendingConfigure
+                    ? new Size(_pendingConfigureWidthDip, _pendingConfigureHeightDip)
+                    : Window.ClientSize;
+                if (Math.Abs(compareSize.Width - widthDip) < 0.01 &&
+                    Math.Abs(compareSize.Height - heightDip) < 0.01)
+                {
+                    break;
+                }
+
+                _pendingConfigureWidthDip = widthDip;
+                _pendingConfigureHeightDip = heightDip;
+                _hasPendingConfigure = true;
                 NeedsRender = true;
+                _resizeRenderPending = true;
                 break;
 
             case ClientMessage:
@@ -1285,6 +1322,20 @@ internal sealed class X11WindowBackend : IWindowBackend
                     if (_xdndLeaveAtom != 0 && client.message_type == _xdndLeaveAtom)
                     {
                         HandleXdndLeave();
+                        break;
+                    }
+
+                    if (_frameSyncCounter != 0 &&
+                        _wmProtocolsAtom != 0 &&
+                        client.message_type == _wmProtocolsAtom &&
+                        client.format == 32 &&
+                        (nint)client.data[0] == _netWmSyncRequestAtom)
+                    {
+                        // data[1] is the timestamp; data[2]/data[3] carry the value the WM waits
+                        // for. Only the latest value matters: raising the counter to it also
+                        // acknowledges earlier requests coalesced in the same event batch.
+                        _pendingFrameSyncValue = ((long)client.data[3] << 32) | (uint)client.data[2];
+                        _hasPendingFrameSyncValue = true;
                         break;
                     }
 
@@ -1407,12 +1458,17 @@ internal sealed class X11WindowBackend : IWindowBackend
         if (Handle == 0 || Display == 0)
         {
             NeedsRender = false;
+            _resizeRenderPending = false;
+            _hasPendingConfigure = false;
             return;
         }
 
         // Simple throttle to reduce CPU/GPU pressure on software-rendered VMs.
+        // Resize invalidations are already coalesced by the platform loop, so let the
+        // next pass render immediately without rendering every ConfigureNotify event.
         long now = Environment.TickCount64;
-        if (now - _lastRenderTick < 16)
+        bool forceResizeRender = _resizeRenderPending;
+        if (!forceResizeRender && now - _lastRenderTick < 16)
         {
             return;
         }
@@ -1420,6 +1476,7 @@ internal sealed class X11WindowBackend : IWindowBackend
         _lastRenderTick = now;
 
         NeedsRender = false;
+        _resizeRenderPending = false;
         RenderNowCore();
     }
 
@@ -1428,6 +1485,11 @@ internal sealed class X11WindowBackend : IWindowBackend
         if (!NeedsRender)
         {
             return int.MaxValue;
+        }
+
+        if (_resizeRenderPending)
+        {
+            return 0;
         }
 
         long now = Environment.TickCount64;
@@ -1448,6 +1510,7 @@ internal sealed class X11WindowBackend : IWindowBackend
         }
 
         NeedsRender = false;
+        _resizeRenderPending = false;
         RenderNowCore();
     }
 
@@ -2286,7 +2349,15 @@ internal sealed class X11WindowBackend : IWindowBackend
             return;
         }
 
+        bool clientSizeChanged = ApplyPendingConfigure();
         Window.PerformLayout();
+        if (clientSizeChanged)
+        {
+            // Raise after layout so handlers observe up-to-date element bounds (same order as Win32).
+            var clientSize = Window.ClientSize;
+            Window.RaiseClientSizeChanged(clientSize.Width, clientSize.Height);
+        }
+
         if (_glVisualInfo is not { } visualInfo)
         {
             return;
@@ -2295,8 +2366,93 @@ internal sealed class X11WindowBackend : IWindowBackend
         var client = Window.ClientSize;
         int pixelWidth = (int)Math.Max(1, Math.Ceiling(client.Width * Window.DpiScale));
         int pixelHeight = (int)Math.Max(1, Math.Ceiling(client.Height * Window.DpiScale));
-        var surface = new X11GLWindowSurface(Display, Handle, visualInfo, Window.DpiScale, pixelWidth, pixelHeight);
+        // Resize frames present immediately: the WM paces the resize (sync counter or pointer
+        // grab), so waiting for vblank here only adds latency between resize steps.
+        bool preferImmediatePresent = clientSizeChanged || _hasPendingFrameSyncValue;
+        var surface = new X11GLWindowSurface(Display, Handle, visualInfo, Window.DpiScale, pixelWidth, pixelHeight, preferImmediatePresent);
         Window.RenderFrame(surface);
+        CompleteFrameSync();
+    }
+
+    /// <summary>Applies the latest coalesced ConfigureNotify size, returning true when the client size changed.</summary>
+    private bool ApplyPendingConfigure()
+    {
+        if (!_hasPendingConfigure)
+        {
+            return false;
+        }
+
+        _hasPendingConfigure = false;
+        double widthDip = _pendingConfigureWidthDip;
+        double heightDip = _pendingConfigureHeightDip;
+
+        var oldClientSize = Window.ClientSize;
+        if (Math.Abs(oldClientSize.Width - widthDip) < 0.01 &&
+            Math.Abs(oldClientSize.Height - heightDip) < 0.01)
+        {
+            return false;
+        }
+
+        Window.SetClientSizeDip(widthDip, heightDip);
+        return true;
+    }
+
+    /// <summary>Creates the XSync counter advertised via _NET_WM_SYNC_REQUEST_COUNTER; no-op when the SYNC extension is unavailable.</summary>
+    private void InitializeFrameSync()
+    {
+        if (_netWmSyncRequestAtom == 0 || _netWmSyncRequestCounterAtom == 0 || _cardinalAtom == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            if (XSyncExt.XSyncQueryExtension(Display, out _, out _) == 0 ||
+                XSyncExt.XSyncInitialize(Display, out _, out _) == 0)
+            {
+                return;
+            }
+
+            _frameSyncCounter = XSyncExt.XSyncCreateCounter(Display, XSyncValue.FromInt64(0));
+        }
+        catch (DllNotFoundException)
+        {
+            return;
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return;
+        }
+
+        if (_frameSyncCounter == 0)
+        {
+            return;
+        }
+
+        unsafe
+        {
+            nint counter = _frameSyncCounter;
+            NativeX11.XChangeProperty(Display, Handle, _netWmSyncRequestCounterAtom, _cardinalAtom,
+                32, 0 /* PropModeReplace */, (nint)(&counter), 1);
+        }
+    }
+
+    /// <summary>Signals the WM that the frame for the latest _NET_WM_SYNC_REQUEST has been presented.</summary>
+    private void CompleteFrameSync()
+    {
+        if (!_hasPendingFrameSyncValue)
+        {
+            return;
+        }
+
+        _hasPendingFrameSyncValue = false;
+        if (_frameSyncCounter == 0 || Display == 0)
+        {
+            return;
+        }
+
+        XSyncExt.XSyncSetCounter(Display, _frameSyncCounter, XSyncValue.FromInt64(_pendingFrameSyncValue));
+        NativeX11.XFlush(Display);
     }
 
     public void Dispose()
@@ -2329,6 +2485,14 @@ internal sealed class X11WindowBackend : IWindowBackend
         if (handle == 0 || Display == 0)
         {
             return;
+        }
+
+        if (_frameSyncCounter != 0)
+        {
+            // Release a WM still waiting on the last sync request before destroying the counter.
+            CompleteFrameSync();
+            XSyncExt.XSyncDestroyCounter(Display, _frameSyncCounter);
+            _frameSyncCounter = 0;
         }
 
         try
@@ -2663,7 +2827,9 @@ internal sealed class X11WindowBackend : IWindowBackend
 
         public X11GLVisualInfo VisualInfo { get; }
 
-        public X11GLWindowSurface(nint display, nint window, X11GLVisualInfo visualInfo, double dpiScale, int pixelWidth, int pixelHeight)
+        public bool PreferImmediatePresent { get; }
+
+        public X11GLWindowSurface(nint display, nint window, X11GLVisualInfo visualInfo, double dpiScale, int pixelWidth, int pixelHeight, bool preferImmediatePresent)
         {
             Display = display;
             Window = window;
@@ -2671,6 +2837,7 @@ internal sealed class X11WindowBackend : IWindowBackend
             DpiScale = dpiScale <= 0 ? 1.0 : dpiScale;
             PixelWidth = pixelWidth;
             PixelHeight = pixelHeight;
+            PreferImmediatePresent = preferImmediatePresent;
         }
     }
 }
