@@ -1,17 +1,15 @@
-using Aprillz.MewUI.Controls.Text;
 using Aprillz.MewUI.Input;
-using Aprillz.MewUI.Rendering;
 
 namespace Aprillz.MewUI.Controls;
 
-public sealed class NumericUpDown : RangeBase, IVisualTreeHost
+public sealed class NumericUpDown : RangeBase
 {
-    private enum ButtonPart
-    {
-        None,
-        Decrement,
-        Increment
-    }
+    /// <summary>Template part name for the editable text box; register a TextBox under this name to receive the edit pipeline.</summary>
+    public const string PART_TEXT_BOX = "PART_TextBox";
+
+    // Default-template-only part: the TextBlock shown while not editing. Not a public contract
+    // because custom templates are free to omit it (see UpdateEditMode).
+    internal const string PART_DISPLAY_TEXT = "PART_DisplayText";
 
     public static readonly MewProperty<string> FormatProperty =
         MewProperty<string>.Register<NumericUpDown>(nameof(Format), "0.##", MewPropertyOptions.AffectsLayout,
@@ -32,16 +30,21 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
 
     public static readonly MewProperty<bool> IsEditingProperty = IsEditingPropertyKey.Property;
 
+    private static readonly MewPropertyKey<string> DisplayTextPropertyKey =
+        MewProperty<string>.RegisterReadOnly<NumericUpDown>(nameof(DisplayText), "");
+
+    public static readonly MewProperty<string> DisplayTextProperty = DisplayTextPropertyKey.Property;
+
     private void OnFormatChanged()
     {
-        _measureCache.Invalidate();
+        UpdateDisplayText();
         UpdateTextBoxFromValue();
     }
 
     private void OnIsIntegerChanged()
     {
         CoerceValue(ValueProperty);
-        _measureCache.Invalidate();
+        UpdateDisplayText();
         UpdateTextBoxFromValue();
     }
 
@@ -53,24 +56,16 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
             ? Math.Max(1, Math.Round(Step, MidpointRounding.AwayFromZero))
             : Step;
 
-    private TextMeasureCache _measureCache;
-    private string? _cachedDisplayText;
-    private double _cachedDisplayValue = double.NaN;
-    private string? _cachedDisplayFormat;
-    private ButtonPart _hoverPart;
-    private ButtonPart _pressedPart;
-    private readonly TextBox _textBox;
+    /// <summary>Increases the value by one effective step.</summary>
+    public void StepUp() => Value += GetEffectiveStep();
+
+    /// <summary>Decreases the value by one effective step.</summary>
+    public void StepDown() => Value -= GetEffectiveStep();
+
+    private TextBlock? _displayPart;
+    private TextBox? _partTextBox;
     private bool _suppressTextBoxUpdate;
     private WheelNotchAccumulator _wheelAccumulator;
-
-    protected override VisualState ComputeVisualState()
-    {
-        var state = base.ComputeVisualState();
-
-        if (_pressedPart != ButtonPart.None)
-            return state with { Flags = state.Flags | VisualStateFlags.Pressed };
-        return state;
-    }
 
     static NumericUpDown()
     {
@@ -79,23 +74,7 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
 
     public NumericUpDown()
     {
-        _textBox = new TextBox
-        {
-            BorderThickness = 0,
-            Padding = new Thickness(0),
-            Background = Color.Transparent,
-            MinHeight = 0,
-            IsVisible = false,
-            IsHitTestVisible = false,
-            // Focus enters via SetIsEditing, not Tab; keeps the control a single tab stop while editing.
-            IsTabStop = false,
-            ImeMode = Input.ImeMode.Disabled
-        };
-        _textBox.TextChanged += OnTextBoxTextChanged;
-        _textBox.KeyDown += OnTextBoxKeyDown;
-        _textBox.LostFocus += OnTextBoxLostFocus;
-
-        AttachChild(_textBox);
+        SetValue(DisplayTextPropertyKey, FormatValue(Value));
     }
 
     public static readonly MewProperty<bool> ChangeOnWheelProperty =
@@ -115,15 +94,18 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
     /// </summary>
     public bool IsEditing => GetValue(IsEditingProperty);
 
+    /// <summary>Gets the formatted value text shown while not editing.</summary>
+    public string DisplayText => GetValue(DisplayTextProperty);
+
     private void SetIsEditing(bool value) => SetValue(IsEditingPropertyKey, value);
 
     /// <summary>
     /// Enters edit mode: shows the TextBox, focuses it and selects all text.
-    /// No-op if already editing or the control is disabled.
+    /// No-op if already editing, the control is disabled, or no editable TextBox part is attached.
     /// </summary>
     public void BeginEdit()
     {
-        if (IsEditing || !IsEffectivelyEnabled)
+        if (_partTextBox == null || IsEditing || !IsEffectivelyEnabled)
         {
             return;
         }
@@ -137,7 +119,7 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
     /// </summary>
     public void CommitEdit()
     {
-        if (!IsEditing)
+        if (_partTextBox == null || !IsEditing)
         {
             return;
         }
@@ -167,7 +149,7 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
     /// </summary>
     public void CancelEdit()
     {
-        if (!IsEditing)
+        if (_partTextBox == null || !IsEditing)
         {
             return;
         }
@@ -201,139 +183,23 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
     protected override void OnThemeChanged(Theme oldTheme, Theme newTheme)
     {
         base.OnThemeChanged(oldTheme, newTheme);
-        _measureCache.Invalidate();
         SyncTextBoxStyle();
     }
 
     protected override void OnEnabledChanged()
     {
         base.OnEnabledChanged();
-        _textBox.IsEnabled = IsEffectivelyEnabled;
+
+        if (_partTextBox != null)
+        {
+            _partTextBox.IsEnabled = IsEffectivelyEnabled;
+        }
     }
 
     protected override void OnValueChanged(double value)
     {
-        _measureCache.Invalidate();
-        InvalidateMeasure();
+        UpdateDisplayText();
         UpdateTextBoxFromValue();
-    }
-
-    protected override Size MeasureContent(Size available)
-    {
-        var factory = GetGraphicsFactory();
-        var font = GetFont(factory);
-        string text = GetDisplayText();
-        var textSize = _measureCache.Measure(factory, GetDpi(), font, text, TextWrapping.NoWrap, 0);
-
-        double buttonAreaWidth = GetButtonAreaWidth();
-        double width = textSize.Width + Padding.HorizontalThickness + buttonAreaWidth;
-        double height = textSize.Height + Padding.VerticalThickness;
-        return new Size(width, height).Inflate(new Thickness(GetBorderVisualInset()));
-    }
-
-    protected override void ArrangeContent(Rect bounds)
-    {
-        base.ArrangeContent(bounds);
-
-        var inner = GetSnappedBorderBounds(bounds).Deflate(new Thickness(GetBorderVisualInset()));
-        double buttonAreaWidth = Math.Min(GetButtonAreaWidth(), inner.Width);
-        var textRect = new Rect(inner.X + Padding.Left, inner.Y + Padding.Top,
-            Math.Max(0, inner.Width - buttonAreaWidth - Padding.HorizontalThickness),
-            Math.Max(0, inner.Height - Padding.VerticalThickness));
-
-        textRect = LayoutRounding.SnapBoundsRectToPixels(textRect, GetDpi() / 96.0);
-        _textBox.Arrange(textRect);
-    }
-
-    protected override void OnRender(IGraphicsContext context)
-    {
-        _textBox.IsEnabled = IsEffectivelyEnabled;
-
-        double radius = CornerRadius;
-
-        var state = CurrentVisualState;
-        bool isEnabled = state.IsEnabled;
-        Color bg = GetValue(BackgroundProperty);
-        Color border = GetValue(BorderBrushProperty);
-
-        var metrics = GetBorderRenderMetrics(Bounds, BorderThickness, radius);
-        var bounds = metrics.Bounds;
-        var borderInset = metrics.UniformThickness;
-        var cornerRadius = metrics.UniformRadius;
-
-        DrawBackgroundAndBorder(context, bounds, bg, border, BorderThickness, radius);
-
-        var inner = bounds.Deflate(new Thickness(borderInset));
-
-        double buttonAreaWidth = Math.Min(GetButtonAreaWidth(), inner.Width);
-        var buttonRect = new Rect(inner.Right - buttonAreaWidth, inner.Y, buttonAreaWidth, inner.Height);
-        var textRect = new Rect(inner.X + Padding.Left, inner.Y + Padding.Top,
-            Math.Max(0, inner.Width - buttonAreaWidth - Padding.HorizontalThickness),
-            Math.Max(0, inner.Height - Padding.VerticalThickness));
-
-        textRect = LayoutRounding.SnapBoundsRectToPixels(textRect, context.DpiScale);
-        buttonRect = LayoutRounding.SnapBoundsRectToPixels(buttonRect, context.DpiScale);
-
-        (var decRect, var incRect) = GetButtonRects();
-
-        Color baseButton = Theme.Palette.ButtonFace;
-        Color hoverButton = Color.Composite(baseButton, Theme.Palette.AccentHoverOverlay);
-        Color pressedButton = Color.Composite(baseButton, Theme.Palette.AccentPressedOverlay);
-        Color disabledButton = Theme.Palette.ButtonDisabledBackground;
-
-        Color decBg = !isEnabled
-            ? disabledButton
-            : _pressedPart == ButtonPart.Decrement ? pressedButton
-            : _hoverPart == ButtonPart.Decrement ? hoverButton
-            : baseButton;
-
-        Color incBg = !isEnabled
-            ? disabledButton
-            : _pressedPart == ButtonPart.Increment ? pressedButton
-            : _hoverPart == ButtonPart.Increment ? hoverButton
-            : baseButton;
-
-        if (buttonRect.Width > 0)
-        {
-            var innerRadius = metrics.UniformInnerRadius;
-            context.Save();
-            context.SetClipRoundedRect(
-                inner,
-                innerRadius,
-                innerRadius);
-
-            context.FillRectangle(decRect, decBg);
-            context.FillRectangle(incRect, incBg);
-
-            if (BorderThickness > 0)
-            {
-                context.DrawLine(new Point(buttonRect.Left, buttonRect.Y), new Point(buttonRect.Left, buttonRect.Bottom), Theme.Palette.ControlBorder, BorderThickness, pixelSnap: true);
-            }
-
-            context.Restore();
-        }
-
-        var font = GetFont();
-        var textColor = isEnabled ? Foreground : Theme.Palette.DisabledText;
-        if (!IsEditing)
-        {
-            context.DrawText(GetDisplayText(), textRect, font, textColor, TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
-        }
-
-        if (buttonRect.Width > 0)
-        {
-            var chevronSize = Theme.Metrics.BaseControlHeight / 8;
-            Glyph.Draw(context, decRect.Center, chevronSize, textColor, GlyphKind.ChevronDown);
-            Glyph.Draw(context, incRect.Center, chevronSize, textColor, GlyphKind.ChevronUp);
-        }
-    }
-
-    protected override void RenderSubtree(IGraphicsContext context)
-    {
-        if (IsEditing)
-        {
-            _textBox.Render(context);
-        }
     }
 
     protected override void OnMouseWheel(MouseWheelEventArgs e)
@@ -353,13 +219,12 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
 
         Value += notches * GetEffectiveStep();
         e.Handled = true;
-        UpdateTextBoxFromValue();
-        InvalidateVisual();
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
+
         if (!IsEffectivelyEnabled || e.Button != MouseButton.Left)
         {
             return;
@@ -370,70 +235,8 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
             Focus();
         }
 
-        var part = HitTestButtonPart(e.Position);
-        if (part == ButtonPart.None)
-        {
-            BeginEdit();
-            e.Handled = true;
-            return;
-        }
-
-        _pressedPart = part;
-        var root = FindVisualRoot();
-        if (root is Window window)
-        {
-            window.CaptureMouse(this);
-        }
-
-        InvalidateVisual();
-        e.Handled = true;
-    }
-
-    protected override void OnMouseMove(MouseEventArgs e)
-    {
-        base.OnMouseMove(e);
-        var part = HitTestButtonPart(e.Position);
-        if (_hoverPart != part)
-        {
-            _hoverPart = part;
-            InvalidateVisual();
-        }
-    }
-
-    protected override void OnMouseLeave()
-    {
-        base.OnMouseLeave();
-        if (_hoverPart != ButtonPart.None && !IsMouseCaptured)
-        {
-            _hoverPart = ButtonPart.None;
-            InvalidateVisual();
-        }
-    }
-
-    protected override void OnMouseUp(MouseEventArgs e)
-    {
-        base.OnMouseUp(e);
-        if (e.Button != MouseButton.Left || _pressedPart == ButtonPart.None)
-        {
-            return;
-        }
-
-        var root = FindVisualRoot();
-        if (root is Window window)
-        {
-            window.ReleaseMouseCapture();
-        }
-
-        var releasedPart = HitTestButtonPart(e.Position);
-        if (releasedPart == _pressedPart && IsEffectivelyEnabled)
-        {
-            double step = GetEffectiveStep();
-            Value += _pressedPart == ButtonPart.Increment ? step : -step;
-            UpdateTextBoxFromValue();
-        }
-
-        _pressedPart = ButtonPart.None;
-        InvalidateVisual();
+        // Spinner presses never reach here: the RepeatButton parts take the hit and handle it.
+        BeginEdit();
         e.Handled = true;
     }
 
@@ -452,16 +255,12 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
 
         if (e.Key == Key.Up)
         {
-            Value += GetEffectiveStep();
-            UpdateTextBoxFromValue();
-            InvalidateVisual();
+            StepUp();
             e.Handled = true;
         }
         else if (e.Key == Key.Down)
         {
-            Value -= GetEffectiveStep();
-            UpdateTextBoxFromValue();
-            InvalidateVisual();
+            StepDown();
             e.Handled = true;
         }
     }
@@ -482,117 +281,72 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
         InvalidateVisual();
     }
 
-    protected override UIElement? OnHitTest(Point point)
-    {
-        if (!IsVisible || !IsHitTestVisible || !IsEffectivelyEnabled)
-        {
-            return null;
-        }
-
-        if (IsEditing)
-        {
-            var hit = _textBox.HitTest(point);
-            if (hit != null)
-            {
-                return hit;
-            }
-        }
-
-        return base.OnHitTest(point);
-    }
-
-    private double GetButtonAreaWidth() => (Theme.Metrics.BaseControlHeight - Theme.Metrics.ControlBorderThickness * 2);
-
-    private (Rect decRect, Rect incRect) GetButtonRects()
-    {
-        var inner = GetSnappedBorderBounds(Bounds).Deflate(new Thickness(GetBorderVisualInset()));
-        double buttonAreaWidth = Math.Min(GetButtonAreaWidth(), inner.Width);
-        var buttonRect = new Rect(inner.Right - buttonAreaWidth, inner.Y, buttonAreaWidth, inner.Height);
-        var incRect = new Rect(buttonRect.X, buttonRect.Y, buttonRect.Width, buttonRect.Height / 2);
-        var decRect = new Rect(buttonRect.X, buttonRect.Y + buttonRect.Height / 2, buttonRect.Width, buttonRect.Height / 2);
-        return (decRect, incRect);
-    }
-
-    private ButtonPart HitTestButtonPart(Point position)
-    {
-        var (decRect, incRect) = GetButtonRects();
-        if (decRect.Contains(position))
-        {
-            return ButtonPart.Decrement;
-        }
-        if (incRect.Contains(position))
-        {
-            return ButtonPart.Increment;
-        }
-        return ButtonPart.None;
-    }
-
-    private string GetDisplayText()
-    {
-        if (IsEditing)
-        {
-            var text = _textBox.Text;
-            return string.IsNullOrEmpty(text) ? FormatValue(Value) : text;
-        }
-
-        var v = Value;
-        var fmt = Format;
-        if (_cachedDisplayText != null && _cachedDisplayValue == v && _cachedDisplayFormat == fmt)
-            return _cachedDisplayText;
-
-        _cachedDisplayText = FormatValue(v);
-        _cachedDisplayValue = v;
-        _cachedDisplayFormat = fmt;
-        return _cachedDisplayText;
-    }
+    private void UpdateDisplayText() => SetValue(DisplayTextPropertyKey, FormatValue(Value));
 
     private string FormatValue(double value) => value.ToString(Format);
 
     private void UpdateEditMode()
     {
+        var textBox = _partTextBox;
+        if (textBox == null)
+        {
+            return;
+        }
+
         bool editing = IsEditing;
-        _textBox.IsVisible = editing;
-        _textBox.IsHitTestVisible = editing;
-        _textBox.IsEnabled = IsEffectivelyEnabled;
+
+        // The default template's display TextBlock is the only part whose visibility this
+        // control owns; a custom template without it keeps full author control (ctx.Bind, etc.).
+        if (_displayPart != null)
+        {
+            _displayPart.IsVisible = !editing;
+            textBox.IsVisible = editing;
+            textBox.IsHitTestVisible = editing;
+        }
+
+        textBox.IsEnabled = IsEffectivelyEnabled;
 
         if (editing)
         {
             SyncTextBoxStyle();
             UpdateTextBoxFromValue();
-            _textBox.Focus();
-            _textBox.SelectAll();
+            textBox.Focus();
+            textBox.SelectAll();
         }
         else
         {
             var root = FindVisualRoot();
-            if (root is Window window && window.FocusManager.FocusedElement == _textBox)
+            if (root is Window window && window.FocusManager.FocusedElement == textBox)
             {
                 window.FocusManager.SetFocus(this);
             }
         }
-
-        _measureCache.Invalidate();
-        InvalidateMeasure();
-        InvalidateVisual();
     }
 
     private void SyncTextBoxStyle()
     {
-        _textBox.FontFamily = FontFamily;
-        _textBox.FontSize = FontSize;
-        _textBox.FontWeight = FontWeight;
-        _textBox.Foreground = Foreground;
+        var textBox = _partTextBox;
+        if (textBox == null)
+        {
+            return;
+        }
+
+        textBox.FontFamily = FontFamily;
+        textBox.FontSize = FontSize;
+        textBox.FontWeight = FontWeight;
+        textBox.Foreground = Foreground;
     }
 
     private void UpdateTextBoxFromValue()
     {
-        if (!IsEditing || _suppressTextBoxUpdate)
+        var textBox = _partTextBox;
+        if (textBox == null || !IsEditing || _suppressTextBoxUpdate)
         {
             return;
         }
 
         var formatted = FormatValue(Value);
-        if (_textBox.Text == formatted)
+        if (textBox.Text == formatted)
         {
             return;
         }
@@ -600,7 +354,7 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
         _suppressTextBoxUpdate = true;
         try
         {
-            _textBox.Text = formatted;
+            textBox.Text = formatted;
         }
         finally
         {
@@ -611,7 +365,13 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
     private bool TryParseTextBox(out double value)
     {
         value = 0;
-        var text = _textBox.Text;
+        var textBox = _partTextBox;
+        if (textBox == null)
+        {
+            return false;
+        }
+
+        var text = textBox.Text;
         if (string.IsNullOrWhiteSpace(text))
         {
             return false;
@@ -639,10 +399,6 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
                 _suppressTextBoxUpdate = false;
             }
         }
-
-        _measureCache.Invalidate();
-        InvalidateMeasure();
-        InvalidateVisual();
     }
 
     private void OnTextBoxKeyDown(KeyEventArgs e)
@@ -671,7 +427,6 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
         if (e.Key == Key.Up)
         {
             Value += GetEffectiveStep();
-            UpdateTextBoxFromValue();
             e.Handled = true;
             return;
         }
@@ -679,7 +434,6 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
         if (e.Key == Key.Down)
         {
             Value -= GetEffectiveStep();
-            UpdateTextBoxFromValue();
             e.Handled = true;
         }
     }
@@ -692,17 +446,67 @@ public sealed class NumericUpDown : RangeBase, IVisualTreeHost
         }
     }
 
-    bool IVisualTreeHost.VisitChildren(Func<Element, bool> visitor)
-        => visitor(_textBox);
+    private void OnPartTextBoxGotFocus() => BeginEdit();
+
+    private protected override void OnTemplateInstanceAttached()
+    {
+        base.OnTemplateInstanceAttached();
+
+        _displayPart = GetTemplateChild<TextBlock>(PART_DISPLAY_TEXT);
+
+        var part = GetTemplateChild<TextBox>(PART_TEXT_BOX);
+        if (part == null)
+        {
+            return;
+        }
+
+        _partTextBox = part;
+        part.TextChanged += OnTextBoxTextChanged;
+        part.KeyDown += OnTextBoxKeyDown;
+        part.LostFocus += OnTextBoxLostFocus;
+        part.GotFocus += OnPartTextBoxGotFocus;
+
+        part.IsEnabled = IsEffectivelyEnabled;
+        SyncTextBoxStyle();
+        UpdateTextBoxFromValue();
+    }
+
+    private protected override void OnTemplateInstanceDetached()
+    {
+        base.OnTemplateInstanceDetached();
+
+        _displayPart = null;
+
+        var part = _partTextBox;
+        if (part == null)
+        {
+            return;
+        }
+
+        if (IsEditing)
+        {
+            CommitEdit();
+        }
+
+        part.TextChanged -= OnTextBoxTextChanged;
+        part.KeyDown -= OnTextBoxKeyDown;
+        part.LostFocus -= OnTextBoxLostFocus;
+        part.GotFocus -= OnPartTextBoxGotFocus;
+        _partTextBox = null;
+    }
 
     protected override void OnDispose()
     {
-        _textBox.TextChanged -= OnTextBoxTextChanged;
-        _textBox.KeyDown -= OnTextBoxKeyDown;
-        _textBox.LostFocus -= OnTextBoxLostFocus;
-        DetachChild(_textBox);
-        _textBox.Dispose();
+        var part = _partTextBox;
+        if (part != null)
+        {
+            part.TextChanged -= OnTextBoxTextChanged;
+            part.KeyDown -= OnTextBoxKeyDown;
+            part.LostFocus -= OnTextBoxLostFocus;
+            part.GotFocus -= OnPartTextBoxGotFocus;
+            _partTextBox = null;
+        }
+
         base.OnDispose();
     }
 }
-

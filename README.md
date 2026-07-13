@@ -182,7 +182,6 @@ NativeAOT executable size depends on the platform host, rendering backend, resou
 
 <img src="https://github.com/user-attachments/assets/92dae0e7-6ecb-46f8-b405-2fcab629375b" />
 
-
 The Gallery is a full-featured showcase sample. Use the Hello World rows as the minimum deployment-size baseline.
 
 ---
@@ -230,6 +229,7 @@ Panels:
 - `SplitPanel` (drag splitter)
 
 > All panels except `Canvas` (absolute) and `SplitPanel` support `Spacing`.
+
 ---
 ## 🧩 Extensions
 
@@ -256,6 +256,7 @@ Optional packages layered on top of the core - reference only what you need.
 > Without an interop package, Skia content still renders via the CPU upload fallback. Skia is also bundled as metapackages `Aprillz.MewUI.Skia.Windows` / `.Linux` / `.MacOS` / `.All`.
 
 > **MewDock** is a C# port of [FlexLayout](https://github.com/caplin/FlexLayout) (MIT). **MewCharts** bundles the [LiveChartsCore](https://github.com/beto-rodriguez/LiveCharts2) engine (MIT). See `THIRD_PARTY_NOTICES.md` for license notices.
+
 ---
 ## 🎨 Theme
 
@@ -282,7 +283,7 @@ Backends:
 | **MewVG** | Linux/X11 | `Aprillz.MewUI.Backend.MewVG.X11` |
 | **MewVG** | macOS | `Aprillz.MewUI.Backend.MewVG.MacOS` |
 
-> **MewVG** is a managed port of [NanoVG](https://github.com/memononen/nanovg), using OpenGL on Windows/Linux and Metal on macOS.
+> **[MewVG](https://github.com/aprillz/MewVG)** is a managed port of [NanoVG](https://github.com/memononen/nanovg), using OpenGL on Windows/Linux and Metal on macOS.
 
 Backends are registered by the referenced backend packages (Trim/AOT-friendly). In app code you typically either:
 - call `*Backend.Register()` before `Application.Run(...)`, or
@@ -321,6 +322,7 @@ If neither is available in `PATH`, MewUI throws:
 - [RenderLoop](docs/RenderLoop.md)
 - [Hot Reload](docs/HotReload.md)
 - [Custom Controls](docs/CustomControls.md)
+- [Control Template](docs/ControlTemplate.md)
 
 ---
 ## 🤝 Community

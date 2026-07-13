@@ -29,7 +29,6 @@
   > 직접적인 코드 수정 없이 **프롬프트 이터레이션을 통해 설계와 구현을 반복**하였으며,  
   > 각 단계는 개발자가 검토하고 조정하는 방식으로 진행되었습니다.
 
-
 ---
 
 ## 🚀 빠르게 실행해 보기
@@ -158,7 +157,10 @@ NativeAOT 실행 파일 크기는 플랫폼 호스트, 렌더링 백엔드, 리�
 | Gallery | Linux x64 / X11 + MewVG | 7.420 MB | 3.518 MB |
 | Gallery | macOS arm64 / MewVG | 5.625 MB | 2.555 MB |
 
+<img src="https://github.com/user-attachments/assets/92dae0e7-6ecb-46f8-b405-2fcab629375b" />
+
 Gallery는 full-featured showcase 샘플입니다. 최소 배포 크기의 기준은 Hello World 행을 참고하세요.
+
 ---
 ## 🔗 상태/바인딩(AOT 친화)
 
@@ -204,6 +206,7 @@ var label  = new Label()
 - `SplitPanel` (드래그 분할)
 
 > `Canvas`(절대 위치)와 `SplitPanel`을 제외한 모든 패널은 `Spacing`을 지원합니다.
+
 ---
 ## 🧩 확장 (Extensions)
 
@@ -230,6 +233,7 @@ var label  = new Label()
 > 인터롭 없이도 Skia 콘텐츠는 CPU 업로드 폴백으로 렌더링됩니다. Skia는 메타패키지 `Aprillz.MewUI.Skia.Windows` / `.Linux` / `.MacOS` / `.All`로도 묶여 있습니다.
 
 > **MewDock**은 [FlexLayout](https://github.com/caplin/FlexLayout)(MIT)의 C# 포팅입니다. 라이선스 고지는 `THIRD_PARTY_NOTICES.md` 참고.
+
 ---
 ## 🎨 테마(Theme)
 MewUI는 `Theme` 객체(색상 + 메트릭)와 `ThemeManager`를 사용하여 기본값 설정과 런타임 변경을 제어합니다.
@@ -256,7 +260,7 @@ MewUI는 `Theme` 객체(색상 + 메트릭)와 `ThemeManager`를 사용하여 �
 | **MewVG** | Linux/X11 | `Aprillz.MewUI.Backend.MewVG.X11` |
 | **MewVG** | macOS | `Aprillz.MewUI.Backend.MewVG.MacOS` |
 
-> **MewVG**는 [NanoVG](https://github.com/memononen/nanovg)의 Managed 포트로, Windows/Linux에서는 OpenGL, macOS에서는 Metal을 사용합니다.
+> **[MewVG](https://github.com/aprillz/MewVG)**는 [NanoVG](https://github.com/memononen/nanovg)의 Managed 포트로, Windows/Linux에서는 OpenGL, macOS에서는 Metal을 사용합니다.
 
 백엔드는 참조된 백엔드 패키지에 의해 등록됩니다 (Trim/AOT 친화적 구조).
 
@@ -297,6 +301,7 @@ Linux에서는 `MessageBox`와 파일 대화상자가 현재 외부 도구를 �
 - [RenderLoop](docs/RenderLoop.ko.md)
 - [Hot Reload](docs/HotReload.ko.md)
 - [Custom Controls](docs/CustomControls.ko.md)
+- [Control Template](docs/ControlTemplate.ko.md)
 
 ---
 ## 🤝 커뮤니티
