@@ -1228,7 +1228,6 @@ public abstract class Control : TextElement
             return;
         }
 
-        var client = window.ClientSize;
         var anchor = window.LastMousePositionDip;
         if (anchor.X == 0 && anchor.Y == 0)
         {
@@ -1239,26 +1238,24 @@ public abstract class Control : TextElement
             anchor = new Point(Bounds.X + Bounds.Width / 2, Bounds.Bottom);
         }
 
+        var region = window.GetPopupPlacementRegion(new Rect(anchor.X, anchor.Y, 0, 0));
+
         const double dx = 12;
         const double dy = 18;
         double x = anchor.X + dx;
         double y = anchor.Y + dy;
 
-        var measureSize = new Size(Math.Max(0, client.Width), Math.Max(0, client.Height));
+        var measureSize = new Size(Math.Max(0, region.Width), Math.Max(0, region.Height));
         Size desired = window.MeasureToolTip(ToolTip!, measureSize);
 
         double w = Math.Max(0, desired.Width);
         double h = Math.Max(0, desired.Height);
 
-        x = PopupPlacement.ClampHorizontal(x, w, client.Width, floorToZero: false);
+        x = PopupPlacement.ClampHorizontal(x, w, region, floorToLeftEdge: false);
 
-        if (y + h > client.Height)
+        if (y + h > region.Bottom)
         {
-            y = Math.Max(0, anchor.Y - h - dy);
-            if (y < 0)
-            {
-                y = Math.Max(0, client.Height - h);
-            }
+            y = Math.Max(region.Y, anchor.Y - h - dy);
         }
 
         window.ShowToolTip(this, ToolTip!, new Rect(x, y, w, h));

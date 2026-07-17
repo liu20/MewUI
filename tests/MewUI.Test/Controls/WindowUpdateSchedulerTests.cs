@@ -185,7 +185,6 @@ public sealed class WindowUpdateSchedulerTests
         }
 
         public void SetResizable(bool resizable) { }
-        public void Show() { }
         public void PresentSurface() { }
         public void Hide() { }
         public void Close() { }
