@@ -22,7 +22,7 @@ partial class GalleryView
             .Select(i => new SimpleGridRow(i, $"Item {i}", (i % 6) switch { 1 => "Warning", 2 => "Error", _ => "Normal" }))
             .ToArray();
         GridView simple = null!;
-        var gridHitText = new ObservableValue<string>("Click: (none)");
+        var gridHitText = new ObservableValue<string>("Boundary: drag to resize · double-click to Auto");
         return Card(
             "GridView",
             new DockPanel()
@@ -54,17 +54,17 @@ partial class GalleryView
                         .Columns(
                             new GridViewColumn<SimpleGridRow>()
                                 .Header("#")
-                                .Width(60)
+                                .PixelWidth(60)
                                 .Text(row => row.Id.ToString()),
 
                             new GridViewColumn<SimpleGridRow>()
                                 .Header("Name")
-                                .Width(100)
+                                .AutoWidth(minWidth: 100, maxWidth: 240)
                                 .Text(row => row.Name),
 
                             new GridViewColumn<SimpleGridRow>()
                                 .Header("Status")
-                                .Width(100)
+                                .AutoWidth(minWidth: 100, maxWidth: 160)
                                 .Template(
                                     build: _ => new TextBlock().Margin(8, 0).CenterVertical(),
                                     bind: (view, row) => view
@@ -88,11 +88,10 @@ partial class GalleryView
         var query = new ObservableValue<string>(string.Empty);
         var onlyErrors = new ObservableValue<bool>(false);
         var minAmount = new ObservableValue<double>(0);
-        var sortKey = new ObservableValue<int>(0); // 0=Id,1=Name,2=Amount,3=Status
-        var sortDesc = new ObservableValue<bool>(false);
 
         var summaryText = new ObservableValue<string>("Rows: -");
         var selectedText = new ObservableValue<string>("Selected: (none)");
+        var sortText = new ObservableValue<string>("Sort: source order · click a header");
 
         var all = Enumerable.Range(1, 100)
             .Select(i => new ComplexGridRow(
@@ -125,22 +124,6 @@ partial class GalleryView
 
             rows = rows.Where(r => r.Amount.Value >= minAmount.Value);
 
-            rows = sortKey.Value switch
-            {
-                1 => sortDesc.Value
-                    ? rows.OrderByDescending(r => r.Name, StringComparer.OrdinalIgnoreCase)
-                    : rows.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase),
-                2 => sortDesc.Value
-                    ? rows.OrderByDescending(r => r.Amount.Value)
-                    : rows.OrderBy(r => r.Amount.Value),
-                3 => sortDesc.Value
-                    ? rows.OrderByDescending(r => r.StatusText.Value, StringComparer.OrdinalIgnoreCase)
-                    : rows.OrderBy(r => r.StatusText.Value, StringComparer.OrdinalIgnoreCase),
-                _ => sortDesc.Value
-                    ? rows.OrderByDescending(r => r.Id)
-                    : rows.OrderBy(r => r.Id)
-            };
-
             var view = rows.ToList();
             currentView = view;
             grid.ItemsSource = ItemsView.Create(view);
@@ -159,8 +142,6 @@ partial class GalleryView
         query.Changed += TriggerApply;
         onlyErrors.Changed += TriggerApply;
         minAmount.Changed += TriggerApply;
-        sortKey.Changed += TriggerApply;
-        sortDesc.Changed += TriggerApply;
 
         foreach (var r in all)
         {
@@ -172,7 +153,6 @@ partial class GalleryView
         }
 
         grid = new GridView()
-            .Height(190)
             .ItemsSource(all)
             .Apply(g => g.SelectionChanged += obj =>
             {
@@ -189,44 +169,67 @@ partial class GalleryView
                 new GridViewColumn<ComplexGridRow>()
                     .Header("#")
                     .Width(44)
-                    .Text(r => r.Id.ToString()),
+                    .Text(r => r.Id.ToString())
+                    .SortBy(r => r.Id),
 
                 new GridViewColumn<ComplexGridRow>()
                     .Header("Name")
-                    .Width(110)
-                    .Text(x => x.Name),
+                    .StarWidth(minWidth: 100)
+                    .Text(x => x.Name)
+                    .SortBy(x => x.Name, StringComparer.OrdinalIgnoreCase),
 
                 new GridViewColumn<ComplexGridRow>()
                     .Header("Amount")
-                    .Width(110)
+                    .AutoWidth()
                     .Template(
                         build: _ => new NumericUpDown().Padding(6, 0).CenterVertical().Minimum(0).Maximum(100).Step(0.5).Format("0.##"),
                         bind: (view, row) => view.BindValue(row.Amount)
-                    ),
+                    )
+                    .SortBy(row => row.Amount.Value),
 
                 new GridViewColumn<ComplexGridRow>()
                     .Header("Error")
-                    .Width(60)
+                    .AutoWidth(minWidth: 60, maxWidth: 80)
                     .Template(
                         build: _ => new CheckBox().Center(),
                         bind: (view, row) => view.BindIsChecked(row.HasError)
-                    ),
+                    )
+                    .SortBy(row => row.HasError.Value),
 
                 new GridViewColumn<ComplexGridRow>()
                     .Header("Status")
-                    .Width(110)
+                    .AutoWidth(minWidth: 90, maxWidth: 140)
                     .Template(
                         build: _ => new TextBlock().Margin(8, 0).CenterVertical(),
                         bind: (view, row) => view.BindText(row.StatusText)
                     )
-            );
+                    .SortBy(row => row.StatusText.Value, StringComparer.OrdinalIgnoreCase)
+            )
+            .OnSortChanged(change =>
+            {
+                if (change.Direction == GridViewSortDirection.None)
+                {
+                    sortText.Value = "Sort: source order · click a header";
+                    return;
+                }
+
+                string header = change.ColumnIndex switch
+                {
+                    0 => "#",
+                    1 => "Name",
+                    2 => "Amount",
+                    3 => "Error",
+                    _ => "Status",
+                };
+                sortText.Value = $"Sort: {header} {(change.Direction == GridViewSortDirection.Ascending ? "ascending" : "descending")}";
+            });
 
         ApplyView();
 
         return Card(
             "GridView (Complex binding)",
             new DockPanel()
-                .Height(240)
+                .Height(270)
                 .Spacing(8)
                 .Children(
                     new StackPanel()
@@ -252,14 +255,10 @@ partial class GalleryView
                                 .Format("0")
                                 .BindValue(minAmount),
 
-                            new ComboBox()
-                                .Width(80)
-                                .Items(["Id", "Name", "Amount", "Status"])
-                                .BindSelectedIndex(sortKey),
-
-                            new CheckBox()
-                                .Content("Desc")
-                                .BindIsChecked(sortDesc)
+                            new TextBlock()
+                                .Text("Click a column header to sort")
+                                .CenterVertical()
+                                .FontSize(11)
                         ),
 
                     new StackPanel()
@@ -268,7 +267,9 @@ partial class GalleryView
                         .Spacing(2)
                         .Children(
                             new TextBlock().BindText(summaryText).FontSize(11),
-                            new TextBlock().BindText(selectedText).FontSize(11)
+                            new StackPanel().Horizontal().Children( 
+                                new TextBlock().BindText(selectedText).FontSize(11),
+                                new TextBlock().BindText(sortText).FontSize(11))
                         ),
 
                     grid
@@ -318,7 +319,7 @@ partial class GalleryView
 
                 new GridViewColumn<TemplateComplexPersonRow>()
                     .Header("User")
-                    .Width(240)
+                    .StarWidth(2)
                     .Bind(
                         build: ctx => new StackPanel()
                             .Vertical()
@@ -353,7 +354,7 @@ partial class GalleryView
 
                 new GridViewColumn<TemplateComplexPersonRow>()
                     .Header("Role")
-                    .Width(120)
+                    .StarWidth()
                     .Bind(
                         build: _ => new ComboBox()
                             .Items(["User", "Admin", "Guest"])
@@ -450,7 +451,7 @@ partial class GalleryView
 
                             new GridViewColumn<VariableHeightGridRow>()
                                 .Header("Note")
-                                .Width(440)
+                                .StarWidth(minWidth: 240)
                                 .Bind(
                                     build: _ => new TextBlock()
                                         .TextWrapping(TextWrapping.Wrap),

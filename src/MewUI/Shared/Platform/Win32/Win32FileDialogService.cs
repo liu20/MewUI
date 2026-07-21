@@ -16,18 +16,20 @@ internal sealed partial class Win32FileDialogService : IFileDialogService
             flags |= OFN_ALLOWMULTISELECT;
         }
 
-        return ShowOpenOrSave(
-            isSave: false,
-            owner: options.Owner?.Handle ?? 0,
-            title: options.Title,
-            initialDirectory: options.InitialDirectory,
-            filter: FileDialogFilters.ToLegacyFilterString(options.Filters),
-            defaultExtension: null,
-            fileName: null,
-            flags: flags,
-            out var selected)
+        // Runs on an STA worker with a nested UI loop (like SelectFolder) so MewUI keeps rendering
+        // behind the native dialog's own modal message loop instead of freezing.
+        return StaHelper.Run(() => ShowOpenOrSave(
+                isSave: false,
+                owner: options.Owner?.Handle ?? 0,
+                title: options.Title,
+                initialDirectory: options.InitialDirectory,
+                filter: FileDialogFilters.ToLegacyFilterString(options.Filters),
+                defaultExtension: null,
+                fileName: null,
+                flags: flags,
+                out var selected)
             ? selected
-            : null;
+            : null);
     }
 
     public string? SaveFile(SaveFileDialogOptions options)
@@ -40,21 +42,24 @@ internal sealed partial class Win32FileDialogService : IFileDialogService
             flags |= OFN_OVERWRITEPROMPT;
         }
 
-        if (!ShowOpenOrSave(
-                isSave: true,
-                owner: options.Owner?.Handle ?? 0,
-                title: options.Title,
-                initialDirectory: options.InitialDirectory,
-                filter: FileDialogFilters.ToLegacyFilterString(options.Filters),
-                defaultExtension: options.DefaultExtension,
-                fileName: options.FileName,
-                flags: flags,
-                out var selected))
+        return StaHelper.Run(() =>
         {
-            return null;
-        }
+            if (!ShowOpenOrSave(
+                    isSave: true,
+                    owner: options.Owner?.Handle ?? 0,
+                    title: options.Title,
+                    initialDirectory: options.InitialDirectory,
+                    filter: FileDialogFilters.ToLegacyFilterString(options.Filters),
+                    defaultExtension: options.DefaultExtension,
+                    fileName: options.FileName,
+                    flags: flags,
+                    out var selected))
+            {
+                return null;
+            }
 
-        return selected is { Length: > 0 } ? selected[0] : null;
+            return selected is { Length: > 0 } ? selected[0] : null;
+        });
     }
 
     public string? SelectFolder(FolderDialogOptions options)
@@ -62,8 +67,7 @@ internal sealed partial class Win32FileDialogService : IFileDialogService
         ArgumentNullException.ThrowIfNull(options);
 
         // Run on an STA thread to avoid MTA/UI-thread hangs with COM-based dialogs.
-        Action? pump = Application.IsRunning ? Application.DoEvents : null;
-        return StaHelper.Run(() => SelectFolderCore(options), pump);
+        return StaHelper.Run(() => SelectFolderCore(options));
     }
 
     private static unsafe string? SelectFolderCore(FolderDialogOptions options)
@@ -127,8 +131,26 @@ internal sealed partial class Win32FileDialogService : IFileDialogService
                 Marshal.ThrowExceptionForHR(hr);
             }
 
-            FileDialogVTable.GetResult(dialog, out resultItemPtr);
-            FileDialogVTable.GetDisplayName((IShellItem*)resultItemPtr, (uint)SIGDN.SIGDN_FILESYSPATH, out nint pszPath);
+            hr = FileDialogVTable.GetResult(dialog, out resultItemPtr);
+            if (hr < 0)
+            {
+                Marshal.ThrowExceptionForHR(hr);
+            }
+            if (resultItemPtr == 0)
+            {
+                return null;
+            }
+
+            hr = FileDialogVTable.GetDisplayName(
+                (IShellItem*)resultItemPtr, (uint)SIGDN.SIGDN_FILESYSPATH, out nint pszPath);
+            if (hr < 0)
+            {
+                Marshal.ThrowExceptionForHR(hr);
+            }
+            if (pszPath == 0)
+            {
+                return null;
+            }
             try
             {
                 var path = Marshal.PtrToStringUni(pszPath);

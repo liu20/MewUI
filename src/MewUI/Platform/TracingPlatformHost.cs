@@ -59,6 +59,7 @@ internal sealed class TracingPlatformHost : IPlatformHost
         _inner.Quit(app);
     }
 
+    [Obsolete("DoEvents will be removed. Await asynchronous work, use the dispatcher, or run an explicit nested loop via RunNestedLoop.")]
     public void DoEvents()
     {
         DiagLog.Write($"[PlatformHost#{_id}] DoEvents");
@@ -98,6 +99,26 @@ internal sealed class TracingPlatformHost : IPlatformHost
             DiagLog.Write($"[WindowBackend#{_backendId}] SetResizable {resizable}");
             _innerBackend.SetResizable(resizable);
         }
+
+        public void SetWindowState(Controls.WindowState state)
+        {
+            DiagLog.Write($"[WindowBackend#{_backendId}] SetWindowState {state}");
+            _innerBackend.SetWindowState(state);
+        }
+
+        public void SetCanMinimize(bool value) => _innerBackend.SetCanMinimize(value);
+
+        public void SetCanMaximize(bool value) => _innerBackend.SetCanMaximize(value);
+
+        public void SetCanClose(bool value) => _innerBackend.SetCanClose(value);
+
+        public void SetTopmost(bool value) => _innerBackend.SetTopmost(value);
+
+        public void SetShowInTaskbar(bool value) => _innerBackend.SetShowInTaskbar(value);
+
+        public void BeginDragMove() => _innerBackend.BeginDragMove();
+
+        public void BeginDragResize(Controls.ResizeEdge edge) => _innerBackend.BeginDragResize(edge);
 
         public void CreateSurface()
         {
@@ -200,6 +221,22 @@ internal sealed class TracingPlatformHost : IPlatformHost
             DiagLog.Write($"[WindowBackend#{_backendId}] SetAllowsTransparency {allowsTransparency}");
             _innerBackend.SetAllowsTransparency(allowsTransparency);
         }
+
+        public void SetExtendClientAreaToTitleBar(double titleBarHeight)
+            => _innerBackend.SetExtendClientAreaToTitleBar(titleBarHeight);
+
+        public void SetBorderless(bool value) => _innerBackend.SetBorderless(value);
+
+        public void SetWindowBorderColor(Color? color) => _innerBackend.SetWindowBorderColor(color);
+
+        public void SetPlatformOptions(Controls.PlatformWindowOptions? options)
+            => _innerBackend.SetPlatformOptions(options);
+
+        public WindowChromeCapabilities ChromeCapabilities => _innerBackend.ChromeCapabilities;
+
+        public Thickness NativeChromeButtonInset => _innerBackend.NativeChromeButtonInset;
+
+        public void SetAllowDrop(bool allow) => _innerBackend.SetAllowDrop(allow);
 
         public void SetCursor(CursorType cursorType)
         {

@@ -1,0 +1,246 @@
+using Aprillz.MewUI;
+using Aprillz.MewUI.Controls;
+using Aprillz.MewUI.Input;
+using Aprillz.MewUI.Platform;
+
+namespace MewUI.Test.Core;
+
+[TestClass]
+[DoNotParallelize]
+public sealed class ApplicationFailureRecoveryTests
+{
+    private static readonly Queue<FailurePlatformHost> Hosts = new();
+    private static bool _registered;
+
+    [TestMethod]
+    public void StartupAndRunFailures_DoNotPreventAnotherRun()
+    {
+        EnsureRegistered();
+
+        var startupFailure = new FailurePlatformHost(throwFromFontDefaults: true);
+        Hosts.Enqueue(startupFailure);
+        Assert.ThrowsExactly<InvalidOperationException>(() => Application.Run(new Window()));
+        Assert.IsFalse(Application.IsRunning);
+        Assert.IsTrue(startupFailure.Disposed);
+
+        var loopFailure = new FailurePlatformHost(throwFromRun: true);
+        Hosts.Enqueue(loopFailure);
+        Assert.ThrowsExactly<InvalidOperationException>(() => Application.Run(new Window()));
+        Assert.IsFalse(Application.IsRunning);
+        Assert.IsTrue(loopFailure.Disposed);
+        Assert.IsNotNull(loopFailure.RunningApplication);
+        Assert.IsEmpty(loopFailure.RunningApplication.AllWindows);
+
+        var successful = new FailurePlatformHost();
+        Hosts.Enqueue(successful);
+        Application.Run(new Window());
+        Assert.IsFalse(Application.IsRunning);
+        Assert.IsTrue(successful.Disposed);
+    }
+
+    [TestMethod]
+    public void FailedRuntime_ReleasesPreRunTimerSubscription()
+    {
+        EnsureRegistered();
+        using var timer = new DispatcherTimer(TimeSpan.FromMilliseconds(10));
+        timer.Start();
+        Assert.IsTrue(timer.IsEnabled);
+
+        Hosts.Enqueue(new FailurePlatformHost(throwFromFontDefaults: true));
+        Assert.ThrowsExactly<InvalidOperationException>(() => Application.Run(new Window()));
+
+        Assert.IsFalse(timer.IsEnabled);
+    }
+
+    [TestMethod]
+    public void RuntimeEnd_ClearsDragRouterStaticState()
+    {
+        EnsureRegistered();
+        var source = new Border { CanDrag = true };
+        var mainWindow = new Window { Content = source };
+        Hosts.Enqueue(new FailurePlatformHost(onRun: (_, window) =>
+        {
+            WindowDragDropRouter.OnMouseDown(window, new Point(1, 1), new Point(10, 10), source);
+            Assert.IsTrue(WindowDragDropRouter.HasPendingState);
+        }));
+
+        Application.Run(mainWindow);
+
+        Assert.IsFalse(WindowDragDropRouter.HasPendingState);
+    }
+
+    [TestMethod]
+    public void ThemeBroadcast_UsesStableWindowAndAdornerSnapshots()
+    {
+        EnsureRegistered();
+        int addedWindowNotifications = 0;
+        var addedWindow = new Window();
+        addedWindow.ThemeChanged += (_, _) => addedWindowNotifications++;
+
+        var mainWindow = new Window();
+        var adorned = new Border();
+        var secondAdorner = new ThemeProbeElement();
+        var firstAdorner = new ThemeProbeElement
+        {
+            Callback = () => mainWindow.RemoveAdornerInternal(secondAdorner),
+        };
+        mainWindow.AddAdornerInternal(adorned, firstAdorner);
+        mainWindow.AddAdornerInternal(adorned, secondAdorner);
+
+        Hosts.Enqueue(new FailurePlatformHost(onRun: (app, window) =>
+        {
+            window.ThemeChanged += (_, _) =>
+            {
+                app.UnregisterWindow(window);
+                app.RegisterWindow(addedWindow);
+            };
+            app.SetTheme(ThemeVariant.Dark);
+        }));
+
+        Application.Run(mainWindow);
+
+        Assert.AreEqual(1, firstAdorner.NotificationCount);
+        Assert.AreEqual(1, secondAdorner.NotificationCount);
+        Assert.AreEqual(0, addedWindowNotifications);
+    }
+
+    [TestMethod]
+    public void ConcurrentRun_WhileRunning_IsRejected()
+    {
+        EnsureRegistered();
+        InvalidOperationException? nested = null;
+        Hosts.Enqueue(new FailurePlatformHost(onRun: (_, _) =>
+        {
+            // A second Application.Run while the first is active must be rejected (one UI runtime
+            // per process). The guard fires before any host resolution, so no second host is needed.
+            nested = Assert.ThrowsExactly<InvalidOperationException>(() => Application.Run(new Window()));
+        }));
+
+        Application.Run(new Window());
+
+        Assert.IsNotNull(nested);
+        StringAssert.Contains(nested.Message, "already running");
+    }
+
+    [TestMethod]
+    public void OnLastWindowClose_ClosingSoleWindow_QuitsThroughApplication()
+    {
+        EnsureRegistered();
+        var host = new FailurePlatformHost(onRun: (app, window) => app.UnregisterWindow(window));
+        Hosts.Enqueue(host);
+
+        Application.Run(new Window());
+
+        // Closing the last window drives the shutdown decision through Application (host quit removed).
+        Assert.IsTrue(host.QuitCalled);
+    }
+
+    [TestMethod]
+    public void OnExplicitShutdown_ClosingSoleWindow_DoesNotQuit()
+    {
+        EnsureRegistered();
+        var previous = Application.ShutdownMode;
+        Application.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        try
+        {
+            var host = new FailurePlatformHost(onRun: (app, window) => app.UnregisterWindow(window));
+            Hosts.Enqueue(host);
+
+            Application.Run(new Window());
+
+            Assert.IsFalse(host.QuitCalled);
+        }
+        finally
+        {
+            Application.ShutdownMode = previous;
+        }
+    }
+
+    [TestMethod]
+    public void OnMainWindowClose_ClosingMainWhileOthersRemain_Quits()
+    {
+        EnsureRegistered();
+        var previous = Application.ShutdownMode;
+        Application.ShutdownMode = ShutdownMode.OnMainWindowClose;
+        try
+        {
+            var host = new FailurePlatformHost(onRun: (app, mainWindow) =>
+            {
+                app.RegisterWindow(new Window());
+                app.UnregisterWindow(mainWindow);
+            });
+            Hosts.Enqueue(host);
+
+            Application.Run(new Window());
+
+            Assert.IsTrue(host.QuitCalled);
+        }
+        finally
+        {
+            Application.ShutdownMode = previous;
+        }
+    }
+
+    private static void EnsureRegistered()
+    {
+        if (_registered)
+        {
+            return;
+        }
+
+        Application.RegisterPlatformHost(static () => Hosts.Dequeue(), Aprillz.MewUI.Platform.PlatformSurfaceKind.Win32, "Test");
+        _registered = true;
+    }
+
+    private sealed class FailurePlatformHost(
+        bool throwFromFontDefaults = false,
+        bool throwFromRun = false,
+        Action<Application, Window>? onRun = null) : IPlatformHost
+    {
+        public bool Disposed { get; private set; }
+        public Application? RunningApplication { get; private set; }
+        public IMessageBoxService MessageBox => null!;
+        public IFileDialogService FileDialog => null!;
+        public IClipboardService Clipboard => null!;
+        public string DefaultFontFamily => throwFromFontDefaults
+            ? throw new InvalidOperationException("startup failure")
+            : "Arial";
+        public IReadOnlyList<string> DefaultFontFallbacks => [];
+        public IWindowBackend CreateWindowBackend(Window window) => throw new NotSupportedException();
+        public IDispatcher CreateDispatcher(nint windowHandle) => throw new NotSupportedException();
+        public uint GetSystemDpi() => 96;
+        public ThemeVariant GetSystemThemeVariant() => ThemeVariant.Light;
+        public uint GetDpiForWindow(nint windowHandle) => 96;
+        public bool EnablePerMonitorDpiAwareness() => false;
+        public int GetSystemMetricsForDpi(int nIndex, uint dpi) => 0;
+
+        public void Run(Application app, Window mainWindow)
+        {
+            RunningApplication = app;
+            if (throwFromRun)
+            {
+                throw new InvalidOperationException("run failure");
+            }
+
+            onRun?.Invoke(app, mainWindow);
+        }
+
+        public bool QuitCalled { get; private set; }
+        public void Quit(Application app) => QuitCalled = true;
+        public void DoEvents() { }
+        public void Dispose() => Disposed = true;
+    }
+
+    private sealed class ThemeProbeElement : ContentControl
+    {
+        public int NotificationCount { get; private set; }
+        public Action? Callback { get; init; }
+
+        protected override void OnThemeChanged(Theme oldTheme, Theme newTheme)
+        {
+            base.OnThemeChanged(oldTheme, newTheme);
+            NotificationCount++;
+            Callback?.Invoke();
+        }
+    }
+}

@@ -88,6 +88,16 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         Closed,
     }
 
+    // Monotonic teardown phase owned by the close coordinator. Backends drive the native destroy
+    // between transitions; the core enforces that each teardown step runs once and in order.
+    private enum WindowClosePhase
+    {
+        Live,
+        Closed,
+        GraphicsReleased,
+        VisualsDisposed,
+    }
+
     private const double DefaultWidth = 800;
     private const double DefaultHeight = 600;
 
@@ -190,6 +200,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     private bool _firstFrameRenderedPending;
     private bool _subscribedToDispatcherChanged;
     private WindowLifetimeState _lifetimeState;
+    private WindowClosePhase _closePhase;
     private int _modalDisableCount;
     private bool _isDialogWindow;
     private IGpuInteropInvalidationSource? _gpuInvalidationSource;
@@ -564,7 +575,8 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             static (self, value) => value && self.WindowSize.IsResizable);
 
     public static readonly MewProperty<bool> CanCloseProperty =
-        MewProperty<bool>.Register<Window>(nameof(CanClose), true, MewPropertyOptions.None);
+        MewProperty<bool>.Register<Window>(nameof(CanClose), true, MewPropertyOptions.None,
+            static (self, _, _) => self._backend?.SetCanClose(self.CanClose));
 
     public static readonly MewProperty<bool> TopmostProperty =
         MewProperty<bool>.Register<Window>(nameof(Topmost), false, MewPropertyOptions.None,
@@ -2288,6 +2300,8 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             _backend.SetCanMinimize(false);
         if (!CanMaximize)
             _backend.SetCanMaximize(false);
+        if (!CanClose)
+            _backend.SetCanClose(false);
         if (PlatformOptions != null)
             _backend.SetPlatformOptions(PlatformOptions);
         if (AllowDrop)
@@ -2296,6 +2310,13 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
     internal void ReleaseWindowGraphicsResources(nint windowHandle)
     {
+        if (_closePhase >= WindowClosePhase.GraphicsReleased)
+        {
+            return;
+        }
+
+        _closePhase = WindowClosePhase.GraphicsReleased;
+
         if (windowHandle == 0)
         {
             return;
@@ -2370,7 +2391,8 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             _ownedChildren.Clear();
             for (int i = 0; i < ownedChildren.Length; i++)
             {
-                try { ownedChildren[i]?.Close(); } catch { }
+                try { ownedChildren[i]?.Close(); }
+                catch (Exception ex) { Application.RouteLifecycleException(ex); }
             }
         }
 
@@ -2382,11 +2404,13 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             _modalChildren.Clear();
             for (int i = 0; i < children.Length; i++)
             {
-                try { children[i]?.Close(); } catch { }
+                try { children[i]?.Close(); }
+                catch (Exception ex) { Application.RouteLifecycleException(ex); }
             }
         }
 
         _lifetimeState = WindowLifetimeState.Closed;
+        _closePhase = WindowClosePhase.Closed;
         _closeApproved = false;
         _closeDecisionPending = false;
         CompletePendingCloseResult(true);
@@ -2463,7 +2487,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         ArgumentNullException.ThrowIfNull(surface);
         var clientSize = _clientSizeDip;
         var target = _cachedRenderTarget;
-        if (target == null || !target.Matches(surface))
+        if (target == null || !target.TryUpdateSurface(surface))
         {
             // Surface or pixel size changed - cached context references stale handles.
             _renderContext?.Dispose();
@@ -2749,6 +2773,13 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
     internal void DisposeVisualTree()
     {
+        if (_closePhase >= WindowClosePhase.VisualsDisposed)
+        {
+            return;
+        }
+
+        _closePhase = WindowClosePhase.VisualsDisposed;
+
         var visualRoot = EffectiveVisualRoot;
         if (visualRoot == null)
         {
@@ -2823,9 +2854,10 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
         _popupManager.NotifyThemeChanged(oldTheme, newTheme);
 
-        for (int i = 0; i < _adorners.Count; i++)
+        var adorners = _adorners.ToArray();
+        for (int i = 0; i < adorners.Length; i++)
         {
-            if (_adorners[i].Element is FrameworkElement fe)
+            if (adorners[i].Element is FrameworkElement fe)
             {
                 fe.NotifyThemeChanged(oldTheme, newTheme);
             }

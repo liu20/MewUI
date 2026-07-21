@@ -6,7 +6,7 @@ internal sealed class DispatcherQueue
 {
     internal readonly struct WorkItem
     {
-        public required Action Action { get; init; }
+        public Action? Action { get; init; }
         public DispatcherMergeKey? MergeKey { get; init; }
         public ManualResetEventSlim? Signal { get; init; }
         public DispatcherOperation? Operation { get; init; }
@@ -50,7 +50,7 @@ internal sealed class DispatcherQueue
     {
         ArgumentNullException.ThrowIfNull(action);
         var op = new DispatcherOperation(priority, action);
-        EnqueueInternal(priority, new WorkItem { Action = action, Operation = op });
+        EnqueueInternal(priority, new WorkItem { Operation = op });
         return op;
     }
 
@@ -104,19 +104,34 @@ internal sealed class DispatcherQueue
                     _mergeKeys.TryRemove(item.MergeKey, out _);
                 }
 
+                bool faulted = false;
                 try
                 {
-                    if (op != null && op.Status == DispatcherOperationStatus.Aborted)
+                    Action action;
+                    if (op != null)
                     {
-                        continue;
+                        if (!op.TryMarkExecuting())
+                        {
+                            continue;
+                        }
+
+                        action = op.TakeActionForExecution();
+                    }
+                    else
+                    {
+                        action = item.Action
+                            ?? throw new InvalidOperationException("Dispatcher work item has no action.");
                     }
 
-                    op?.MarkExecuting();
-                    item.Action();
-                    op?.MarkCompleted();
+                    action();
                 }
                 catch (Exception ex)
                 {
+                    // The operation reaches its Faulted terminal state carrying the exception,
+                    // independent of how the app-level handler routes it below.
+                    faulted = true;
+                    op?.MarkFaulted(ex);
+
                     // Dispatcher-level exception handling:
                     // - If the app handler marks it as handled, continue processing.
                     // - Otherwise, record fatal and request shutdown to unwind the message loop.
@@ -135,6 +150,11 @@ internal sealed class DispatcherQueue
                 }
                 finally
                 {
+                    if (!faulted)
+                    {
+                        op?.MarkCompleted();
+                    }
+
                     item.Signal?.Set();
                 }
             }

@@ -74,10 +74,20 @@ internal sealed class VirtualizedItemsPresenter
     /// </summary>
     public void RecycleAll()
     {
-        foreach (var index in _realized.Keys.ToArray())
+        var keys = GetSortedKeys();
+        for (int i = 0; i < keys.Length; i++)
         {
-            Recycle(index);
+            Recycle(keys[i]);
         }
+    }
+
+    public void Dispose()
+    {
+        RecycleAll();
+        FlushRecycledByIndexToPool();
+        _pool.Clear();
+        _pendingRebind?.Clear();
+        ClearDeferredFocus();
     }
 
     /// <summary>
@@ -252,8 +262,10 @@ internal sealed class VirtualizedItemsPresenter
             return;
         }
 
-        foreach (var key in _realized.Keys.ToArray())
+        var realizedKeys = GetSortedKeys();
+        for (int i = 0; i < realizedKeys.Length; i++)
         {
+            int key = realizedKeys[i];
             if (key < first || key >= lastExclusive)
             {
                 if (!IsFocusedSubtree(key))
@@ -416,6 +428,7 @@ internal sealed class VirtualizedItemsPresenter
         {
             if (!ReferenceEquals(window.FocusManager.FocusedElement, _deferredFocusOwner))
             {
+                ClearDeferredFocus();
                 return;
             }
         }
@@ -424,23 +437,29 @@ internal sealed class VirtualizedItemsPresenter
             // Focus was cleared when we deferred it; only restore if focus is still null.
             if (window.FocusManager.FocusedElement != null)
             {
+                ClearDeferredFocus();
                 return;
             }
         }
 
         if (container is not Element root || !VisualTree.IsInSubtreeOf(deferred, root))
         {
+            ClearDeferredFocus();
             return;
         }
 
         if (!deferred.Focusable || !deferred.IsEffectivelyEnabled || !deferred.IsVisible)
         {
-            _deferredFocusedElement = null;
-            _deferredFocusOwner = null;
+            ClearDeferredFocus();
             return;
         }
 
         window.FocusManager.SetFocus(deferred);
+        ClearDeferredFocus();
+    }
+
+    private void ClearDeferredFocus()
+    {
         _deferredFocusedElement = null;
         _deferredFocusOwner = null;
         _deferredFocusedIndex = null;

@@ -16,9 +16,25 @@ public sealed class Application
     private static Func<IPlatformHost>? _platformHostProvider;
     private static IPlatformHost? _defaultPlatformHost;
 
+    // Surface-kind handshake: the platform host produces one native surface family and a backend
+    // consumes a specific one. Both are recorded at registration so a mismatch fails immediately
+    // with a clear error rather than at the first render's surface downcast.
+    private static PlatformSurfaceKind? _platformSurfaceKind;
+    private static PlatformSurfaceKind? _backendSurfaceKind;
+    private static string? _platformSurfaceOrigin;
+    private static string? _backendSurfaceOrigin;
+
     private Exception? _pendingFatalException;
 
-    private readonly List<Window> _windows = new();
+    // Run-scoped state (window registry, main-window identity) and its ordered teardown. Non-null only
+    // for the duration of a Run; created at run start, disposed at run end.
+    private ApplicationRuntime? _runtime;
+
+    /// <summary>
+    /// Determines when the run loop ends automatically as windows close. Process-level policy; set
+    /// before <see cref="Run"/>. Defaults to <see cref="MewUI.ShutdownMode.OnLastWindowClose"/>.
+    /// </summary>
+    public static ShutdownMode ShutdownMode { get; set; } = ShutdownMode.OnLastWindowClose;
     private readonly ThemeManager _themeManager;
     private readonly RenderLoopSettings _renderLoopSettings = new();
     private IGraphicsFactory? _graphicsFactory;
@@ -148,7 +164,7 @@ public sealed class Application
     /// <summary>
     /// Gets currently tracked windows for this application instance.
     /// </summary>
-    public IReadOnlyList<Window> AllWindows => _windows;
+    public IReadOnlyList<Window> AllWindows => _runtime?.Windows ?? (IReadOnlyList<Window>)Array.Empty<Window>();
 
     /// <summary>
     /// Gets the selected graphics backend used by windows/controls.
@@ -211,7 +227,9 @@ public sealed class Application
     public IGraphicsFactory GraphicsFactory => _graphicsFactory ??= DefaultGraphicsFactory;
 
     /// <summary>
-    /// Runs the application with the specified main window.
+    /// Runs the application with the specified main window. One UI runtime per process: a second
+    /// concurrent call is rejected. Running again after a previous run returns (normally or by
+    /// exception) is supported - the finally block below restores process state for it.
     /// </summary>
     public static void Run(Window mainWindow)
     {
@@ -227,12 +245,56 @@ public sealed class Application
                 throw new InvalidOperationException("Application is already running.");
             }
 
-            var host = DefaultPlatformHost;
-            var app = new Application(host);
-            _current = app;
-            _ = app.Theme;
-            app.RegisterWindow(mainWindow);
-            app.RunCore(mainWindow);
+            Application? app = null;
+            try
+            {
+                var host = DefaultPlatformHost;
+                app = new Application(host);
+                _current = app;
+                app._runtime = new ApplicationRuntime();
+                _ = app.Theme;
+                app._runtime.SetMainWindow(mainWindow);
+                app.RegisterWindow(mainWindow);
+                app.RunCore(mainWindow);
+            }
+            finally
+            {
+                try
+                {
+                    if (app != null)
+                    {
+                        // Ordered teardown of run-scoped state (drag reset then registry clear).
+                        app._runtime?.Dispose();
+                        app._runtime = null;
+                        if (app.Dispatcher != null)
+                        {
+                            app.Dispatcher = null;
+                        }
+                        else
+                        {
+                            // A host may fail before installing a dispatcher. Pre-run timers still
+                            // need a deterministic runtime-end notification to release their static
+                            // DispatcherChanged subscription.
+                            DispatcherChanged?.Invoke(null);
+                        }
+                    }
+                    else
+                    {
+                        // Default host/font initialization can fail before the Application object
+                        // exists. This still terminates the attempted runtime for pre-run waiters.
+                        DispatcherChanged?.Invoke(null);
+                    }
+                }
+                finally
+                {
+                    _current = null;
+
+                    // Platform hosts are run-scoped. Clear the process reference before disposing so a
+                    // throwing Dispose cannot strand a stale host and prevent the next Application.Run.
+                    var host = Interlocked.Exchange(ref _defaultPlatformHost, null);
+                    host?.Dispose();
+                }
+            }
         }
     }
 
@@ -255,7 +317,8 @@ public sealed class Application
 
     private void ApplyThemeChange(Theme oldTheme, Theme newTheme)
     {
-        foreach (var window in AllWindows)
+        var windows = _runtime?.SnapshotWindows() ?? Array.Empty<Window>();
+        foreach (var window in windows)
         {
             window.BroadcastThemeChanged(oldTheme, newTheme);
         }
@@ -263,30 +326,24 @@ public sealed class Application
         ThemeChanged?.Invoke(oldTheme, newTheme);
     }
 
-    internal void RegisterWindow(Window window)
-    {
-        if (_windows.Contains(window))
+    internal void RegisterWindow(Window window) => _runtime?.Register(window);
+
+    // The shutdown decision is owned by ApplicationRuntime (policy-driven, one place) rather than each
+    // platform host; hosts only maintain their own hwnd registry for routing.
+    internal void UnregisterWindow(Window window) => _runtime?.Unregister(window);
+
+    // Pure decision so the policy is unit-testable in isolation.
+    internal static bool ShouldShutdownAfterClose(ShutdownMode mode, bool wasMainWindow, int remainingWindows)
+        => mode switch
         {
-            return;
-        }
-
-        _windows.Add(window);
-    }
-
-    internal void UnregisterWindow(Window window)
-    {
-        _windows.Remove(window);
-    }
+            ShutdownMode.OnExplicitShutdown => false,
+            ShutdownMode.OnMainWindowClose => wasMainWindow,
+            _ => remainingWindows == 0,
+        };
 
     private void RunCore(Window mainWindow)
     {
         PlatformHost.Run(this, mainWindow);
-        _current = null;
-
-        // Platform hosts are created fresh per run, so dispose them. Graphics factories are process singletons
-        // held by the persistent provider, so there is nothing to clear or dispose here.
-        _defaultPlatformHost?.Dispose();
-        _defaultPlatformHost = null;
 
         var fatal = Interlocked.Exchange(ref _pendingFatalException, null);
         if (fatal != null)
@@ -311,6 +368,7 @@ public sealed class Application
     /// <summary>
     /// Dispatches pending messages in the message queue.
     /// </summary>
+    [Obsolete("DoEvents will be removed. Await asynchronous work or use the dispatcher; for synchronous modal UI use Window.ShowDialog.")]
     public static void DoEvents()
     {
         if (_current == null)
@@ -336,8 +394,10 @@ public sealed class Application
 
     /// <summary>
     /// Registers the graphics backend. Backend packages call this once at startup; only one is allowed per process.
+    /// <paramref name="requiredSurface"/> is the native surface family the backend needs, checked against
+    /// the registered platform host.
     /// </summary>
-    internal static void RegisterGraphicsFactory(Func<IGraphicsFactory> factory)
+    internal static void RegisterGraphicsFactory(Func<IGraphicsFactory> factory, PlatformSurfaceKind requiredSurface, string origin)
     {
         ArgumentNullException.ThrowIfNull(factory);
         EnsureNotRunning("graphics backend");
@@ -347,12 +407,18 @@ public sealed class Application
         {
             throw new InvalidOperationException("A graphics backend is already registered. Register only one per process.");
         }
+
+        _backendSurfaceKind = requiredSurface;
+        _backendSurfaceOrigin = origin;
+        VerifySurfaceKindMatch();
     }
 
     /// <summary>
     /// Registers the platform host. Platform packages call this once at startup; only one is allowed per process.
+    /// <paramref name="surface"/> is the native surface family the host produces, checked against the
+    /// registered graphics backend.
     /// </summary>
-    internal static void RegisterPlatformHost(Func<IPlatformHost> factory)
+    internal static void RegisterPlatformHost(Func<IPlatformHost> factory, PlatformSurfaceKind surface, string origin)
     {
         ArgumentNullException.ThrowIfNull(factory);
         EnsureNotRunning("platform host");
@@ -362,6 +428,33 @@ public sealed class Application
         {
             throw new InvalidOperationException("A platform host is already registered. Register only one per process.");
         }
+
+        _platformSurfaceKind = surface;
+        _platformSurfaceOrigin = origin;
+        VerifySurfaceKindMatch();
+    }
+
+    // Fails a mismatched platform/backend pair as soon as both are registered (order-independent),
+    // rather than deferring to the first render where the backend downcasts the platform surface.
+    private static void VerifySurfaceKindMatch()
+        => ValidateSurfaceKinds(_platformSurfaceKind, _backendSurfaceKind, _platformSurfaceOrigin, _backendSurfaceOrigin);
+
+    // Pure check (no static state) so the compatibility rule can be tested in isolation.
+    internal static void ValidateSurfaceKinds(
+        PlatformSurfaceKind? platformSurface, PlatformSurfaceKind? backendSurface,
+        string? platformOrigin, string? backendOrigin)
+    {
+        if (platformSurface is not PlatformSurfaceKind platform ||
+            backendSurface is not PlatformSurfaceKind backend ||
+            platform == backend)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"Incompatible platform and graphics backend: the {backendOrigin} backend needs a " +
+            $"{backend} window surface but the {platformOrigin} platform host produces a {platform} surface. " +
+            "Register a matching platform/backend pair (e.g. Win32 + Direct2D, X11 + MewVG.X11).");
     }
 
     internal bool TryHandleDispatcherException(Exception ex)
@@ -381,6 +474,35 @@ public sealed class Application
 
     internal void NotifyFatalDispatcherException(Exception ex)
         => Interlocked.CompareExchange(ref _pendingFatalException, ex, null);
+
+    internal static void RouteLifecycleException(Exception ex)
+    {
+        ArgumentNullException.ThrowIfNull(ex);
+
+        var app = _current;
+        if (app == null)
+        {
+            DiagLog.Write($"[lifecycle] {ex.GetType().Name}: {ex.Message}");
+            return;
+        }
+
+        if (app.TryHandleDispatcherException(ex))
+        {
+            return;
+        }
+
+        app.NotifyFatalDispatcherException(ex);
+        try
+        {
+            app.PlatformHost.Quit(app);
+        }
+        catch (Exception quitException)
+        {
+            // The original lifecycle exception remains the fatal error. Shutdown is best-effort
+            // here because this path is commonly entered from an OS callback boundary.
+            DiagLog.Write($"[lifecycle] Quit failed: {quitException.GetType().Name}: {quitException.Message}");
+        }
+    }
 
     private static void ApplyPlatformFontDefaults(IPlatformHost host)
     {

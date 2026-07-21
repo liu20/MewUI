@@ -70,6 +70,8 @@ public enum DispatcherOperationStatus
     Completed,
     /// <summary>The operation was aborted before execution.</summary>
     Aborted,
+    /// <summary>The operation's callback threw; see <see cref="DispatcherOperation.Exception"/>.</summary>
+    Faulted,
 }
 
 /// <summary>
@@ -77,17 +79,17 @@ public enum DispatcherOperationStatus
 /// </summary>
 public sealed class DispatcherOperation
 {
-    private volatile DispatcherOperationStatus _status;
+    private int _status;
     private volatile DispatcherPriority _priority;
-    internal Action? Action;
+    private Action? _action;
+    private Exception? _exception;
 
 
     internal DispatcherOperation(DispatcherPriority priority, Action action)
     {
         _priority = priority;
-        Action = action;
-
-        _status = DispatcherOperationStatus.Pending;
+        _action = action;
+        _status = (int)DispatcherOperationStatus.Pending;
     }
 
 
@@ -102,7 +104,7 @@ public sealed class DispatcherOperation
         get => _priority;
         set
         {
-            if (_status == DispatcherOperationStatus.Pending)
+            if (Status == DispatcherOperationStatus.Pending)
             {
                 _priority = value;
             }
@@ -112,7 +114,13 @@ public sealed class DispatcherOperation
     /// <summary>
     /// Gets the current status of this operation.
     /// </summary>
-    public DispatcherOperationStatus Status => _status;
+    public DispatcherOperationStatus Status => (DispatcherOperationStatus)Volatile.Read(ref _status);
+
+    /// <summary>
+    /// Gets the exception thrown by the callback when <see cref="Status"/> is
+    /// <see cref="DispatcherOperationStatus.Faulted"/>; otherwise <see langword="null"/>.
+    /// </summary>
+    public Exception? Exception => _exception;
 
     /// <summary>
     /// Attempts to abort the operation. Returns <see langword="true"/> if the operation
@@ -120,18 +128,57 @@ public sealed class DispatcherOperation
     /// </summary>
     public bool Abort()
     {
-        if (_status != DispatcherOperationStatus.Pending)
+        if (Interlocked.CompareExchange(
+                ref _status,
+                (int)DispatcherOperationStatus.Aborted,
+                (int)DispatcherOperationStatus.Pending) != (int)DispatcherOperationStatus.Pending)
         {
             return false;
         }
 
-        _status = DispatcherOperationStatus.Aborted;
-        Action = null;
+        Interlocked.Exchange(ref _action, null);
         return true;
     }
 
-    internal void MarkExecuting() => _status = DispatcherOperationStatus.Executing;
-    internal void MarkCompleted() => _status = DispatcherOperationStatus.Completed;
+    internal bool TryMarkExecuting()
+        => Interlocked.CompareExchange(
+            ref _status,
+            (int)DispatcherOperationStatus.Executing,
+            (int)DispatcherOperationStatus.Pending) == (int)DispatcherOperationStatus.Pending;
+
+    internal Action TakeActionForExecution()
+        => Interlocked.Exchange(ref _action, null)
+            ?? throw new InvalidOperationException("Dispatcher operation action was not available after execution started.");
+
+    internal void MarkCompleted()
+    {
+        bool completed = Interlocked.CompareExchange(
+            ref _status,
+            (int)DispatcherOperationStatus.Completed,
+            (int)DispatcherOperationStatus.Executing) == (int)DispatcherOperationStatus.Executing;
+
+        if (!completed && Status != DispatcherOperationStatus.Aborted)
+        {
+            throw new InvalidOperationException($"Cannot complete dispatcher operation from state {Status}.");
+        }
+    }
+
+    internal void MarkFaulted(Exception exception)
+    {
+        // Publish the exception before the status flips so a reader that observes Faulted sees it
+        // (the CompareExchange below is a full barrier).
+        _exception = exception;
+
+        bool faulted = Interlocked.CompareExchange(
+            ref _status,
+            (int)DispatcherOperationStatus.Faulted,
+            (int)DispatcherOperationStatus.Executing) == (int)DispatcherOperationStatus.Executing;
+
+        if (!faulted)
+        {
+            throw new InvalidOperationException($"Cannot fault dispatcher operation from state {Status}.");
+        }
+    }
 }
 
 /// <summary>

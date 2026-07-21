@@ -24,6 +24,11 @@ internal sealed class X11WindowBackend : IWindowBackend
     private nint _wmProtocolsAtom;
     private nint _atomAtom;
     private nint _netWmWindowOpacityAtom;
+    private nint _netWmStateAtom;
+    private nint _netWmStateMaximizedHorzAtom;
+    private nint _netWmStateMaximizedVertAtom;
+    private nint _netWmStateHiddenAtom;
+    private nint _netWmStateFullscreenAtom;
     private nint _cardinalAtom;
     private nint _motifWmHintsAtom;
     private nint _xdndAwareAtom;
@@ -58,6 +63,7 @@ internal sealed class X11WindowBackend : IWindowBackend
     private nint _netWmSyncRequestCounterAtom;
     // EWMH frame-sync counter (_NET_WM_SYNC_REQUEST). 0 when the SYNC extension is unavailable.
     private nint _frameSyncCounter;
+    private nint _colormap;
     private bool _hasPendingFrameSyncValue;
     private long _pendingFrameSyncValue;
     private X11GLVisualInfo? _glVisualInfo;
@@ -69,6 +75,7 @@ internal sealed class X11WindowBackend : IWindowBackend
     private bool _allowsTransparency;
     private bool _enabled = true;
     private CursorType? _currentCursorType;
+    private bool _transparentResizeCursorActive;
     private IX11InputMethod? _inputMethod;
 
     // XInput2 scroll handling. _xi2Opcode is the per-display extension opcode discovered
@@ -190,6 +197,26 @@ internal sealed class X11WindowBackend : IWindowBackend
     }
 
     public void BeginDragMove()
+        => BeginWmMoveResize(8); // _NET_WM_MOVERESIZE_MOVE
+
+    public void BeginDragResize(Controls.ResizeEdge edge)
+    {
+        int direction = edge switch
+        {
+            Controls.ResizeEdge.TopLeft => 0,
+            Controls.ResizeEdge.Top => 1,
+            Controls.ResizeEdge.TopRight => 2,
+            Controls.ResizeEdge.Right => 3,
+            Controls.ResizeEdge.BottomRight => 4,
+            Controls.ResizeEdge.Bottom => 5,
+            Controls.ResizeEdge.BottomLeft => 6,
+            Controls.ResizeEdge.Left => 7,
+            _ => 8,
+        };
+        BeginWmMoveResize(direction);
+    }
+
+    private void BeginWmMoveResize(int direction)
     {
         if (Display == 0 || Handle == 0)
         {
@@ -218,7 +245,7 @@ internal sealed class X11WindowBackend : IWindowBackend
             xev.xclient.format = 32;
             xev.xclient.data[0] = rootX;
             xev.xclient.data[1] = rootY;
-            xev.xclient.data[2] = 8; // _NET_WM_MOVERESIZE_MOVE
+            xev.xclient.data[2] = direction;
             xev.xclient.data[3] = 1; // Button1
             xev.xclient.data[4] = 1; // source = normal app
         }
@@ -298,6 +325,23 @@ internal sealed class X11WindowBackend : IWindowBackend
         }
 
         ApplyMotifHints();
+    }
+
+    public void SetCanClose(bool value)
+    {
+        if (value)
+        {
+            _motifFunctions |= 0x20; // MWM_FUNC_CLOSE
+        }
+        else
+        {
+            _motifFunctions &= ~0x20u;
+        }
+
+        if (Display != 0 && Handle != 0)
+        {
+            ApplyMotifHints();
+        }
     }
 
     private void ApplyMotifHints()
@@ -637,9 +681,15 @@ internal sealed class X11WindowBackend : IWindowBackend
             X11EventMask.PointerMotionMask | X11EventMask.FocusChangeMask |
             X11EventMask.PropertyChangeMask;
 
+        _colormap = NativeX11.XCreateColormap(Display, root, chosen.Visual, AllocNone);
+        if (_colormap == 0)
+        {
+            throw new InvalidOperationException("XCreateColormap failed.");
+        }
+
         var attrs = new XSetWindowAttributes
         {
-            colormap = NativeX11.XCreateColormap(Display, root, chosen.Visual, AllocNone),
+            colormap = _colormap,
             event_mask = (nint)windowEventMask,
             // A window whose visual depth differs from its parent's needs an explicit border
             // pixel, otherwise XCreateWindow fails with BadMatch.
@@ -670,7 +720,7 @@ internal sealed class X11WindowBackend : IWindowBackend
         const ulong CWOverrideRedirect = 1UL << 9;
         if (Window.Kind is Controls.WindowKind.Overlay or Controls.WindowKind.Popup)
         {
-            attrs.override_redirect = true;
+            attrs.override_redirect = 1;
             valueMask |= CWOverrideRedirect;
         }
 
@@ -688,6 +738,8 @@ internal sealed class X11WindowBackend : IWindowBackend
 
         if (Handle == 0)
         {
+            NativeX11.XFreeColormap(Display, _colormap);
+            _colormap = 0;
             throw new InvalidOperationException("XCreateWindow failed.");
         }
 
@@ -705,6 +757,11 @@ internal sealed class X11WindowBackend : IWindowBackend
         _wmDeleteWindowAtom = NativeX11.XInternAtom(Display, "WM_DELETE_WINDOW", false);
         _atomAtom = NativeX11.XInternAtom(Display, "ATOM", false);
         _netWmWindowOpacityAtom = NativeX11.XInternAtom(Display, "_NET_WM_WINDOW_OPACITY", true);
+        _netWmStateAtom = NativeX11.XInternAtom(Display, "_NET_WM_STATE", false);
+        _netWmStateMaximizedHorzAtom = NativeX11.XInternAtom(Display, "_NET_WM_STATE_MAXIMIZED_HORZ", false);
+        _netWmStateMaximizedVertAtom = NativeX11.XInternAtom(Display, "_NET_WM_STATE_MAXIMIZED_VERT", false);
+        _netWmStateHiddenAtom = NativeX11.XInternAtom(Display, "_NET_WM_STATE_HIDDEN", false);
+        _netWmStateFullscreenAtom = NativeX11.XInternAtom(Display, "_NET_WM_STATE_FULLSCREEN", false);
         _cardinalAtom = NativeX11.XInternAtom(Display, "CARDINAL", false);
         _motifWmHintsAtom = NativeX11.XInternAtom(Display, "_MOTIF_WM_HINTS", false);
         _xdndAwareAtom = NativeX11.XInternAtom(Display, "XdndAware", false);
@@ -1451,21 +1508,19 @@ internal sealed class X11WindowBackend : IWindowBackend
 
     private void HandlePropertyNotify(in XPropertyEvent e)
     {
-        var netWmState = NativeX11.XInternAtom(Display, "_NET_WM_STATE", false);
-        if (netWmState == 0 || e.atom != netWmState)
+        if (_netWmStateAtom == 0 || e.atom != _netWmStateAtom)
         {
             return;
         }
 
-        var atoms = ReadAtomProperty(Handle, netWmState);
-        var maxH = NativeX11.XInternAtom(Display, "_NET_WM_STATE_MAXIMIZED_HORZ", false);
-        var maxV = NativeX11.XInternAtom(Display, "_NET_WM_STATE_MAXIMIZED_VERT", false);
-        var hidden = NativeX11.XInternAtom(Display, "_NET_WM_STATE_HIDDEN", false);
-        var fullscreen = NativeX11.XInternAtom(Display, "_NET_WM_STATE_FULLSCREEN", false);
+        var atoms = ReadAtomProperty(Handle, _netWmStateAtom);
 
-        bool isMaximized = maxH != 0 && maxV != 0 && atoms.Contains(maxH) && atoms.Contains(maxV);
-        bool isMinimized = hidden != 0 && atoms.Contains(hidden);
-        bool isFullScreen = fullscreen != 0 && atoms.Contains(fullscreen);
+        bool isMaximized = _netWmStateMaximizedHorzAtom != 0 &&
+            _netWmStateMaximizedVertAtom != 0 &&
+            atoms.Contains(_netWmStateMaximizedHorzAtom) &&
+            atoms.Contains(_netWmStateMaximizedVertAtom);
+        bool isMinimized = _netWmStateHiddenAtom != 0 && atoms.Contains(_netWmStateHiddenAtom);
+        bool isFullScreen = _netWmStateFullscreenAtom != 0 && atoms.Contains(_netWmStateFullscreenAtom);
 
         var newState = isMinimized ? Controls.WindowState.Minimized
             : isFullScreen ? Controls.WindowState.FullScreen
@@ -1572,6 +1627,8 @@ internal sealed class X11WindowBackend : IWindowBackend
         }
         catch
         {
+            // Best-effort IME candidate positioning: a transient text-layout failure must not
+            // abort key processing; the platform input method keeps its previous caret rectangle.
         }
     }
 
@@ -1769,6 +1826,14 @@ internal sealed class X11WindowBackend : IWindowBackend
         int yPx = e.y;
         var pos = new Point(xPx / Window.DpiScale, yPx / Window.DpiScale);
 
+        // Transparent top-level windows have no WM decoration, so mirror Win32's non-client edge
+        // hit test and initiate the EWMH resize directly from the shadow/grip area.
+        if (isDown && e.button == X11MouseButton.Left && TryGetTransparentResizeEdge(pos, out var resizeEdge))
+        {
+            BeginDragResize(resizeEdge);
+            return;
+        }
+
         // Dismiss watch: while a popup surface holds the pointer grab, presses land here regardless of
         // pointer location. A press outside the client area light-dismisses and is consumed (standard
         // menu UX: the closing click does not also act on whatever is underneath).
@@ -1889,6 +1954,36 @@ internal sealed class X11WindowBackend : IWindowBackend
             modifiers: GetModifiers((uint)e.state));
     }
 
+    private bool TryGetTransparentResizeEdge(Point position, out Controls.ResizeEdge edge)
+    {
+        edge = default;
+        if (!_allowsTransparency || !Window.WindowSize.IsResizable ||
+            Window.WindowState != Controls.WindowState.Normal)
+        {
+            return false;
+        }
+
+        const double grip = 12;
+        bool left = position.X >= 0 && position.X < grip;
+        bool right = position.X < Window.ClientSize.Width && position.X >= Window.ClientSize.Width - grip;
+        bool top = position.Y >= 0 && position.Y < grip;
+        bool bottom = position.Y < Window.ClientSize.Height && position.Y >= Window.ClientSize.Height - grip;
+
+        edge = (top, bottom, left, right) switch
+        {
+            (true, _, true, _) => Controls.ResizeEdge.TopLeft,
+            (true, _, _, true) => Controls.ResizeEdge.TopRight,
+            (_, true, true, _) => Controls.ResizeEdge.BottomLeft,
+            (_, true, _, true) => Controls.ResizeEdge.BottomRight,
+            (_, _, true, _) => Controls.ResizeEdge.Left,
+            (_, _, _, true) => Controls.ResizeEdge.Right,
+            (true, _, _, _) => Controls.ResizeEdge.Top,
+            (_, true, _, _) => Controls.ResizeEdge.Bottom,
+            _ => default,
+        };
+        return left || right || top || bottom;
+    }
+
     private void HandleMotion(XMotionEvent e)
     {
         var pos = new Point(e.x / Window.DpiScale, e.y / Window.DpiScale);
@@ -1899,6 +1994,23 @@ internal sealed class X11WindowBackend : IWindowBackend
         bool right = (e.state & X11ModifierMask.Button3) != 0;
 
         WindowInputRouter.MouseMove(Window, pos, screenPos, leftDown: left, rightDown: right, middleDown: middle, modifiers: GetModifiers((uint)e.state));
+
+        if (!left && TryGetTransparentResizeEdge(pos, out var resizeEdge))
+        {
+            SetCursor(resizeEdge switch
+            {
+                Controls.ResizeEdge.Left or Controls.ResizeEdge.Right => CursorType.SizeWE,
+                Controls.ResizeEdge.Top or Controls.ResizeEdge.Bottom => CursorType.SizeNS,
+                Controls.ResizeEdge.TopLeft or Controls.ResizeEdge.BottomRight => CursorType.SizeNWSE,
+                _ => CursorType.SizeNESW,
+            });
+            _transparentResizeCursorActive = true;
+        }
+        else if (_transparentResizeCursorActive)
+        {
+            _transparentResizeCursorActive = false;
+            Window.UpdateCursorForElement(Window.MouseOverElement);
+        }
     }
 
     private unsafe void HandleXdndEnter(XClientMessageEvent client)
@@ -2545,8 +2657,9 @@ internal sealed class X11WindowBackend : IWindowBackend
                 _inputMethod = null;
             }
         }
-        catch
+        catch (Exception ex)
         {
+            Application.RouteLifecycleException(ex);
         }
 
         // Release graphics resources BEFORE XDestroyWindow. The GL teardown calls
@@ -2560,16 +2673,25 @@ internal sealed class X11WindowBackend : IWindowBackend
         {
             Window.ReleaseWindowGraphicsResources(handle);
         }
-        catch { }
+        catch (Exception ex) { Application.RouteLifecycleException(ex); }
 
         if (destroyWindow)
         {
             try { NativeX11.XDestroyWindow(Display, handle); }
-            catch { }
+            catch (Exception ex) { Application.RouteLifecycleException(ex); }
         }
 
-        try { _host.UnregisterWindow(handle); } catch { }
-        try { Window.DisposeVisualTree(); } catch { }
+        if (_colormap != 0)
+        {
+            try { NativeX11.XFreeColormap(Display, _colormap); }
+            catch (Exception ex) { Application.RouteLifecycleException(ex); }
+            _colormap = 0;
+        }
+
+        try { _host.UnregisterWindow(handle); }
+        catch (Exception ex) { Application.RouteLifecycleException(ex); }
+        try { Window.DisposeVisualTree(); }
+        catch (Exception ex) { Application.RouteLifecycleException(ex); }
 
         if (Handle == handle)
         {
@@ -2585,7 +2707,8 @@ internal sealed class X11WindowBackend : IWindowBackend
         }
 
         _closedRaised = true;
-        try { Window.RaiseClosed(); } catch { }
+        try { Window.RaiseClosed(); }
+        catch (Exception ex) { Application.RouteLifecycleException(ex); }
     }
 
     public void CenterOnOwner()
@@ -2750,10 +2873,10 @@ internal sealed class X11WindowBackend : IWindowBackend
     }
 
     // X11 WM removes all decorations (title bar + border + shadow) - not a true
-    // "extend client area" like Win32/macOS. Reported as None so NativeCustomWindow
-    // keeps the default title bar on X11.
+    // "extend client area" like Win32/macOS. The native WM frame is still present,
+    // so report only that capability; NativeCustomWindow keeps the default title bar.
     public WindowChromeCapabilities ChromeCapabilities =>
-        WindowChromeCapabilities.None;
+        WindowChromeCapabilities.NativeWindowBorder;
 
     public void SetAllowsTransparency(bool allowsTransparency)
     {

@@ -1,17 +1,28 @@
-using System.Runtime.Versioning;
-
 namespace Aprillz.MewUI.Platform.Win32;
 
 internal static class StaHelper
 {
-    public static T Run<T>(Func<T> func, Action? pump = null)
+    /// <summary>
+    /// Runs <paramref name="func"/> on a dedicated STA thread and returns its result. While the application
+    /// loop is running, the calling (UI) thread pumps a nested loop so rendering stays live while
+    /// <paramref name="func"/> runs a blocking native modal (same pattern as the X11 portal helper).
+    /// </summary>
+    public static T Run<T>(Func<T> func)
     {
         ArgumentNullException.ThrowIfNull(func);
 
-        if (Thread.CurrentThread.GetApartmentState() == ApartmentState.STA)
+        bool appRunning = Application.IsRunning;
+
+        // With no running loop there is nothing to keep painting, so an STA caller can just call straight
+        // through. When the loop IS running we must offload even from an STA UI thread: otherwise the
+        // native modal's own message loop blocks this thread and MewUI stops rendering behind the dialog.
+        if (!appRunning && Thread.CurrentThread.GetApartmentState() == ApartmentState.STA)
         {
             return func();
         }
+
+        // Capture on the calling thread; the app can be quitting by the time the worker finishes.
+        var dispatcher = appRunning ? Application.Current.Dispatcher : null;
 
         T result = default!;
         Exception? exception = null;
@@ -30,6 +41,8 @@ internal static class StaHelper
             finally
             {
                 done.Set();
+                // The worker finishes off the UI thread; poke the dispatcher so the nested loop wakes and re-checks.
+                dispatcher?.BeginInvoke(static () => { });
             }
         })
         {
@@ -41,11 +54,12 @@ internal static class StaHelper
 #pragma warning restore CA1416 // Validate platform compatibility
         thread.Start();
 
-        while (!done.IsSet)
+        if (appRunning)
         {
-            pump?.Invoke();
-            Thread.Sleep(1);
+            Application.Current.PlatformHost.RunNestedLoop(() => !done.IsSet);
         }
+
+        done.Wait();
 
         if (exception != null)
         {
@@ -55,4 +69,3 @@ internal static class StaHelper
         return result;
     }
 }
-

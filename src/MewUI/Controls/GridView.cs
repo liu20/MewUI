@@ -92,6 +92,12 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
             InvalidateItemBindings();
             InvalidateVisual();
         };
+        _core.SortChanged += change =>
+        {
+            _header.InvalidateMeasure();
+            _header.InvalidateVisual();
+            SortChanged?.Invoke(change);
+        };
         _core.ColumnsChanged += () =>
         {
             _header.SetColumns(_core.Columns);
@@ -113,6 +119,9 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
     }
 
     public event Action<object?>? SelectionChanged;
+
+    /// <summary>Occurs when the active single-column sort changes.</summary>
+    public event Action<GridViewSortChange>? SortChanged;
 
     public bool ZebraStriping
     {
@@ -230,7 +239,9 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
     protected override void OnThemeChanged(Theme oldTheme, Theme newTheme)
     {
         base.OnThemeChanged(oldTheme, newTheme);
+        _core.ResetAutoDesiredWidths();
         InvalidateItemBindings();
+        InvalidateMeasure();
         InvalidateVisual();
     }
 
@@ -290,7 +301,11 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
         }
     }
 
-    private void OnCellPaddingChanged() => InvalidateItemBindings();
+    private void OnCellPaddingChanged()
+    {
+        _core.ResetAutoDesiredWidths();
+        InvalidateItemBindings();
+    }
 
     private void InvalidateGridItemBindings() => InvalidateItemBindings();
 
@@ -498,9 +513,22 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
     /// </summary>
     public ISelectableItemsView ItemsSource
     {
-        get => _core.ItemsSource;
+        get => _core.SourceItemsView;
         set => _core.SetItems(value ?? ItemsView.EmptySelectable);
     }
+
+    /// <summary>Gets the active sorted column index, or -1 when source order is displayed.</summary>
+    public int SortColumnIndex => _core.SortColumnIndex;
+
+    /// <summary>Gets the active single-column sort direction.</summary>
+    public GridViewSortDirection SortDirection => _core.SortDirection;
+
+    /// <summary>Applies a local sort using the comparer registered on the specified column.</summary>
+    public void SortByColumn(int columnIndex, GridViewSortDirection direction)
+        => _core.SortByColumn(columnIndex, direction);
+
+    /// <summary>Clears the active sort and restores current source order.</summary>
+    public void ClearSort() => _core.ClearSort();
 
     public void SetColumns<TItem>(IReadOnlyList<GridViewColumn<TItem>> columns)
     {
@@ -711,7 +739,7 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
         double cur = contentX;
         for (int i = 0; i < _core.Columns.Count; i++)
         {
-            double w = Math.Max(0, _core.Columns[i].Width);
+            double w = Math.Max(0, _core.Columns[i].ActualWidth);
             double next = cur + w;
             if (x >= cur && x < next)
             {
@@ -756,10 +784,60 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
                 throw new InvalidOperationException("GridViewColumn.CellTemplate is required.");
             }
 
-            list.Add(new GridViewCore.ColumnDefinition(c.Header, c.Width, c.MinWidth, c.IsResizable, c.CellTemplate));
+            ValidateColumn(c);
+            var sortComparer = c.SortComparer;
+            list.Add(new GridViewCore.ColumnDefinition(
+                c.Header,
+                c.Width,
+                c.MinWidth,
+                c.MaxWidth,
+                c.IsResizable,
+                c.CellTemplate,
+                sortComparer == null
+                    ? null
+                    : (left, right) => sortComparer.Compare((TItem)left!, (TItem)right!)));
         }
 
         return list;
+    }
+
+    private static void ValidateColumn<TItem>(GridViewColumn<TItem> column)
+    {
+        var width = column.Width;
+        switch (width.GridUnitType)
+        {
+            case GridUnitType.Auto:
+                break;
+            case GridUnitType.Pixel:
+                if (!double.IsFinite(width.Value) || width.Value < 0)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(column.Width), "Pixel width must be finite and non-negative.");
+                }
+                break;
+            case GridUnitType.Star:
+                if (!double.IsFinite(width.Value) || width.Value <= 0)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(column.Width), "Star weight must be finite and greater than zero.");
+                }
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(column.Width), "Unknown GridUnitType.");
+        }
+
+        if (!double.IsFinite(column.MinWidth) || column.MinWidth < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(column.MinWidth), "MinWidth must be finite and non-negative.");
+        }
+
+        if (double.IsNaN(column.MaxWidth) || column.MaxWidth < 0 || double.IsNegativeInfinity(column.MaxWidth))
+        {
+            throw new ArgumentOutOfRangeException(nameof(column.MaxWidth), "MaxWidth must be non-negative or positive infinity.");
+        }
+
+        if (column.MaxWidth < column.MinWidth)
+        {
+            throw new ArgumentOutOfRangeException(nameof(column.MaxWidth), "MaxWidth must be greater than or equal to MinWidth.");
+        }
     }
 
     // Topmost-first: the scroll viewer renders after (on top of) the header row.
@@ -775,17 +853,21 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
             ? double.PositiveInfinity
             : Math.Max(0, availableSize.Width - Padding.HorizontalThickness - borderInset * 2);
 
-        _columnsExtentWidth = 0;
-        for (int i = 0; i < _core.Columns.Count; i++)
+        double headerH = ResolveHeaderHeight();
+        _header.MeasureAutoColumns(headerH);
+        _columnsExtentWidth = _core.ResolveColumnWidths(widthLimit, out bool columnsChanged);
+        if (columnsChanged)
         {
-            _columnsExtentWidth += Math.Max(0, _core.Columns[i].Width);
+            // Measure can resolve new Auto widths after rows were realized in the previous
+            // arrange round. The outer GridView bounds may be unchanged, but its header and
+            // rows still need another arrange with the new column geometry.
+            InvalidateArrangeForCurrentLayoutPass();
         }
 
         double contentWidth = double.IsPositiveInfinity(widthLimit)
             ? _columnsExtentWidth
             : Math.Min(_columnsExtentWidth, widthLimit);
 
-        double headerH = ResolveHeaderHeight();
         double rowH = ResolveRowHeight();
         double alignedRowH = GetPixelAlignedRowHeight();
 
@@ -829,11 +911,19 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
 
         double headerH = ResolveHeaderHeight();
 
+        // Measure owns the presenter's scroll extent. Arrange may legitimately resolve Star
+        // columns to a different final width: for example, a WrapPanel measures its children
+        // with infinite width to obtain their natural size and then arranges them into a finite
+        // slot. Feeding that final width back into measure makes the columns (and presenter
+        // extent) alternate between their natural minimum and the arranged viewport forever.
+        //
+        // Rows are measured by the presenter against the final layout width below, so updating
+        // ActualWidth here is sufficient; it must not invalidate measure or rewrite the measured
+        // scroll extent.
+        _columnsExtentWidth = _core.ResolveColumnWidths(Math.Max(0, contentBounds.Width), out _);
+
         _rowsViewportWidth = LayoutRounding.RoundToPixel(Math.Max(0, contentBounds.Width), dpiScale);
         _rowsViewportHeight = LayoutRounding.RoundToPixel(Math.Max(0, contentBounds.Height - headerH), dpiScale);
-
-        _header.HorizontalOffset = _scrollViewer.HorizontalOffset;
-        _header.Arrange(new Rect(contentBounds.X, contentBounds.Y, Math.Max(0, contentBounds.Width), headerH));
 
         var rowsViewport = new Rect(
             contentBounds.X,
@@ -849,6 +939,12 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
         _presenter.ItemBindingGeneration = ItemBindingGeneration;
 
         _scrollViewer.Arrange(rowsViewport);
+
+        // ScrollViewer clamps its offsets while arranging against the latest extent. Auto-fit
+        // can shrink that extent, so arrange the header only after the clamp; otherwise its text
+        // keeps the old offset for this frame while separators render with the new offset.
+        _header.HorizontalOffset = _scrollViewer.HorizontalOffset;
+        _header.Arrange(new Rect(contentBounds.X, contentBounds.Y, Math.Max(0, contentBounds.Width), headerH));
 
         if (TryConsumeScrollIntoViewRequest(out var request))
         {
@@ -926,9 +1022,45 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
         double total = 0;
         for (int i = 0; i < _core.Columns.Count; i++)
         {
-            total += Math.Max(0, _core.Columns[i].Width);
+            total += Math.Max(0, _core.Columns[i].ActualWidth);
         }
         return total;
+    }
+
+    private void ReportAutoDesiredWidth(int columnIndex, double desiredWidth)
+    {
+        if (!_core.ReportAutoDesiredWidth(columnIndex, desiredWidth))
+        {
+            return;
+        }
+
+        if (_presenter is VariableHeightItemsPresenter variableHeightPresenter)
+        {
+            variableHeightPresenter.InvalidateHeights();
+        }
+        InvalidateMeasure();
+    }
+
+    private void MeasureRealizedAutoColumn(int columnIndex)
+    {
+        _presenter.VisitRealized((_, element) =>
+        {
+            if (element is Row row)
+            {
+                row.MeasureAutoColumn(columnIndex);
+            }
+        });
+    }
+
+    private void InvalidateColumnSizing()
+    {
+        InvalidateGridItemBindings();
+        if (_presenter is VariableHeightItemsPresenter variableHeightPresenter)
+        {
+            variableHeightPresenter.InvalidateHeights();
+        }
+        InvalidateMeasure();
+        InvalidateVisual();
     }
 
     private void BindRowTemplate(FrameworkElement element, object? item, int index, TemplateContext _)
@@ -948,7 +1080,12 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
         // signals a wholesale collection change.
         if (change.Kind == ItemsChangeKind.Reset)
         {
+            _core.ResetAutoDesiredWidths();
             _presenter.RecycleAll();
+            if (_presenter is VariableHeightItemsPresenter variableHeightPresenter)
+            {
+                variableHeightPresenter.InvalidateHeights();
+            }
             // A wholesale swap resets the underlying view's mode; re-apply the control-level setting.
             _core.SelectionMode = SelectionMode;
         }
@@ -1166,6 +1303,7 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
     private sealed class HeaderRow : Panel
     {
         private const double SeparatorHitWidth = 6;
+        private const double SortIndicatorSlotWidth = 18;
 
         private readonly GridView _owner;
         private readonly List<TextBlock> _cells = new();
@@ -1176,6 +1314,8 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
 
         private double _resizeDragStartX;
         private double _resizeDragStartWidth;
+        private GridViewCore.ColumnResizeSession? _resizeSession;
+        private int _pressedSortColumnIndex = -1;
 
         public HeaderRow(GridView owner)
         {
@@ -1214,7 +1354,9 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
             for (int i = 0; i < columns.Count; i++)
             {
                 _cells[i].Text = columns[i].Header;
-                _cells[i].Margin = new Thickness(6, 0, 6, 0);
+                _cells[i].Margin = columns[i].IsSortable
+                    ? new Thickness(6, 0, SortIndicatorSlotWidth, 0)
+                    : new Thickness(6, 0, 6, 0);
             }
         }
 
@@ -1224,7 +1366,7 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
             {
                 // Use actual column width as constraint so TextTrimming/Ellipsis works
                 double colWidth = i < _owner._core.Columns.Count
-                    ? Math.Max(0, _owner._core.Columns[i].Width)
+                    ? Math.Max(0, _owner._core.Columns[i].ActualWidth)
                     : double.PositiveInfinity;
                 _cells[i].Measure(new Size(colWidth, availableSize.Height));
             }
@@ -1232,14 +1374,38 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
             return new Size(availableSize.Width, availableSize.Height);
         }
 
+        public void MeasureAutoColumns(double availableHeight)
+        {
+            for (int i = 0; i < _cells.Count && i < _owner._core.Columns.Count; i++)
+            {
+                if (!_owner._core.Columns[i].Width.IsAuto)
+                {
+                    continue;
+                }
+
+                _cells[i].Measure(new Size(double.PositiveInfinity, Math.Max(0, availableHeight)));
+                _owner._core.ReportAutoDesiredWidth(i, _cells[i].DesiredSize.Width);
+            }
+        }
+
         protected override void ArrangeContent(Rect bounds)
         {
             double x = bounds.X - HorizontalOffset;
             for (int i = 0; i < _cells.Count; i++)
             {
-                double w = Math.Max(0, _owner._core.Columns[i].Width);
+                double w = Math.Max(0, _owner._core.Columns[i].ActualWidth);
                 _cells[i].Arrange(new Rect(x, bounds.Y, w, bounds.Height));
                 x += w;
+            }
+
+            // A resize or auto-fit can move a separator under a stationary pointer. No native
+            // mouse-move is generated in that case, so refresh the separator cursor from the
+            // window's last pointer position after the new column bounds have been applied.
+            if (_resizeColumnIndex < 0 && _pressedSortColumnIndex < 0 && IsMouseOver &&
+                FindVisualRoot() is Window window)
+            {
+                var pointer = window.TranslatePoint(window.LastMousePositionDip, this);
+                UpdateSeparatorCursor(pointer);
             }
         }
 
@@ -1265,7 +1431,26 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
             double inset = Math.Min(6, Math.Max(0, (bounds.Height - 2) / 2));
             for (int i = 0; i < _owner._core.Columns.Count; i++)
             {
-                x += Math.Max(0, _owner._core.Columns[i].Width);
+                double width = Math.Max(0, _owner._core.Columns[i].ActualWidth);
+                double right = x + width;
+                if (_owner._core.SortColumnIndex == i && width >= SortIndicatorSlotWidth)
+                {
+                    double centerX = right - SortIndicatorSlotWidth / 2;
+                    if (centerX >= bounds.Left && centerX <= bounds.Right)
+                    {
+                        Glyph.Draw(
+                            context,
+                            new Point(centerX, bounds.Y + bounds.Height / 2),
+                            3,
+                            theme.Palette.WindowText,
+                            _owner._core.SortDirection == GridViewSortDirection.Ascending
+                                ? GlyphKind.ChevronUp
+                                : GlyphKind.ChevronDown,
+                            1);
+                    }
+                }
+
+                x = right;
                 if (x >= bounds.Right - 0.5)
                 {
                     break;
@@ -1273,6 +1458,21 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
 
                 context.DrawLine(new Point(x, bounds.Y + inset), new Point(x, bounds.Bottom - inset), stroke, 1, pixelSnap: true);
             }
+        }
+
+        private int HitTestColumn(double localX)
+        {
+            double x = -HorizontalOffset;
+            for (int i = 0; i < _owner._core.Columns.Count; i++)
+            {
+                double right = x + Math.Max(0, _owner._core.Columns[i].ActualWidth);
+                if (localX >= x && localX < right)
+                {
+                    return i;
+                }
+                x = right;
+            }
+            return -1;
         }
 
         /// <summary>
@@ -1283,13 +1483,50 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
         {
             var columns = _owner._core.Columns;
             double x = -HorizontalOffset;
+            double nearestDistance = double.PositiveInfinity;
+            double nearestBoundary = double.NaN;
+            int nearestColumn = -1;
+            int collapsedColumn = -1;
             for (int i = 0; i < columns.Count; i++)
             {
-                x += Math.Max(0, columns[i].Width);
-                if (Math.Abs(localX - x) <= SeparatorHitWidth / 2 && columns[i].IsResizable)
-                    return i;
+                double width = Math.Max(0, columns[i].ActualWidth);
+                x += width;
+                if (!_owner._core.CanResizeColumn(i))
+                {
+                    continue;
+                }
+
+                double distance = Math.Abs(localX - x);
+                if (distance > SeparatorHitWidth / 2)
+                {
+                    continue;
+                }
+
+                if (distance < nearestDistance - 0.01)
+                {
+                    nearestDistance = distance;
+                    nearestBoundary = x;
+                    nearestColumn = i;
+                    collapsedColumn = width <= 0.01 ? i : -1;
+                }
+                else if (Math.Abs(x - nearestBoundary) <= 0.01 &&
+                    collapsedColumn < 0 && width <= 0.01)
+                {
+                    // A zero-width column shares its right boundary with the preceding column.
+                    // Prefer the collapsed column so pointer resizing can make it visible again.
+                    collapsedColumn = i;
+                }
             }
-            return -1;
+            return collapsedColumn >= 0 ? collapsedColumn : nearestColumn;
+        }
+
+        private void UpdateSeparatorCursor(Point position)
+        {
+            bool inside = position.X >= 0 && position.X < Bounds.Width &&
+                position.Y >= 0 && position.Y < Bounds.Height;
+            Cursor = inside && HitTestSeparator(position.X) >= 0
+                ? CursorType.SizeWE
+                : null;
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
@@ -1298,16 +1535,54 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
             if (e.Handled || e.Button != MouseButton.Left) return;
 
             var pos = e.GetPosition(this);
+            bool autoSize = e.ClickCount >= 2;
             int col = HitTestSeparator(pos.X);
-            if (col < 0) return;
+            UpdateSeparatorCursor(pos);
+            if (col >= 0 && autoSize)
+            {
+                if (_owner._core.ResetColumnToAuto(col))
+                {
+                    // Auto-fit is an explicit snapshot of the content currently on screen.
+                    // Presenter measure does not walk realized rows, so collect their intrinsic
+                    // cell widths before resolving the new column width.
+                    _owner.MeasureRealizedAutoColumn(col);
+                    _owner.InvalidateColumnSizing();
+                    InvalidateArrange();
+                    InvalidateVisual();
+                }
+                e.Handled = true;
+                return;
+            }
 
-            _resizeColumnIndex = col;
-            _resizeDragStartX = pos.X;
-            _resizeDragStartWidth = _owner._core.Columns[col].Width;
-            Cursor = CursorType.SizeWE;
+            if (col >= 0)
+            {
+                _resizeColumnIndex = col;
+                _resizeDragStartX = pos.X;
+                _resizeDragStartWidth = _owner._core.Columns[col].ActualWidth;
+                _resizeSession = _owner._core.BeginColumnResize(col);
+                if (_resizeSession == null)
+                {
+                    _resizeColumnIndex = -1;
+                    return;
+                }
+                Cursor = CursorType.SizeWE;
 
-            if (_owner.FindVisualRoot() is Window window)
-                window.CaptureMouse(this);
+                if (_owner.FindVisualRoot() is Window resizeWindow)
+                    resizeWindow.CaptureMouse(this);
+
+                e.Handled = true;
+                return;
+            }
+
+            int sortColumn = HitTestColumn(pos.X);
+            if (sortColumn < 0 || !_owner._core.Columns[sortColumn].IsSortable)
+            {
+                return;
+            }
+
+            _pressedSortColumnIndex = sortColumn;
+            if (_owner.FindVisualRoot() is Window sortWindow)
+                sortWindow.CaptureMouse(this);
 
             e.Handled = true;
         }
@@ -1323,42 +1598,71 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
                 double delta = pos.X - _resizeDragStartX;
                 double newWidth = _resizeDragStartWidth + delta;
 
-                _owner._core.SetColumnWidth(_resizeColumnIndex, newWidth);
-                _owner.InvalidateGridItemBindings();
-                // Variable-height rows recompute height from cell content; column-width
-                // changes can change wrap break points - row height changes. Tell the
-                // presenter to drop its cached heights so prefix sums re-measure.
-                if (_owner._presenter is VariableHeightItemsPresenter variableHeightPresenter)
+                if (!_owner._core.ResizeColumn(_resizeSession!, newWidth))
                 {
-                    variableHeightPresenter.InvalidateHeights();
+                    e.Handled = true;
+                    return;
                 }
-                _owner.InvalidateMeasure();
-                _owner.InvalidateVisual();
+                _owner.InvalidateColumnSizing();
                 InvalidateArrange();
                 InvalidateVisual();
                 e.Handled = true;
                 return;
             }
 
-            // Update cursor based on separator hover
-            Cursor = HitTestSeparator(pos.X) >= 0
-                ? CursorType.SizeWE
-                : null;
+            if (_pressedSortColumnIndex >= 0)
+            {
+                if (!e.LeftButton || !IsMouseCaptured)
+                {
+                    _pressedSortColumnIndex = -1;
+                }
+                e.Handled = true;
+                return;
+            }
+
+            UpdateSeparatorCursor(pos);
+        }
+
+        protected override void OnMouseLeave()
+        {
+            base.OnMouseLeave();
+            if (_resizeColumnIndex < 0)
+            {
+                Cursor = null;
+            }
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
 
-            if (_resizeColumnIndex < 0) return;
+            if (_resizeColumnIndex >= 0)
+            {
+                _resizeColumnIndex = -1;
+                _resizeSession = null;
+                Cursor = null;
 
-            _resizeColumnIndex = -1;
-            Cursor = null;
+                if (_owner.FindVisualRoot() is Window resizeWindow)
+                    resizeWindow.ReleaseMouseCapture();
 
-            if (_owner.FindVisualRoot() is Window window)
-                window.ReleaseMouseCapture();
+                e.Handled = true;
+                return;
+            }
 
-            e.Handled = true;
+            if (_pressedSortColumnIndex >= 0)
+            {
+                int pressed = _pressedSortColumnIndex;
+                _pressedSortColumnIndex = -1;
+                if (_owner.FindVisualRoot() is Window sortWindow)
+                    sortWindow.ReleaseMouseCapture();
+
+                var pos = e.GetPosition(this);
+                if (HitTestColumn(pos.X) == pressed && HitTestSeparator(pos.X) < 0)
+                {
+                    _owner._core.CycleSort(pressed);
+                }
+                e.Handled = true;
+            }
         }
     }
 
@@ -1504,10 +1808,18 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
             double maxCellH = 0;
             for (int i = 0; i < _cells.Count; i++)
             {
-                double w = Math.Max(0, _owner._core.Columns[i].Width - padH);
                 double h = double.IsPositiveInfinity(availableSize.Height)
                     ? double.PositiveInfinity
                     : Math.Max(0, availableSize.Height - padV);
+
+                var column = _owner._core.Columns[i];
+                if (column.Width.IsAuto)
+                {
+                    _cells[i].View.Measure(new Size(double.PositiveInfinity, h));
+                    _owner.ReportAutoDesiredWidth(i, _cells[i].View.DesiredSize.Width + padH);
+                }
+
+                double w = Math.Max(0, column.ActualWidth - padH);
                 _cells[i].View.Measure(new Size(w, h));
                 if (_cells[i].View.DesiredSize.Height > maxCellH)
                 {
@@ -1524,13 +1836,30 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
             return new Size(availableSize.Width, rowH);
         }
 
+        public void MeasureAutoColumn(int columnIndex)
+        {
+            if ((uint)columnIndex >= (uint)_cells.Count)
+            {
+                return;
+            }
+
+            var pad = _owner.CellPadding;
+            double rowHeight = Bounds.Height > 0 ? Bounds.Height : _owner.ResolveRowHeight();
+            double availableHeight = Math.Max(0, rowHeight - pad.VerticalThickness);
+            var view = _cells[columnIndex].View;
+            view.Measure(new Size(double.PositiveInfinity, availableHeight));
+            _owner._core.ReportAutoDesiredWidth(
+                columnIndex,
+                view.DesiredSize.Width + pad.HorizontalThickness);
+        }
+
         protected override void ArrangeContent(Rect bounds)
         {
             double x = bounds.X;
             var pad = _owner.CellPadding;
             for (int i = 0; i < _cells.Count; i++)
             {
-                double w = Math.Max(0, _owner._core.Columns[i].Width);
+                double w = Math.Max(0, _owner._core.Columns[i].ActualWidth);
                 var cellRect = new Rect(
                     x + pad.Left,
                     bounds.Y + pad.Top,
@@ -1581,7 +1910,7 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
                 double x = snapped.X;
                 for (int i = 0; i < _owner._core.Columns.Count; i++)
                 {
-                    x += Math.Max(0, _owner._core.Columns[i].Width);
+                    x += Math.Max(0, _owner._core.Columns[i].ActualWidth);
                     if (x >= snapped.Right - 0.5)
                     {
                         break;
@@ -1589,6 +1918,22 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
 
                     context.DrawLine(new Point(x, snapped.Y), new Point(x, snapped.Bottom), stroke, 1, pixelSnap: true);
                 }
+            }
+        }
+
+        protected override void RenderSubtree(IGraphicsContext context)
+        {
+            for (int i = 0; i < _cells.Count; i++)
+            {
+                // Keep collapsed cells realized and bound so their column can be restored,
+                // but do not render controls into a zero-width slot. Bordered controls would
+                // otherwise collapse both edges into a visible vertical line.
+                if (_owner._core.Columns[i].ActualWidth <= 0.01)
+                {
+                    continue;
+                }
+
+                _cells[i].View.Render(context);
             }
         }
 
@@ -1678,10 +2023,76 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
 
     internal sealed class GridViewCore
     {
-        internal record struct ColumnDefinition(string Header, double Width, double MinWidth, bool IsResizable, IDataTemplate CellTemplate);
+        internal sealed class ColumnDefinition
+        {
+            public ColumnDefinition(
+                string header,
+                GridLength width,
+                double minWidth,
+                double maxWidth,
+                bool isResizable,
+                IDataTemplate cellTemplate,
+                Comparison<object?>? sortComparison = null)
+            {
+                Header = header;
+                Width = width;
+                MinWidth = minWidth;
+                MaxWidth = maxWidth;
+                IsResizable = isResizable;
+                CellTemplate = cellTemplate;
+                SortComparison = sortComparison;
+            }
 
-        private ISelectableItemsView _itemsView = ItemsView.EmptySelectable;
+            public string Header { get; }
+
+            public GridLength Width { get; set; }
+
+            public double MinWidth { get; }
+
+            public double MaxWidth { get; }
+
+            public bool IsResizable { get; }
+
+            public IDataTemplate CellTemplate { get; }
+
+            public Comparison<object?>? SortComparison { get; }
+
+            public bool IsSortable => SortComparison != null;
+
+            public double AutoDesiredWidth { get; set; }
+
+            public double ActualWidth { get; set; }
+        }
+
+        internal sealed class ColumnResizeSession
+        {
+            public required int TargetIndex { get; init; }
+
+            public required int ColumnCount { get; init; }
+
+            public required double StartWidth { get; init; }
+
+            public required bool IsStar { get; init; }
+
+            public required bool IsAuto { get; init; }
+
+            public required double[] InitialWidths { get; init; }
+
+            public required double[] InitialWeights { get; init; }
+
+            public required int[] PeerIndices { get; init; }
+
+            public double[] WorkingWidths { get; init; } = [];
+        }
+
+        private ISelectableItemsView _sourceItemsView = ItemsView.EmptySelectable;
+        private GridViewSortedItemsView _itemsView = GridViewSortedItemsView.Create(
+            ItemsView.EmptySelectable,
+            null,
+            GridViewSortDirection.None);
         private readonly List<ColumnDefinition> _columns = new();
+        private readonly List<GridViewColumnWidthRequest> _widthRequests = new();
+        private double[] _resolvedWidths = [];
         private int _columnsVersion;
 
         public IReadOnlyList<ColumnDefinition> Columns => _columns;
@@ -1689,6 +2100,12 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
         public int ColumnsVersion => _columnsVersion;
 
         public ISelectableItemsView ItemsSource => _itemsView;
+
+        public ISelectableItemsView SourceItemsView => _sourceItemsView;
+
+        public int SortColumnIndex { get; private set; } = -1;
+
+        public GridViewSortDirection SortDirection { get; private set; }
 
         public int SelectedIndex
         {
@@ -1737,6 +2154,8 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
 
         public event Action? ColumnsChanged;
 
+        public event Action<GridViewSortChange>? SortChanged;
+
         public void SetItems(ISelectableItemsView itemsView)
         {
             ArgumentNullException.ThrowIfNull(itemsView);
@@ -1746,29 +2165,25 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
             object? previousSelectedItem = previousSelectedIndex >= 0 && previousSelectedIndex < old.Count
                 ? old.GetItem(previousSelectedIndex)
                 : null;
-            UnhookItemsView(old);
 
-            _itemsView = itemsView;
-            HookItemsView(_itemsView);
-
-            if (_itemsView is IMultiSelectableItemsView newMulti)
+            Comparison<object?>? comparison = SortColumnIndex >= 0
+                ? _columns[SortColumnIndex].SortComparison
+                : null;
+            var next = GridViewSortedItemsView.Create(itemsView, comparison, SortDirection);
+            if (itemsView is IMultiSelectableItemsView newMulti)
             {
                 newMulti.ClearSelection();
             }
-
-            // Only preserve the selected index when the item at that index in the new view is confirmed to
-            // be the same item (by reference, or by key when the view provides a KeySelector). Otherwise the
-            // previous index would silently select an unrelated row belonging to the new source.
-            bool sameItem = false;
-            if (previousSelectedItem != null && previousSelectedIndex >= 0 && previousSelectedIndex < _itemsView.Count)
+            if (previousSelectedItem != null)
             {
-                var candidate = _itemsView.GetItem(previousSelectedIndex);
-                var keySelector = _itemsView.KeySelector;
-                sameItem = ReferenceEquals(candidate, previousSelectedItem)
-                    || (keySelector != null && Equals(keySelector(candidate), keySelector(previousSelectedItem)));
+                next.SelectedItem = previousSelectedItem;
             }
 
-            _itemsView.SelectedIndex = sameItem ? previousSelectedIndex : -1;
+            UnhookItemsView(old);
+            old.Dispose();
+            _sourceItemsView = itemsView;
+            _itemsView = next;
+            HookItemsView(_itemsView);
 
             ItemsChanged?.Invoke(new ItemsChange(ItemsChangeKind.Reset, 0, _itemsView.Count));
         }
@@ -1776,6 +2191,8 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
         public void SetColumns(IReadOnlyList<ColumnDefinition> columns)
         {
             ArgumentNullException.ThrowIfNull(columns);
+
+            ClearSort();
 
             _columns.Clear();
             for (int i = 0; i < columns.Count; i++)
@@ -1785,6 +2202,78 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
 
             _columnsVersion++;
             ColumnsChanged?.Invoke();
+        }
+
+        public void SortByColumn(int columnIndex, GridViewSortDirection direction)
+        {
+            if (direction is < GridViewSortDirection.None or > GridViewSortDirection.Descending)
+            {
+                throw new ArgumentOutOfRangeException(nameof(direction));
+            }
+            if (direction == GridViewSortDirection.None)
+            {
+                ClearSort();
+                return;
+            }
+            if ((uint)columnIndex >= (uint)_columns.Count)
+            {
+                throw new ArgumentOutOfRangeException(nameof(columnIndex));
+            }
+
+            var comparison = _columns[columnIndex].SortComparison
+                ?? throw new InvalidOperationException($"GridView column {columnIndex} does not define a sort comparer.");
+            if (SortColumnIndex == columnIndex && SortDirection == direction)
+            {
+                return;
+            }
+
+            int previousColumn = SortColumnIndex;
+            var previousDirection = SortDirection;
+            SortColumnIndex = columnIndex;
+            SortDirection = direction;
+            try
+            {
+                _itemsView.SetSort(comparison, direction);
+            }
+            catch
+            {
+                SortColumnIndex = previousColumn;
+                SortDirection = previousDirection;
+                throw;
+            }
+
+            SortChanged?.Invoke(new GridViewSortChange(columnIndex, direction));
+        }
+
+        public void ClearSort()
+        {
+            if (SortDirection == GridViewSortDirection.None)
+            {
+                return;
+            }
+
+            SortColumnIndex = -1;
+            SortDirection = GridViewSortDirection.None;
+            _itemsView.SetSort(null, GridViewSortDirection.None);
+            SortChanged?.Invoke(new GridViewSortChange(-1, GridViewSortDirection.None));
+        }
+
+        public void CycleSort(int columnIndex)
+        {
+            if ((uint)columnIndex >= (uint)_columns.Count || !_columns[columnIndex].IsSortable)
+            {
+                return;
+            }
+
+            var next = SortColumnIndex != columnIndex
+                ? GridViewSortDirection.Ascending
+                : SortDirection switch
+                {
+                    GridViewSortDirection.Ascending => GridViewSortDirection.Descending,
+                    GridViewSortDirection.Descending => GridViewSortDirection.None,
+                    _ => GridViewSortDirection.Ascending,
+                };
+            SortByColumn(columnIndex, next);
         }
 
         public void AddColumns(IReadOnlyList<ColumnDefinition> columns)
@@ -1800,17 +2289,289 @@ public sealed class GridView : ScrollableItemsBase, IFocusIntoViewHost, IVirtual
             ColumnsChanged?.Invoke();
         }
 
-        /// <summary>
-        /// Updates the width of a single column (e.g. during resize drag).
-        /// Does not fire ColumnsChanged; caller is responsible for layout invalidation.
-        /// </summary>
-        public void SetColumnWidth(int index, double width)
+        public double ResolveColumnWidths(double availableWidth, out bool changed)
         {
-            if ((uint)index >= (uint)_columns.Count) return;
-            var col = _columns[index];
-            col.Width = Math.Max(col.MinWidth, width);
-            _columns[index] = col;
-            _columnsVersion++;
+            _widthRequests.Clear();
+            for (int i = 0; i < _columns.Count; i++)
+            {
+                var column = _columns[i];
+                _widthRequests.Add(new GridViewColumnWidthRequest(
+                    column.Width,
+                    column.AutoDesiredWidth,
+                    column.MinWidth,
+                    column.MaxWidth));
+            }
+
+            if (_resolvedWidths.Length < _columns.Count)
+            {
+                _resolvedWidths = new double[_columns.Count];
+            }
+
+            double extent = GridViewColumnWidthResolver.Resolve(_widthRequests, availableWidth, _resolvedWidths);
+            changed = false;
+            for (int i = 0; i < _columns.Count; i++)
+            {
+                double actual = _resolvedWidths[i];
+                if (!_columns[i].ActualWidth.Equals(actual))
+                {
+                    _columns[i].ActualWidth = actual;
+                    changed = true;
+                }
+            }
+
+            return extent;
+        }
+
+        public bool ReportAutoDesiredWidth(int index, double desiredWidth)
+        {
+            if ((uint)index >= (uint)_columns.Count || double.IsNaN(desiredWidth) || desiredWidth <= 0)
+            {
+                return false;
+            }
+
+            var column = _columns[index];
+            if (!column.Width.IsAuto)
+            {
+                return false;
+            }
+
+            desiredWidth = Math.Min(Math.Max(desiredWidth, column.MinWidth), column.MaxWidth);
+            if (desiredWidth <= column.AutoDesiredWidth + 0.01)
+            {
+                return false;
+            }
+
+            column.AutoDesiredWidth = desiredWidth;
+            return true;
+        }
+
+        public void ResetAutoDesiredWidths()
+        {
+            for (int i = 0; i < _columns.Count; i++)
+            {
+                _columns[i].AutoDesiredWidth = 0;
+            }
+        }
+
+        public bool CanResizeColumn(int index)
+            => (uint)index < (uint)_columns.Count && _columns[index].IsResizable;
+
+        public bool CanAutoSizeColumn(int index)
+            => (uint)index < (uint)_columns.Count && _columns[index].IsResizable;
+
+        public bool ResetColumnToAuto(int index)
+        {
+            if (!CanAutoSizeColumn(index))
+            {
+                return false;
+            }
+
+            var column = _columns[index];
+            column.Width = GridLength.Auto;
+            // Auto observations are monotonic during normal virtualization. An explicit
+            // auto-fit gesture is also the escape hatch that allows a previously wider
+            // observation to shrink to the currently realized header/cell content.
+            column.AutoDesiredWidth = 0;
+            return true;
+        }
+
+        public ColumnResizeSession? BeginColumnResize(int index)
+        {
+            if (!CanResizeColumn(index))
+            {
+                return null;
+            }
+
+            var target = _columns[index];
+
+            var initialWidths = new double[_columns.Count];
+            var initialWeights = new double[_columns.Count];
+            for (int i = 0; i < _columns.Count; i++)
+            {
+                initialWidths[i] = _columns[i].ActualWidth;
+                initialWeights[i] = _columns[i].Width.IsStar ? _columns[i].Width.Value : 0;
+            }
+
+            var peers = new List<int>();
+            if (target.Width.IsStar)
+            {
+                // Prefer columns to the right, matching the separator being dragged. If there
+                // are none, compensate with Star columns on the left.
+                for (int i = index + 1; i < _columns.Count; i++)
+                {
+                    if (_columns[i].IsResizable && _columns[i].Width.IsStar)
+                    {
+                        peers.Add(i);
+                    }
+                }
+                if (peers.Count == 0)
+                {
+                    for (int i = index - 1; i >= 0; i--)
+                    {
+                        if (_columns[i].IsResizable && _columns[i].Width.IsStar)
+                        {
+                            peers.Add(i);
+                        }
+                    }
+                }
+            }
+
+            return new ColumnResizeSession
+            {
+                TargetIndex = index,
+                ColumnCount = _columns.Count,
+                StartWidth = target.ActualWidth,
+                IsStar = target.Width.IsStar,
+                IsAuto = target.Width.IsAuto,
+                InitialWidths = initialWidths,
+                InitialWeights = initialWeights,
+                PeerIndices = peers.ToArray(),
+                WorkingWidths = new double[_columns.Count],
+            };
+        }
+
+        public bool ResizeColumn(ColumnResizeSession session, double requestedWidth)
+        {
+            ArgumentNullException.ThrowIfNull(session);
+            if (session.ColumnCount != _columns.Count || (uint)session.TargetIndex >= (uint)_columns.Count)
+            {
+                return false;
+            }
+
+            var target = _columns[session.TargetIndex];
+            requestedWidth = Math.Min(Math.Max(requestedWidth, target.MinWidth), target.MaxWidth);
+
+            if (!session.IsStar)
+            {
+                if (target.ActualWidth.Equals(requestedWidth) && target.Width.IsAbsolute && target.Width.Value.Equals(requestedWidth))
+                {
+                    return false;
+                }
+
+                target.Width = GridLength.Pixels(requestedWidth);
+                if (session.IsAuto)
+                {
+                    target.AutoDesiredWidth = 0;
+                }
+                target.ActualWidth = requestedWidth;
+                return true;
+            }
+
+            Array.Copy(session.InitialWidths, session.WorkingWidths, session.ColumnCount);
+            double requestedDelta = requestedWidth - session.StartWidth;
+            if (Math.Abs(requestedDelta) <= 0.001)
+            {
+                return false;
+            }
+
+            if (session.PeerIndices.Length == 0)
+            {
+                // A lone Star has no relative weight that can express a manual width. Once the
+                // user actually drags it, materialize the requested width as Pixel so the last
+                // column remains resizable and may intentionally create or remove overflow.
+                target.Width = GridLength.Pixels(requestedWidth);
+                target.ActualWidth = requestedWidth;
+                return true;
+            }
+
+            bool targetExpands = requestedDelta > 0;
+            double capacity = 0;
+            for (int i = 0; i < session.PeerIndices.Length; i++)
+            {
+                int peerIndex = session.PeerIndices[i];
+                var peer = _columns[peerIndex];
+                double peerCapacity = targetExpands
+                    ? Math.Max(0, session.InitialWidths[peerIndex] - peer.MinWidth)
+                    : Math.Max(0, peer.MaxWidth - session.InitialWidths[peerIndex]);
+                capacity += peerCapacity;
+            }
+
+            double appliedMagnitude = Math.Min(Math.Abs(requestedDelta), capacity);
+            if (appliedMagnitude <= 0.001)
+            {
+                if (targetExpands && session.StartWidth <= 0.001)
+                {
+                    // No Star peer can surrender space when every flexible column is already
+                    // collapsed. Materialize the dragged column as Pixel so the gesture can
+                    // intentionally create horizontal overflow and recover the column.
+                    target.Width = GridLength.Pixels(requestedWidth);
+                    target.ActualWidth = requestedWidth;
+                    return true;
+                }
+                return false;
+            }
+
+            double appliedDelta = targetExpands ? appliedMagnitude : -appliedMagnitude;
+            session.WorkingWidths[session.TargetIndex] = session.StartWidth + appliedDelta;
+            DistributeResizeCompensation(session, appliedMagnitude, targetExpands);
+
+            // Re-express every Star width in a common scale. Using only the changed pair would
+            // mix pixel-like weights with the untouched original weights and distort the next
+            // viewport resolve.
+            const double minimumWeight = 0.000001;
+            for (int i = 0; i < _columns.Count; i++)
+            {
+                if (!_columns[i].Width.IsStar)
+                {
+                    continue;
+                }
+
+                double actual = session.WorkingWidths[i];
+                _columns[i].ActualWidth = actual;
+                _columns[i].Width = GridLength.Stars(Math.Max(minimumWeight, actual));
+            }
+
+            return true;
+        }
+
+        private void DistributeResizeCompensation(ColumnResizeSession session, double amount, bool targetExpands)
+        {
+            var unresolved = new List<int>(session.PeerIndices);
+            double remaining = amount;
+
+            while (unresolved.Count > 0 && remaining > 0.001)
+            {
+                double totalWeight = 0;
+                for (int i = 0; i < unresolved.Count; i++)
+                {
+                    totalWeight += Math.Max(0.000001, session.InitialWeights[unresolved[i]]);
+                }
+
+                bool constrained = false;
+                for (int i = unresolved.Count - 1; i >= 0; i--)
+                {
+                    int peerIndex = unresolved[i];
+                    var peer = _columns[peerIndex];
+                    double capacity = targetExpands
+                        ? Math.Max(0, session.InitialWidths[peerIndex] - peer.MinWidth)
+                        : Math.Max(0, peer.MaxWidth - session.InitialWidths[peerIndex]);
+                    double share = remaining * Math.Max(0.000001, session.InitialWeights[peerIndex]) / totalWeight;
+                    if (share >= capacity - 0.001)
+                    {
+                        session.WorkingWidths[peerIndex] = targetExpands
+                            ? session.InitialWidths[peerIndex] - capacity
+                            : session.InitialWidths[peerIndex] + capacity;
+                        remaining = Math.Max(0, remaining - capacity);
+                        unresolved.RemoveAt(i);
+                        constrained = true;
+                    }
+                }
+
+                if (constrained)
+                {
+                    continue;
+                }
+
+                for (int i = 0; i < unresolved.Count; i++)
+                {
+                    int peerIndex = unresolved[i];
+                    double share = remaining * Math.Max(0.000001, session.InitialWeights[peerIndex]) / totalWeight;
+                    session.WorkingWidths[peerIndex] = targetExpands
+                        ? session.InitialWidths[peerIndex] - share
+                        : session.InitialWidths[peerIndex] + share;
+                }
+                remaining = 0;
+            }
         }
 
         private void HookItemsView(ISelectableItemsView view)
