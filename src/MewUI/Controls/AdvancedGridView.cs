@@ -738,7 +738,7 @@ public sealed class AdvancedGridView : ScrollableItemsBase, IFocusIntoViewHost, 
         double cur = contentX;
         for (int i = 0; i < _core.Columns.Count; i++)
         {
-            double w = Math.Max(0, _core.Columns[i].Width);
+            double w = Math.Max(0, _core.Columns[i].ActualWidth);
             double next = cur + w;
             if (x >= cur && x < next)
             {
@@ -785,7 +785,7 @@ public sealed class AdvancedGridView : ScrollableItemsBase, IFocusIntoViewHost, 
                 throw new InvalidOperationException("AdvancedGridColumn.CellTemplate is required.");
             }
 
-            list.Add(new GridView.GridViewCore.ColumnDefinition(c.Header, c.Width, c.MinWidth, c.IsResizable, c.CellTemplate));
+            list.Add(new GridView.GridViewCore.ColumnDefinition(c.Header, GridLength.Pixels(c.Width), c.MinWidth, double.PositiveInfinity, c.IsResizable, c.CellTemplate));
         }
 
         return list;
@@ -908,7 +908,7 @@ public sealed class AdvancedGridView : ScrollableItemsBase, IFocusIntoViewHost, 
             var cols = _core.Columns;
             for (int i = 0; i < _frozenLeft && i < cols.Count; i++)
             {
-                w += Math.Max(0, cols[i].Width);
+                w += Math.Max(0, cols[i].ActualWidth);
             }
             return w;
         }
@@ -924,7 +924,7 @@ public sealed class AdvancedGridView : ScrollableItemsBase, IFocusIntoViewHost, 
             int start = cols.Count - _frozenRight;
             for (int i = start; i < cols.Count && i >= 0; i++)
             {
-                w += Math.Max(0, cols[i].Width);
+                w += Math.Max(0, cols[i].ActualWidth);
             }
             return w;
         }
@@ -1106,11 +1106,8 @@ public sealed class AdvancedGridView : ScrollableItemsBase, IFocusIntoViewHost, 
             ? double.PositiveInfinity
             : Math.Max(0, availableSize.Width - Padding.HorizontalThickness - borderInset * 2);
 
-        _columnsExtentWidth = 0;
-        for (int i = 0; i < _core.Columns.Count; i++)
-        {
-            _columnsExtentWidth += Math.Max(0, _core.Columns[i].Width);
-        }
+        // 解析列宽，设置 ActualWidth
+        _columnsExtentWidth = _core.ResolveColumnWidths(widthLimit, out _);
 
         double contentWidth = double.IsPositiveInfinity(widthLimit)
             ? _columnsExtentWidth
@@ -1191,6 +1188,9 @@ public sealed class AdvancedGridView : ScrollableItemsBase, IFocusIntoViewHost, 
 
         double headerH = ResolveHeaderHeight();
         double footerH = ResolveFooterHeight();
+
+        // 在 arrange 时再次解析列宽，确保 Star 列正确计算
+        _columnsExtentWidth = _core.ResolveColumnWidths(Math.Max(0, contentBounds.Width), out _);
 
         // Phase 2 固定列:左右固定列总宽。
         double leftW = HasFrozenColumns ? FrozenLeftWidth : 0;
@@ -1386,7 +1386,7 @@ public sealed class AdvancedGridView : ScrollableItemsBase, IFocusIntoViewHost, 
         double total = 0;
         for (int i = 0; i < _core.Columns.Count; i++)
         {
-            total += Math.Max(0, _core.Columns[i].Width);
+            total += Math.Max(0, _core.Columns[i].ActualWidth);
         }
         return total;
     }
@@ -1598,12 +1598,24 @@ public sealed class AdvancedGridView : ScrollableItemsBase, IFocusIntoViewHost, 
     /// <summary>Core 的列定义(只读视图),供表头/行布局与渲染读取列宽。</summary>
     internal IReadOnlyList<GridView.GridViewCore.ColumnDefinition> CoreColumns => _core.Columns;
 
-    /// <summary>设置某列宽度(拖拽调宽),经 Core 并触发失效。</summary>
-    internal void SetColumnWidthCore(int index, double width) => _core.SetColumnWidth(index, width);
+    /// <summary>开始列宽拖拽调整会话。</summary>
+    internal GridView.GridViewCore.ColumnResizeSession? BeginColumnResizeCore(int index) => _core.BeginColumnResize(index);
+
+    /// <summary>执行列宽拖拽调整。</summary>
+    internal bool ResizeColumnCore(GridView.GridViewCore.ColumnResizeSession session, double width) => _core.ResizeColumn(session, width);
+
+    /// <summary>列宽调整后失效布局。</summary>
+    internal void InvalidateColumnSizingCore()
+    {
+        _core.ResetAutoDesiredWidths();
+        InvalidateItemBindings();
+        InvalidateMeasure();
+        InvalidateVisual();
+    }
 
     /// <summary>
     /// 列宽变化(拖拽调宽)后重配固定列 overlay 与表头/页脚的固定段宽度。
-    /// <see cref="GridView.GridViewCore.SetColumnWidth"/> 不触发 ColumnsChanged,故拖拽调宽路径需显式调本方法
+    /// <see cref="ResizeColumnCore"/> 不触发 ColumnsChanged,故拖拽调宽路径需显式调本方法
     /// 同步 FrozenLeftWidth/RightWidth 缓存(否则 overlay 宽度、右固定贴边、表头/页脚分段竖线用旧宽错位)。
     /// </summary>
     internal void OnColumnWidthChangedCore()

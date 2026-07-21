@@ -110,7 +110,7 @@ internal sealed class AdvancedGridFooterRow : Panel
             for (int i = 0; i < count; i++)
             {
                 _colX[i] = x;
-                x += Math.Max(0, columns[i].Width);
+                x += Math.Max(0, columns[i].ActualWidth);
             }
             return;
         }
@@ -121,19 +121,19 @@ internal sealed class AdvancedGridFooterRow : Panel
         for (; i2 < _frozenLeft && i2 < count; i2++)
         {
             _colX[i2] = lx;
-            lx += Math.Max(0, columns[i2].Width);
+            lx += Math.Max(0, columns[i2].ActualWidth);
         }
         double mx = bounds.X + _frozenLeftWidth - HorizontalOffset;
         for (; i2 < rightStart && i2 < count; i2++)
         {
             _colX[i2] = mx;
-            mx += Math.Max(0, columns[i2].Width);
+            mx += Math.Max(0, columns[i2].ActualWidth);
         }
         double rx = bounds.Right - _frozenRightWidth;
         for (; i2 < count; i2++)
         {
             _colX[i2] = rx;
-            rx += Math.Max(0, columns[i2].Width);
+            rx += Math.Max(0, columns[i2].ActualWidth);
         }
     }
 
@@ -143,7 +143,7 @@ internal sealed class AdvancedGridFooterRow : Panel
         for (int i = 0; i < _cells.Count; i++)
         {
             double colWidth = i < columns.Count
-                ? Math.Max(0, columns[i].Width)
+                ? Math.Max(0, columns[i].ActualWidth)
                 : double.PositiveInfinity;
             _cells[i].Measure(new Size(colWidth, availableSize.Height));
         }
@@ -157,7 +157,7 @@ internal sealed class AdvancedGridFooterRow : Panel
         ComputeColumnXs(bounds, columns);
         for (int i = 0; i < _cells.Count; i++)
         {
-            double w = Math.Max(0, columns[i].Width);
+            double w = Math.Max(0, columns[i].ActualWidth);
             double x = _colX[i];
             // 页脚文本右对齐(数值列合计常右对齐);首列等左对齐由调用方经 FooterText 内容体现。
             // 这里统一左对齐 + Margin,与表头一致,避免过度假设。
@@ -230,7 +230,7 @@ internal sealed class AdvancedGridFooterRow : Panel
         int rightStart = columns.Count - _frozenRight;
         for (int i = 0; i < _cells.Count; i++)
         {
-            double x = _colX[i] + Math.Max(0, columns[i].Width);
+            double x = _colX[i] + Math.Max(0, columns[i].ActualWidth);
             // 中间列竖线裁剪到中间区,避免滚出时画到固定列区。
             bool isMiddle = HasFrozen && i >= _frozenLeft && i < rightStart;
             if (isMiddle)

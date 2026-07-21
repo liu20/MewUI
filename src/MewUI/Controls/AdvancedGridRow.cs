@@ -173,7 +173,7 @@ internal sealed class AdvancedGridRow : Panel
         double maxCellH = 0;
         for (int i = 0; i < _cells.Count; i++)
         {
-            double w = Math.Max(0, columns[start + i].Width - padH);
+            double w = Math.Max(0, columns[start + i].ActualWidth - padH);
             double h = double.IsPositiveInfinity(availableSize.Height)
                 ? double.PositiveInfinity
                 : Math.Max(0, availableSize.Height - padV);
@@ -200,7 +200,7 @@ internal sealed class AdvancedGridRow : Panel
         int start = _lastColumnStart;
         for (int i = 0; i < _cells.Count; i++)
         {
-            double w = Math.Max(0, columns[start + i].Width);
+            double w = Math.Max(0, columns[start + i].ActualWidth);
             var cellRect = new Rect(
                 x + pad.Left,
                 bounds.Y + pad.Top,
@@ -254,7 +254,7 @@ internal sealed class AdvancedGridRow : Panel
             // 画范围内列的右边界竖线(最后一列的右边界 = snapped.Right,跳过)。
             for (int i = 0; i < _cells.Count; i++)
             {
-                x += Math.Max(0, columns[start + i].Width);
+                x += Math.Max(0, columns[start + i].ActualWidth);
                 if (x >= snapped.Right - 0.5)
                 {
                     break;

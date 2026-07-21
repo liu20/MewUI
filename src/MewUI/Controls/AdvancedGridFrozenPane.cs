@@ -132,7 +132,7 @@ internal sealed class AdvancedGridFrozenPane : Panel
         int end = _columnStart + _columnCount;
         for (int i = _columnStart; i < end && i < columns.Count; i++)
         {
-            total += Math.Max(0, columns[i].Width);
+            total += Math.Max(0, columns[i].ActualWidth);
         }
         return total;
     }

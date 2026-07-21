@@ -33,6 +33,7 @@ internal sealed class AdvancedGridHeaderRow : Panel
     private int _resizeColumnIndex = -1;
     private double _resizeDragStartX;
     private double _resizeDragStartWidth;
+    private GridView.GridViewCore.ColumnResizeSession? _resizeSession;
 
     public AdvancedGridHeaderRow(AdvancedGridView owner)
     {
@@ -92,7 +93,7 @@ internal sealed class AdvancedGridHeaderRow : Panel
             for (int i = 0; i < count; i++)
             {
                 _colX[i] = x;
-                x += Math.Max(0, columns[i].Width);
+                x += Math.Max(0, columns[i].ActualWidth);
             }
             return;
         }
@@ -104,21 +105,21 @@ internal sealed class AdvancedGridHeaderRow : Panel
         for (; i2 < _frozenLeft && i2 < count; i2++)
         {
             _colX[i2] = lx;
-            lx += Math.Max(0, columns[i2].Width);
+            lx += Math.Max(0, columns[i2].ActualWidth);
         }
         // 中间段:bounds.X + leftW - offset。
         double mx = bounds.X + _frozenLeftWidth - HorizontalOffset;
         for (; i2 < rightStart && i2 < count; i2++)
         {
             _colX[i2] = mx;
-            mx += Math.Max(0, columns[i2].Width);
+            mx += Math.Max(0, columns[i2].ActualWidth);
         }
         // 右固定段:bounds.Right - rightW。
         double rx = bounds.Right - _frozenRightWidth;
         for (; i2 < count; i2++)
         {
             _colX[i2] = rx;
-            rx += Math.Max(0, columns[i2].Width);
+            rx += Math.Max(0, columns[i2].ActualWidth);
         }
     }
 
@@ -144,9 +145,8 @@ internal sealed class AdvancedGridHeaderRow : Panel
         for (int i = 0; i < _groups.Count; i++)
         {
             _groupCells[i].Text = _groups[i].Label;
-            _groupCells[i].FontWeight = FontWeight.Bold;
             // 分组标题居中显示(arrange 给的宽度为跨列总宽,Center 让文本在该范围内水平居中)。
-            _groupCells[i].HorizontalAlignment = HorizontalAlignment.Center;
+            _groupCells[i].TextAlignment = TextAlignment.Center;
             _groupCells[i].Margin = new Thickness(6, 0, 6, 0);
         }
 
@@ -218,7 +218,7 @@ internal sealed class AdvancedGridHeaderRow : Panel
         for (int i = 0; i < _cells.Count; i++)
         {
             double colWidth = i < columns.Count
-                ? Math.Max(0, columns[i].Width)
+                ? Math.Max(0, columns[i].ActualWidth)
                 : double.PositiveInfinity;
             double h = HasGroups && !IsColumnGrouped(i) ? fullH : rowH;
             _cells[i].Measure(new Size(colWidth, h));
@@ -244,7 +244,7 @@ internal sealed class AdvancedGridHeaderRow : Panel
         int end = Math.Min(columns.Count, g.StartColumn + g.ColumnSpan);
         for (int i = g.StartColumn; i < end; i++)
         {
-            w += Math.Max(0, columns[i].Width);
+            w += Math.Max(0, columns[i].ActualWidth);
         }
 
         return w;
@@ -265,7 +265,7 @@ internal sealed class AdvancedGridHeaderRow : Panel
         // RenderSubtree 的中间区 clip 裁掉(此处 arrange 用原 x,不改变文本位置)。
         for (int i = 0; i < _cells.Count; i++)
         {
-            double w = Math.Max(0, columns[i].Width);
+            double w = Math.Max(0, columns[i].ActualWidth);
             double x = _colX[i];
             if (HasGroups && !IsColumnGrouped(i))
             {
@@ -345,6 +345,31 @@ internal sealed class AdvancedGridHeaderRow : Panel
         int rightStart = columns.Count - _frozenRight;
         var midClip = LayoutRounding.MakeClipRect(new Rect(midLeft, bounds.Y, Math.Max(0, midRight - midLeft), bounds.Height), dpiScale);
 
+        // 分组标题 cell(跨列合并,占上半行):在 clip 之下渲染,中间区分组会被 clip,固定列分组无 clip 在上层补。
+        // 分组标题不随列名 cell 的中间/固定分段,而是按其跨列范围整体居中;约束 complexHeader 不跨固定列边界,
+        // 故每组要么全在固定段要么全在中间段。中间段分组走 clip(滚动时裁掉溢出),固定段分组无 clip 在上层补画。
+        if (HasGroups)
+        {
+            context.Save();
+            context.SetClip(midClip);
+            try
+            {
+                for (int gi = 0; gi < _groupCells.Count; gi++)
+                {
+                    // 中间段分组(起始列在中间区)在 clip 下渲染。
+                    int startCol = _groups[gi].StartColumn;
+                    if (startCol >= _frozenLeft && startCol < rightStart)
+                    {
+                        _groupCells[gi].Render(context);
+                    }
+                }
+            }
+            finally
+            {
+                context.Restore();
+            }
+        }
+
         context.Save();
         context.SetClip(midClip);
         try
@@ -353,17 +378,6 @@ internal sealed class AdvancedGridHeaderRow : Panel
             for (int i = _frozenLeft; i < rightStart && i < _cells.Count; i++)
             {
                 _cells[i].Render(context);
-            }
-
-            // 中间段分组标题 cell(分组起始列落在中间段 [frozenLeft, rightStart) 内)同样在 clip 下渲染,
-            // 避免分组标题文本溢出到固定列区。分组不跨固定列边界(complexHeader 约束),故按起始列判定段即可。
-            for (int gi = 0; gi < _groups.Count; gi++)
-            {
-                int start = _groups[gi].StartColumn;
-                if (start >= _frozenLeft && start < rightStart)
-                {
-                    _groupCells[gi].Render(context);
-                }
             }
         }
         finally
@@ -381,13 +395,17 @@ internal sealed class AdvancedGridHeaderRow : Panel
             _cells[i].Render(context);
         }
 
-        // 固定段分组标题 cell(分组起始列落在左段 < frozenLeft 或右段 >= rightStart)无 clip 渲染。
-        for (int gi = 0; gi < _groups.Count; gi++)
+        // 固定段分组标题 cell 无 clip 渲染(在上层,覆盖固定列 cell)。
+        if (HasGroups)
         {
-            int start = _groups[gi].StartColumn;
-            if (start < _frozenLeft || start >= rightStart)
+            for (int gi = 0; gi < _groupCells.Count; gi++)
             {
-                _groupCells[gi].Render(context);
+                int startCol = _groups[gi].StartColumn;
+                // 固定段分组(起始列在左固定段或右固定段)无 clip 渲染在上层。
+                if (startCol < _frozenLeft || startCol >= rightStart)
+                {
+                    _groupCells[gi].Render(context);
+                }
             }
         }
     }
@@ -424,7 +442,7 @@ internal sealed class AdvancedGridHeaderRow : Panel
             {
                 if (IsColumnGrouped(i))
                 {
-                    double w = Math.Max(0, columns[i].Width);
+                    double w = Math.Max(0, columns[i].ActualWidth);
                     double mx = _colX[i];
                     var seg = LayoutRounding.SnapBoundsRectToPixels(
                         new Rect(mx, midY, w, thickness), dpiScale);
@@ -439,7 +457,7 @@ internal sealed class AdvancedGridHeaderRow : Panel
             int gRightStart = columns.Count - _frozenRight;
             for (int i = 0; i < columns.Count; i++)
             {
-                double curR = _colX[i] + Math.Max(0, columns[i].Width);
+                double curR = _colX[i] + Math.Max(0, columns[i].ActualWidth);
                 if (i + 1 < columns.Count && GroupIdOf(i) != GroupIdOf(i + 1))
                 {
                     bool isMiddle = HasFrozen && i >= _frozenLeft && i < gRightStart;
@@ -461,7 +479,7 @@ internal sealed class AdvancedGridHeaderRow : Panel
             int nRightStart = columns.Count - _frozenRight;
             for (int i = 0; i < columns.Count; i++)
             {
-                double curR = _colX[i] + Math.Max(0, columns[i].Width);
+                double curR = _colX[i] + Math.Max(0, columns[i].ActualWidth);
                 bool isMiddle = HasFrozen && i >= _frozenLeft && i < nRightStart;
                 if (isMiddle)
                 {
@@ -499,7 +517,7 @@ internal sealed class AdvancedGridHeaderRow : Panel
             int rightStart = columns.Count - _frozenRight;
             for (int i = 0; i < columns.Count; i++)
             {
-                double curR = _colX[i] + Math.Max(0, columns[i].Width);
+                double curR = _colX[i] + Math.Max(0, columns[i].ActualWidth);
                 bool isMiddle = HasFrozen && i >= _frozenLeft && i < rightStart;
                 if (isMiddle)
                 {
@@ -541,7 +559,7 @@ internal sealed class AdvancedGridHeaderRow : Panel
         ComputeColumnXs(b, columns);
         for (int i = 0; i < columns.Count; i++)
         {
-            double colRight = _colX[i] + Math.Max(0, columns[i].Width);
+            double colRight = _colX[i] + Math.Max(0, columns[i].ActualWidth);
             double local = colRight - b.X;
             if (Math.Abs(localX - local) <= SeparatorHitWidth / 2 && columns[i].IsResizable)
             {
@@ -562,7 +580,13 @@ internal sealed class AdvancedGridHeaderRow : Panel
 
         _resizeColumnIndex = col;
         _resizeDragStartX = pos.X;
-        _resizeDragStartWidth = _owner.CoreColumns[col].Width;
+        _resizeDragStartWidth = _owner.CoreColumns[col].ActualWidth;
+        _resizeSession = _owner.BeginColumnResizeCore(col);
+        if (_resizeSession == null)
+        {
+            _resizeColumnIndex = -1;
+            return;
+        }
         Cursor = CursorType.SizeWE;
 
         if (_owner.FindVisualRoot() is Window window)
@@ -577,23 +601,19 @@ internal sealed class AdvancedGridHeaderRow : Panel
 
         var pos = e.GetPosition(this);
 
-        if (_resizeColumnIndex >= 0)
+        if (_resizeColumnIndex >= 0 && _resizeSession != null)
         {
             double delta = pos.X - _resizeDragStartX;
             double newWidth = _resizeDragStartWidth + delta;
 
-            _owner.SetColumnWidthCore(_resizeColumnIndex, newWidth);
-            _owner.InvalidateGridItemBindingsCore();
-            // 变高行会按内容重算高度;列宽变化可能改变换行断点-行高变化。通知 presenter 丢弃
-            // 缓存高度以重测前缀和。(定高 presenter 无影响,保留对齐 GridView 写法。)
-            if (_owner.TryGetVariableHeightPresenter(out var variableHeightPresenter))
+            if (!_owner.ResizeColumnCore(_resizeSession, newWidth))
             {
-                variableHeightPresenter.InvalidateHeights();
+                e.Handled = true;
+                return;
             }
-            // Phase 2:列宽变化后固定列 overlay/表头/页脚的宽度缓存需同步(SetColumnWidth 不触发 ColumnsChanged)。
+            _owner.InvalidateColumnSizingCore();
+            // Phase 2:列宽变化后固定列 overlay/表头/页脚的宽度缓存需同步。
             _owner.OnColumnWidthChangedCore();
-            _owner.InvalidateMeasure();
-            _owner.InvalidateVisual();
             InvalidateArrange();
             InvalidateVisual();
             e.Handled = true;
@@ -613,6 +633,7 @@ internal sealed class AdvancedGridHeaderRow : Panel
         if (_resizeColumnIndex < 0) return;
 
         _resizeColumnIndex = -1;
+        _resizeSession = null;
         Cursor = null;
 
         if (_owner.FindVisualRoot() is Window window)
