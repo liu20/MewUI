@@ -5,11 +5,6 @@ using Aprillz.MewUI.Controls;
 using Aprillz.MewUI.Gallery;
 using Aprillz.MewUI.Rendering;
 
-#if DEBUG
-[assembly: System.Reflection.Metadata.MetadataUpdateHandler(typeof(Aprillz.MewUI.HotReload.MewUiMetadataUpdateHandler))]
-#endif
-
-
 if (OperatingSystem.IsWindows())
 {
     Thread.CurrentThread.SetApartmentState(ApartmentState.Unknown);
