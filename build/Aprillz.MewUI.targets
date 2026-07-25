@@ -112,4 +112,8 @@
     <RuntimeHostConfigurationOption Include="Aprillz.MewUI.HotReload.Enabled" Value="false" Trim="false" />
   </ItemGroup>
 
+  <!-- Editor preview session composition (see agent/preview-tooling/plan.md section 4.2). -->
+  <Import Project="$(MSBuildThisFileDirectory)MewUIPreview.targets"
+          Condition="'$(_MewUIPreviewTargetsImported)' != 'true' and Exists('$(MSBuildThisFileDirectory)MewUIPreview.targets')" />
+
 </Project>

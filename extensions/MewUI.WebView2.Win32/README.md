@@ -31,6 +31,15 @@ This package is AOT-compatible (`IsAotCompatible=true`).
 var webView = new WebView2();
 webView.Source = new Uri("https://example.com");
 
+// Default background color (opaque or fully transparent only)
+webView.DefaultBackgroundColor = Color.Black;
+
+// Virtual host folder mapping
+webView.SetVirtualHostNameToFolderMapping(
+    "local.folder",
+    Path.Combine(AppContext.BaseDirectory, "assets"),
+    CoreWebView2HostResourceAccessKind.Allow);
+
 // JavaScript execution
 string result = await webView.ExecuteScriptAsync("document.title");
 

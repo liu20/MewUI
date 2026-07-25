@@ -51,6 +51,7 @@ public abstract partial class TextBase : Control, ITextCompositionClient, ITextI
 
     private DispatcherTimer? _caretTimer;
     private bool _caretVisible = true;
+    private int _lastSyncedCaretPosition;
 
     /// <summary>
     /// Gets whether the caret is currently visible (toggles during blink).
@@ -221,7 +222,6 @@ public abstract partial class TextBase : Control, ITextCompositionClient, ITextI
             SyncSelectionProperties();
             if (old != _editor.CaretPosition)
             {
-                ResetCaretBlink();
                 InvalidateVisual();
             }
         }
@@ -279,9 +279,18 @@ public abstract partial class TextBase : Control, ITextCompositionClient, ITextI
     // no-op when unchanged, so callers that end up not actually moving anything cost nothing.
     private void SyncSelectionProperties()
     {
+        int caretPosition = _editor.CaretPosition;
+        bool caretMoved = caretPosition != _lastSyncedCaretPosition;
+        _lastSyncedCaretPosition = caretPosition;
+
         var (start, end) = _editor.GetSelectionRange();
         SetValue(SelectionStartPropertyKey, start);
         SetValue(SelectionLengthPropertyKey, end - start);
+
+        if (caretMoved)
+        {
+            ResetCaretBlink();
+        }
     }
 
     // Platform text services (IME) sometimes report a replacement range (e.g. AppKit insertText/setMarkedText).
@@ -1071,14 +1080,14 @@ public abstract partial class TextBase : Control, ITextCompositionClient, ITextI
         }
 
         var p = ModifierKeys.Primary;
-        menu.AddItem("Undo", () => Undo(), !IsReadOnly && CanUndo, new KeyGesture(Key.Z, p));
-        menu.AddItem("Redo", () => Redo(), !IsReadOnly && CanRedo, new KeyGesture(Key.Y, p));
+        menu.AddItem(MewUIStrings.TextBoxContextMenuUndo.Value, () => Undo(), !IsReadOnly && CanUndo, new KeyGesture(Key.Z, p));
+        menu.AddItem(MewUIStrings.TextBoxContextMenuRedo.Value, () => Redo(), !IsReadOnly && CanRedo, new KeyGesture(Key.Y, p));
         menu.AddSeparator();
-        menu.AddItem("Cut", () => Cut(), !IsReadOnly && HasSelection, new KeyGesture(Key.X, p));
-        menu.AddItem("Copy", () => Copy(), HasSelection, new KeyGesture(Key.C, p));
-        menu.AddItem("Paste", () => Paste(), canPaste, new KeyGesture(Key.V, p));
+        menu.AddItem(MewUIStrings.TextBoxContextMenuCut.Value, () => Cut(), !IsReadOnly && HasSelection, new KeyGesture(Key.X, p));
+        menu.AddItem(MewUIStrings.TextBoxContextMenuCopy.Value, () => Copy(), HasSelection, new KeyGesture(Key.C, p));
+        menu.AddItem(MewUIStrings.TextBoxContextMenuPaste.Value, () => Paste(), canPaste, new KeyGesture(Key.V, p));
         menu.AddSeparator();
-        menu.AddItem("Select All", () => SelectAll(), GetTextLengthCore() > 0, new KeyGesture(Key.A, p));
+        menu.AddItem(MewUIStrings.TextBoxContextMenuSelectAll.Value, () => SelectAll(), GetTextLengthCore() > 0, new KeyGesture(Key.A, p));
 
         menu.ShowAt(this, positionInWindow);
     }
@@ -1360,7 +1369,6 @@ public abstract partial class TextBase : Control, ITextCompositionClient, ITextI
     {
         _editor.SetCaretAndSelection(newPos, extendSelection);
         SyncSelectionProperties();
-        ResetCaretBlink();
     }
 
     protected void MoveCaretHorizontal(int direction, bool extendSelection, bool word)

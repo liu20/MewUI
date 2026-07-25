@@ -68,7 +68,7 @@ curl -sL https://raw.githubusercontent.com/aprillz/MewUI/refs/heads/main/samples
   - 설치: `dotnet add package Aprillz.MewUI`
   - 참고: [설치 및 패키지 구성](docs/Installation.ko.md)
 
-- 단일 파일로 빠르게 시작(VS Code 친화)
+- File-Based App(FBA)으로 빠르게 시작 (VS Code 친화, .NET 10+)
   - 참고: `samples/FBASample/fba_calculator.cs`
   - AOT/Trim 옵션을 제외한 최소 헤더:
 
@@ -77,7 +77,7 @@ curl -sL https://raw.githubusercontent.com/aprillz/MewUI/refs/heads/main/samples
     #:property OutputType=Exe
     #:property TargetFramework=net10.0
 
-    #:package Aprillz.MewUI
+    #:package Aprillz.MewUI@0.19.1
 
     //...
     ```
@@ -91,7 +91,7 @@ curl -sL https://raw.githubusercontent.com/aprillz/MewUI/refs/heads/main/samples
     ```csharp
     var window = new Window()
         .Title("Hello MewUI")
-        .Size(520, 360)
+        .Resizable(520, 360)
         .Padding(12)
         .Content(
             new StackPanel()
@@ -125,7 +125,7 @@ MewUI는 작고 명시적인 코어 위에 플랫폼 호스트와 렌더링 백�
 - XAML/WPF 완전 호환
 - WPF나 Avalonia와 동일한 API/동작을 제공하는 대체품
 - 디자이너 중심 개발 워크플로우
-- 복잡한 경로 기반 데이터 바인딩
+- 리플렉션 기반 경로 바인딩
 - 모든 것을 담은 만능 컨트롤 카탈로그
 
 코어는 일반적인 데스크톱 UI 패턴까지 담고, 차트나 도킹 같은 특화 기능은 확장 패키지로 제공합니다.
@@ -179,6 +179,38 @@ var label  = new Label()
                     percent, 
                     convert: v => $"Percent ({v:P0})"); 
 ```
+
+**중첩 소스** - `BindingPath<TRoot, TValue>`는 프로퍼티 이름 문자열, 리플렉션, 코드 생성 없이 중첩된 소스 체인을 따라 바인딩합니다. `Then` 하나마다 세그먼트를 덧붙이며, 관찰되는 세그먼트는 중간 값이 교체되면 자동으로 다시 연결됩니다.
+
+```csharp
+// [source].Customer.City 바인딩
+var city = new TextBlock().Bind(
+    TextBlock.TextProperty,
+    order,
+    BindingPath
+        .From<OrderViewModel>()
+        .Then(order => order.Customer)      // 관찰 세그먼트: 교체 시 재연결
+        .Then(customer => customer!.City),  // leaf
+    mode: BindingMode.OneWay,
+    fallbackValue: "-");
+```
+
+`MewProperty<T>`도 세그먼트로 쓸 수 있습니다:
+
+```csharp
+// [source].Padding.Left 바인딩
+var readout = new TextBlock().Bind(
+    TextBlock.TextProperty,
+    source,
+    BindingPath
+        .From<Control>()
+        .Then(Control.PaddingProperty)   // MewProperty 세그먼트: 관찰
+        .Then(padding => padding.Left),  // leaf
+    convert: left => $"{left}px",
+    mode: BindingMode.OneWay);
+```
+
+관찰/스냅샷 세그먼트, null/fallback, TwoWay, 수명 규칙은 [Binding](docs/Binding.ko.md) 문서를 참고하세요.
 
 ---
 ## 🧱 컨트롤 / 패널
@@ -304,6 +336,7 @@ MewUI는 크로스플랫폼 관리형 파일 및 폴더 대화상자를 제공�
 - [Layout](docs/Layout.ko.md)
 - [RenderLoop](docs/RenderLoop.ko.md)
 - [Hot Reload](docs/HotReload.ko.md)
+- [에디터 프리뷰](docs/Preview.ko.md)
 - [Custom Controls](docs/CustomControls.ko.md)
 - [Control Template](docs/ControlTemplate.ko.md)
 

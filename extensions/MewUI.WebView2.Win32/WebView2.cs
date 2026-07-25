@@ -41,6 +41,8 @@ public sealed partial class WebView2 : FrameworkElement
     private string? _browserExecutableFolder;
     private string? _userDataFolder;
     private Rect _lastArrangedBounds;
+    private Color? _defaultBackgroundColor;
+    private readonly Dictionary<string, (string FolderPath, CoreWebView2HostResourceAccessKind AccessKind)> _virtualHostNameToFolderMappings = new(StringComparer.OrdinalIgnoreCase);
 
     private Rendering.IFont? _font;
     private WebViewEnvironmentOptions? _options;
@@ -285,6 +287,27 @@ public sealed partial class WebView2 : FrameworkElement
         }
     }
 
+    /// <summary>
+    /// Gets or sets the default background color used by the WebView controller.
+    /// When null, the WebView2 default background is used; setting null after a color was applied does not restore that default.
+    /// </summary>
+    public Color? DefaultBackgroundColor
+    {
+        get => _defaultBackgroundColor;
+        set
+        {
+            if (value is not null && value.Value.A > 0 && value.Value.A < 255)
+            {
+                throw new ArgumentException(
+                    "DefaultBackgroundColor does not support translucent colors. Use null, a fully opaque color, or a fully transparent color.",
+                    nameof(value));
+            }
+
+            _defaultBackgroundColor = value;
+            UpdateWebViewBackground();
+        }
+    }
+
     public bool IsInitialized => _webView2 != null && !_webView2.IsDisposed;
 
     /// <summary>
@@ -317,6 +340,31 @@ public sealed partial class WebView2 : FrameworkElement
     /// Stops any in-progress navigation.
     /// </summary>
     public void Stop() => CoreWebView2?.Stop();
+
+    /// <summary>
+    /// Maps a virtual host name to a local folder.
+    /// </summary>
+    /// <param name="hostName">The virtual host name.</param>
+    /// <param name="folderPath">The local folder path.</param>
+    /// <param name="accessKind">The resource access kind for the mapping.</param>
+    public void SetVirtualHostNameToFolderMapping(
+        string hostName,
+        string folderPath,
+        CoreWebView2HostResourceAccessKind accessKind)
+    {
+        _virtualHostNameToFolderMappings[hostName] = (folderPath, accessKind);
+        CoreWebView2?.SetVirtualHostNameToFolderMapping(hostName, folderPath, accessKind);
+    }
+
+    /// <summary>
+    /// Removes a virtual host name to folder mapping.
+    /// </summary>
+    /// <param name="hostName">The virtual host name.</param>
+    public void ClearVirtualHostNameToFolderMapping(string hostName)
+    {
+        _virtualHostNameToFolderMappings.Remove(hostName);
+        CoreWebView2?.ClearVirtualHostNameToFolderMapping(hostName);
+    }
 
     /// <summary>
     /// Navigates to the specified HTML content.
@@ -682,11 +730,14 @@ public sealed partial class WebView2 : FrameworkElement
                 try
                 {
                     _controller = new ComObject<ICoreWebView2Controller>(controller);
+                    // Apply the background before the controller becomes visible to avoid a default-background flash.
+                    UpdateWebViewBackground();
                     _controller.Object.get_CoreWebView2(out var webView).ThrowOnError();
 
 
                     _webView2 = new ComObject<ICoreWebView2>(webView);
                     CoreWebView2 = new CoreWebView2(_webView2);
+                    ApplyPendingVirtualHostNameToFolderMappings();
 
                     // Configure defaults.
                     _webView2.Object.get_Settings(out var settingsObj).ThrowOnError();
@@ -863,7 +914,50 @@ public sealed partial class WebView2 : FrameworkElement
         {
             Interop.ShowWindow(_hostHandle, attached && IsVisible ? SW_SHOWNOACTIVATE : SW_HIDE);
         }
+    }
 
+    private void UpdateWebViewBackground()
+    {
+        if (_disposed || _defaultBackgroundColor is null)
+        {
+            return;
+        }
+
+        var controller = _controller;
+        if (controller == null || controller.IsDisposed)
+        {
+            return;
+        }
+
+        if (controller.Object is not ICoreWebView2Controller2 controller2)
+        {
+            throw new NotSupportedException(
+                "DefaultBackgroundColor is not supported by this WebView2 controller.");
+        }
+
+        var color = _defaultBackgroundColor.Value;
+        var webView2Color = new COREWEBVIEW2_COLOR()
+        {
+            A = color.A,
+            B = color.B,
+            G = color.G,
+            R = color.R
+        };
+        controller2.put_DefaultBackgroundColor(webView2Color).ThrowOnError();
+    }
+
+    private void ApplyPendingVirtualHostNameToFolderMappings()
+    {
+        var coreWebView2 = CoreWebView2;
+        if (coreWebView2 == null)
+        {
+            return;
+        }
+
+        foreach (var (hostName, (folderPath, accessKind)) in _virtualHostNameToFolderMappings)
+        {
+            coreWebView2.SetVirtualHostNameToFolderMapping(hostName, folderPath, accessKind);
+        }
     }
 
     private void EnsureHostWindow(Window window)

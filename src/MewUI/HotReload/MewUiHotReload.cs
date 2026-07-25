@@ -96,7 +96,17 @@ public static class MewUiHotReload
         {
             reloading = false;
         }
+
+        // Observers may react to deltas the IL-hash filter above ignores (it only checks
+        // registered build methods), so this fires even when zero nodes were rebuilt.
+        DeltaApplied?.Invoke();
     }
+
+    /// <summary>
+    /// Raised on the UI thread after each Hot Reload delta drain, regardless of whether any
+    /// registered node was rebuilt.
+    /// </summary>
+    internal static event Action? DeltaApplied;
 
     private static void ExecuteReactions(List<HotReloadReaction> reactions, Type[]? scope)
     {
@@ -142,9 +152,18 @@ public static class MewUiHotReload
 
     private static void Rebuild(Element target)
     {
-        if (target is Window window && window.BuildCallback is Action<Window> build)
+        if (target is Window window)
         {
-            build(window);
+            // Build ownership: the composition-site callback owns the build when set; otherwise
+            // the window's virtual OnBuild hook does.
+            if (window.BuildCallback is Action<Window> build)
+            {
+                build(window);
+            }
+            else if (window.HasBuildHookRegistered)
+            {
+                window.InvokeOnBuildHook();
+            }
             return;
         }
 
@@ -158,7 +177,7 @@ public static class MewUiHotReload
     {
         for (Element? current = element; current != null; current = current.Parent)
         {
-            if (current is Window window && window.BuildCallback != null)
+            if (current is Window window && (window.BuildCallback != null || window.HasBuildHookRegistered))
             {
                 return window;
             }
