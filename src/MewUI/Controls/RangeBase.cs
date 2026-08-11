@@ -63,6 +63,9 @@ public abstract class RangeBase : Control
         set => SetValue(ValueProperty, value);
     }
 
+    /// <summary>Commits a control-originated value through an attached binding.</summary>
+    protected void CommitValue(double value) => CommitTargetValue(ValueProperty, value);
+
     /// <summary>
     /// Gets or sets the increment for small changes.
     /// </summary>

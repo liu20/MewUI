@@ -7,6 +7,7 @@ using Aprillz.MewUI.Platform.Win32;
 using Aprillz.MewUI.Rendering.Gdi;
 using Aprillz.MewUI.Rendering.OpenGL;
 using Aprillz.MewUI.Resources;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Rendering.MewVG;
 
@@ -41,12 +42,14 @@ public sealed partial class MewVGWin32GraphicsFactory
     private partial IFont CreateFontCore(string family, double size, FontWeight weight, bool italic, bool underline, bool strikethrough)
     {
         uint dpi = DpiHelper.GetSystemDpi();
+        family = GdiFont.SelectFamilyCandidate(family);
         family = ResolveWin32FontFamilyOrFile(family);
         return new GdiFont(family, size, weight, italic, underline, strikethrough, dpi);
     }
 
     private partial IFont CreateFontCore(string family, double size, uint dpi, FontWeight weight, bool italic, bool underline, bool strikethrough)
     {
+        family = GdiFont.SelectFamilyCandidate(family);
         family = ResolveWin32FontFamilyOrFile(family);
         return new GdiFont(family, size, weight, italic, underline, strikethrough, dpi);
     }
@@ -108,7 +111,7 @@ public sealed partial class MewVGWin32GraphicsFactory
         return res.GetOrCreateContext(_offscreenProvider, win32.Hwnd, win32.Hdc, RaiseGpuInteropInvalidated);
     }
 
-    private partial IGraphicsContext CreateMeasurementContextCore(uint dpi)
+    private partial ITextBackendMeasurementContext CreateMeasurementContextCore(uint dpi)
         => new GdiMeasurementContext(User32.GetDC(0), dpi);
 
     partial void TryCreatePixelSurface(int pixelWidth, int pixelHeight, double dpiScale, bool hasAlpha, ref bool handled, ref IRenderSurface? renderTarget)
@@ -402,6 +405,7 @@ public sealed partial class MewVGWin32GraphicsFactory
         // unbind it. The caller can render directly on whatever context is active.
         if (OpenGL32.wglGetCurrentContext() != 0)
         {
+            MewVGGLBootstrap.EnsureInitialized();
             return MewVGNoOpRenderScope.Instance;
         }
 
@@ -430,6 +434,8 @@ public sealed partial class MewVGWin32GraphicsFactory
                 throw new InvalidOperationException(
                     $"wglMakeCurrent (worker) failed: {Marshal.GetLastWin32Error()}");
             }
+
+            MewVGGLBootstrap.EnsureInitialized();
         }
         catch
         {

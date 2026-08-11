@@ -1,21 +1,19 @@
 using Aprillz.MewUI.Rendering;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.MewCharts.Drawing;
 
 /// <summary>
-/// Ambient text resources for chart geometries. LiveCharts measures label geometries without a
-/// live frame context, so a measurement-only <see cref="IGraphicsContext"/> and a font cache are
-/// kept here, initialized once a chart attaches to a graphics factory.
+/// Ambient retained text layouts for chart geometries. LiveCharts measures label geometries
+/// without a live frame context, so the owning graphics factory is captured when a chart attaches.
 /// </summary>
 public static class MewChartsText
 {
     private static readonly object _lock = new();
-    private static readonly Dictionary<(string Family, float Size), IFont> _fonts = new();
     private static IGraphicsFactory? _factory;
-    private static IGraphicsContext? _measure;
 
     /// <summary>Font family for chart text; set from the chart's (inherited) <c>Control.FontFamily</c>.</summary>
-    public static string FontFamily { get; set; } = "Segoe UI";
+    public static string FontFamily { get; set; } = ThemeMetrics.SystemFontFamily;
 
     /// <summary>
     /// Multiplier applied to every text size, set from the chart's <c>Control.FontSize</c> relative
@@ -31,32 +29,31 @@ public static class MewChartsText
         {
             if (_factory is not null) return;
             _factory = factory;
-            _measure = factory.CreateMeasurementContext(96);
         }
     }
 
-    /// <summary>Gets a cached font of the given size, or <see langword="null"/> before init.</summary>
-    public static IFont? GetFont(float size)
+    /// <summary>Gets a retained layout of the given size, or <see langword="null"/> before init.</summary>
+    public static ITextLayout? GetLayout(string text, float size)
     {
-        if (_factory is null) return null;
-        var family = string.IsNullOrEmpty(FontFamily) ? "Segoe UI" : FontFamily;
+        if (_factory is null || string.IsNullOrEmpty(text)) return null;
+        var family = string.IsNullOrEmpty(FontFamily) ? ThemeManager.DefaultMetrics.FontFamily : FontFamily;
         var scaled = (float)Math.Max(1, size * FontScale);
         lock (_lock)
         {
-            var key = (family, scaled);
-            if (_fonts.TryGetValue(key, out var font)) return font;
-            font = _factory.CreateFont(family, scaled);
-            _fonts[key] = font;
-            return font;
+            return _factory.TextEngine.GetOrCreateLayout(
+                new TextLayoutRequest
+                {
+                    Text = text.AsMemory(),
+                    Dpi = 96,
+                    DefaultStyle = new TextRunStyle(family, scaled)
+                },
+                TextLayoutCachePolicy.Content);
         }
     }
 
     /// <summary>Measures text without a frame context; returns zero size before init.</summary>
     public static Size Measure(string text, float size)
     {
-        if (_measure is null || string.IsNullOrEmpty(text)) return Size.Empty;
-        var font = GetFont(size);
-        if (font is null) return Size.Empty;
-        return _measure.MeasureText(text, font);
+        return GetLayout(text, size)?.MeasuredSize ?? Size.Empty;
     }
 }

@@ -16,6 +16,11 @@ internal static class HeadlessInput
         => WindowInputRouter.MouseMove(window, position, position,
             leftDown: false, rightDown: false, middleDown: false);
 
+    /// <summary>Mouse move with the left button held, as during a drag selection.</summary>
+    public static void SendMouseDrag(this Window window, Point position)
+        => WindowInputRouter.MouseMove(window, position, position,
+            leftDown: true, rightDown: false, middleDown: false);
+
     public static void SendMouseDown(this Window window, Point position, MouseButton button = MouseButton.Left,
         ModifierKeys modifiers = ModifierKeys.None)
         => WindowInputRouter.MouseButton(window, position, position, button, isDown: true,

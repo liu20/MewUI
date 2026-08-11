@@ -104,8 +104,14 @@ public sealed class ColorPicker : DropDownBase
     private void OnPopupColorChanged(Color color)
     {
         _updatingFromPopup = true;
-        SelectedColor = color;
-        _updatingFromPopup = false;
+        try
+        {
+            CommitTargetValue(SelectedColorProperty, color);
+        }
+        finally
+        {
+            _updatingFromPopup = false;
+        }
     }
 
     protected override Size MeasureHeader(Size availableSize)

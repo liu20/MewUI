@@ -10,7 +10,7 @@
 #:property DebugType=none
 #:property StripSymbols=true
 
-#:package Aprillz.MewUI@0.19.1
+#:package Aprillz.MewUI@0.20.0
 
 using System.Diagnostics;
 
@@ -118,6 +118,22 @@ window = new Window()
 
 Application.Run(window);
 
+Command MenuCommand(string id, string text, Action execute, KeyGesture? gesture = null)
+{
+    var command = new Command($"sample.{id}", text);
+    window.Commands.Register(command, execute);
+    if (gesture is KeyGesture keyGesture)
+        window.InputMap.Map(command, keyGesture);
+    return command;
+}
+
+Command DemoCommand(string id, Action execute, Func<bool> canExecute)
+{
+    var command = new Command($"sample.commanding.{id}");
+    window.Commands.Register(command, execute, canExecute);
+    return command;
+}
+
 Element HeaderSection() => new StackPanel()
     .Vertical()
     .Spacing(8)
@@ -144,14 +160,14 @@ Element TopSection() => new StackPanel()
 Element MenuDemo()
 {
     var fileMenu = new Menu()
-        .Item("New", () => NativeMessageBox.Show("New", "Menu"))
-        .Item("Open...", () => NativeMessageBox.Show("Open", "Menu"))
+        .Item(MenuCommand("file.new", "New", () => NativeMessageBox.Show("New", "Menu")))
+        .Item(MenuCommand("file.open", "Open...", () => NativeMessageBox.Show("Open", "Menu")))
         .Separator()
-        .Item("Exit", () => Application.Quit());
+        .Item(MenuCommand("file.exit", "Exit", Application.Shutdown));
 
     var deepMenu = new Menu()
-        .Item("Deep A", () => NativeMessageBox.Show("Deep A", "Menu"))
-        .Item("Deep B", () => NativeMessageBox.Show("Deep B", "Menu"));
+        .Item(MenuCommand("recent.deepA", "Deep A", () => NativeMessageBox.Show("Deep A", "Menu")))
+        .Item(MenuCommand("recent.deepB", "Deep B", () => NativeMessageBox.Show("Deep B", "Menu")));
 
     var recentMenu = new Menu()
         .Apply(x =>
@@ -159,7 +175,7 @@ Element MenuDemo()
             for (char letter = 'a'; letter <= 'z'; letter++)
             {
                 var text = letter + ".txt";
-                x.Item(text, () => NativeMessageBox.Show(text, "Recent"));
+                x.Item(MenuCommand($"recent.{letter}", text, () => NativeMessageBox.Show(text, "Recent")));
             }
         })
         .Separator()
@@ -168,15 +184,15 @@ Element MenuDemo()
     var editMenu = new Menu()
         .SubMenu("Recent", recentMenu)
         .Separator()
-        .Item("Copy", () => { }, shortcut: new KeyGesture(Key.C, ModifierKeys.Primary))
-        .Item("Paste", () => { }, shortcut: new KeyGesture(Key.V, ModifierKeys.Primary));
+        .Item(MenuCommand("edit.copy", "Copy", () => { }, new KeyGesture(Key.C, ModifierKeys.Primary)))
+        .Item(MenuCommand("edit.paste", "Paste", () => { }, new KeyGesture(Key.V, ModifierKeys.Primary)));
 
     var helpAboutMenu = new Menu()
-        .Item("About", () => NativeMessageBox.Show("Aprillz.MewUI", "About"));
+        .Item(MenuCommand("help.about", "About", () => NativeMessageBox.Show("Aprillz.MewUI", "About")));
 
     var helpDocsMenu = new Menu()
-        .Item("Docs", () => NativeMessageBox.Show("docs/", "Help"))
-        .Item("Korean Docs", () => NativeMessageBox.Show("ko/docs/", "Help"));
+        .Item(MenuCommand("help.docs", "Docs", () => NativeMessageBox.Show("docs/", "Help")))
+        .Item(MenuCommand("help.docs.ko", "Korean Docs", () => NativeMessageBox.Show("ko/docs/", "Help")));
 
     var helpMenu = new Menu()
         .SubMenu("Documentation", helpDocsMenu)
@@ -263,7 +279,7 @@ Element Buttons() => new StackPanel()
         new Button()
             .Content("Quit")
             .Width(80)
-            .OnClick(() => Application.Quit())
+            .OnClick(() => Application.Shutdown())
     );
 
 Element NormalControls()
@@ -273,12 +289,12 @@ Element NormalControls()
     int appendCount = 0;
     var demoMenu = new ContextMenu();
     var nestedMenu = new ContextMenu()
-        .Item("Option 1", () => NativeMessageBox.Show("Option 1", "Nested ContextMenu"))
-        .Item("Option 2", () => NativeMessageBox.Show("Option 2", "Nested ContextMenu"));
+        .Item(MenuCommand("context.option1", "Option 1", () => NativeMessageBox.Show("Option 1", "Nested ContextMenu")))
+        .Item(MenuCommand("context.option2", "Option 2", () => NativeMessageBox.Show("Option 2", "Nested ContextMenu")));
 
     var deepMenu = new ContextMenu()
-        .Item("Deep A", () => NativeMessageBox.Show("Deep A", "Nested ContextMenu"))
-        .Item("Deep B", () => NativeMessageBox.Show("Deep B", "Nested ContextMenu"));
+        .Item(MenuCommand("context.deepA", "Deep A", () => NativeMessageBox.Show("Deep A", "Nested ContextMenu")))
+        .Item(MenuCommand("context.deepB", "Deep B", () => NativeMessageBox.Show("Deep B", "Nested ContextMenu")));
 
     nestedMenu.SubMenu("More...", deepMenu);
 
@@ -286,11 +302,11 @@ Element NormalControls()
         .Item("Item 1")
         .Item("Item 2")
         .Separator()
-        .Item("Say hello", () => NativeMessageBox.Show("Hello from ContextMenu!", "ContextMenu"))
+        .Item(MenuCommand("context.hello", "Say hello", () => NativeMessageBox.Show("Hello from ContextMenu!", "ContextMenu")))
         .Separator()
         .SubMenu("Nested", nestedMenu)
         .Separator()
-        .Item("Disabled item", () => { }, isEnabled: false);
+        .Item("Disabled item", isEnabled: false);
 
     return new StackPanel()
         .Spacing(16)
@@ -622,8 +638,9 @@ FrameworkElement CommandingSamples()
 
                             new Button()
                                 .Content("Submit")
-                                .OnCanClick(() => !string.IsNullOrWhiteSpace(vm.InputText.Value))
-                                .OnClick(() => { vm.CommandLog.Value = $"Submitted: \"{vm.InputText.Value}\" at {DateTime.Now:HH:mm:ss}"; })
+                                .Command(DemoCommand("submit",
+                                    () => { vm.CommandLog.Value = $"Submitted: \"{vm.InputText.Value}\" at {DateTime.Now:HH:mm:ss}"; },
+                                    () => !string.IsNullOrWhiteSpace(vm.InputText.Value)))
                         )
                 ),
 
@@ -645,20 +662,23 @@ FrameworkElement CommandingSamples()
                                     new Button()
                                         .Content("- Decrement")
                                         .Width(100)
-                                        .OnCanClick(() => vm.Counter.Value > 0)
-                                        .OnClick(() => { vm.Counter.Value--; vm.CommandLog.Value = $"Decremented to {vm.Counter.Value}"; }),
+                                        .Command(DemoCommand("decrement",
+                                            () => { vm.Counter.Value--; vm.CommandLog.Value = $"Decremented to {vm.Counter.Value}"; },
+                                            () => vm.Counter.Value > 0)),
 
                                     new Button()
                                         .Content("+ Increment")
                                         .Width(100)
-                                        .OnCanClick(() => vm.Counter.Value < 10)
-                                        .OnClick(() => { vm.Counter.Value++; vm.CommandLog.Value = $"Incremented to {vm.Counter.Value}"; }),
+                                        .Command(DemoCommand("increment",
+                                            () => { vm.Counter.Value++; vm.CommandLog.Value = $"Incremented to {vm.Counter.Value}"; },
+                                            () => vm.Counter.Value < 10)),
 
                                     new Button()
                                         .Content("Reset")
                                         .Width(80)
-                                        .OnCanClick(() => vm.Counter.Value != 5)
-                                        .OnClick(() => { vm.Counter.Value = 5; vm.CommandLog.Value = "Reset to 5"; })
+                                        .Command(DemoCommand("reset",
+                                            () => { vm.Counter.Value = 5; vm.CommandLog.Value = "Reset to 5"; },
+                                            () => vm.Counter.Value != 5))
                                 )
                         )
                 ),
@@ -681,18 +701,21 @@ FrameworkElement CommandingSamples()
                                 .Children(
                                     new Button()
                                         .Content("Export PDF")
-                                        .OnCanClick(() => vm.IsFeatureEnabled.Value)
-                                        .OnClick(() => { vm.CommandLog.Value = "Exporting PDF..."; }),
+                                        .Command(DemoCommand("exportPdf",
+                                            () => { vm.CommandLog.Value = "Exporting PDF..."; },
+                                            () => vm.IsFeatureEnabled.Value)),
 
                                     new Button()
                                         .Content("Cloud Sync")
-                                        .OnCanClick(() => vm.IsFeatureEnabled.Value)
-                                        .OnClick(() => { vm.CommandLog.Value = "Syncing to cloud..."; }),
+                                        .Command(DemoCommand("cloudSync",
+                                            () => { vm.CommandLog.Value = "Syncing to cloud..."; },
+                                            () => vm.IsFeatureEnabled.Value)),
 
                                     new Button()
                                         .Content("Analytics")
-                                        .OnCanClick(() => vm.IsFeatureEnabled.Value)
-                                        .OnClick(() => { vm.CommandLog.Value = "Opening analytics..."; })
+                                        .Command(DemoCommand("analytics",
+                                            () => { vm.CommandLog.Value = "Opening analytics..."; },
+                                            () => vm.IsFeatureEnabled.Value))
                                 ),
 
                             new Label()
@@ -714,11 +737,11 @@ FrameworkElement CommandingSamples()
 
                             new Button()
                                 .Content("Execute Complex Action")
-                                .OnCanClick(() =>
-                                    !string.IsNullOrWhiteSpace(vm.InputText.Value) &&
-                                    vm.IsFeatureEnabled.Value &&
-                                    vm.Counter.Value > 0)
-                                .OnClick(() => { vm.CommandLog.Value = $"Complex action: text=\"{vm.InputText.Value}\", count={vm.Counter.Value}"; })
+                                .Command(DemoCommand("complex",
+                                    () => { vm.CommandLog.Value = $"Complex action: text=\"{vm.InputText.Value}\", count={vm.Counter.Value}"; },
+                                    () => !string.IsNullOrWhiteSpace(vm.InputText.Value) &&
+                                          vm.IsFeatureEnabled.Value &&
+                                          vm.Counter.Value > 0))
                         )
                 ),
 

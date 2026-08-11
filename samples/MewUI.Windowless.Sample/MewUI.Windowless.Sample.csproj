@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Aprillz.MewUI.Windowless.Sample</RootNamespace>
+    <AssemblyName>Aprillz.MewUI.Windowless.Sample</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MewUI\MewUI.csproj" />
+    <ProjectReference Include="..\..\src\MewUI.Platform.Win32\MewUI.Platform.Win32.csproj" />
+    <ProjectReference Include="..\..\src\MewUI.Platform.X11\MewUI.Platform.X11.csproj" />
+    <ProjectReference Include="..\..\src\MewUI.Platform.MacOS\MewUI.Platform.MacOS.csproj" />
+    <ProjectReference Include="..\..\src\MewUI.Backend.Direct2D\MewUI.Backend.Direct2D.csproj" />
+    <ProjectReference Include="..\..\src\MewUI.Backend.MewVG.Win32\MewUI.Backend.MewVG.Win32.csproj" />
+    <ProjectReference Include="..\..\src\MewUI.Backend.MewVG.X11\MewUI.Backend.MewVG.X11.csproj" />
+    <ProjectReference Include="..\..\src\MewUI.Backend.MewVG.MacOS\MewUI.Backend.MewVG.MacOS.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.94.2" />
+    <PackageReference Include="Tmds.DBus.Generator" Version="0.94.2" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AdditionalFiles Include="DBusXml\org.freedesktop.portal.GlobalShortcuts.xml"
+                     Namespace="Aprillz.MewUI.Windowless.Sample.DBus" DBusGeneratorMode="Proxy" />
+    <AdditionalFiles Include="DBusXml\org.freedesktop.portal.Request.xml"
+                     Namespace="Aprillz.MewUI.Windowless.Sample.DBus" DBusGeneratorMode="Proxy" />
+    <AdditionalFiles Include="DBusXml\org.freedesktop.portal.Session.xml"
+                     Namespace="Aprillz.MewUI.Windowless.Sample.DBus" DBusGeneratorMode="Proxy" />
+  </ItemGroup>
+
+  <Import Project="..\..\build\Aprillz.MewUI.targets" />
+
+</Project>

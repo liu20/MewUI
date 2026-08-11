@@ -1,25 +1,135 @@
-using Aprillz.MewUI.Controls.Text;
+using System.Globalization;
+
 using Aprillz.MewUI.Input;
+using Aprillz.MewUI.Platform;
 using Aprillz.MewUI.Rendering;
+using Aprillz.MewUI.Text;
+using Aprillz.MewUI.Text.Editing;
 
 namespace Aprillz.MewUI.Controls;
 
 /// <summary>
-/// Base class for text input controls.
+/// Base class for text input controls built on the managed text engine.
 /// </summary>
-public abstract partial class TextBase : Control, ITextCompositionClient, ITextInputClient
+// Rebuilt hierarchy (agent/textBase/plan.md). Text-surface exposure is deferred to leaves:
+// the base owns document/session/IME/clipboard machinery but no public Text/SelectedText.
+public abstract class TextBase : Control, ITextCompositionClient, ITextCompositionEditor, ITextInputClient
 {
-    public event Action<TextInputEventArgs>? TextInput;
-
-    public event Action<TextCompositionEventArgs>? TextCompositionStart;
-
     public static readonly MewProperty<ImeMode> ImeModeProperty =
-        MewProperty<ImeMode>.Register<TextBase>(nameof(ImeMode), ImeMode.Auto, MewPropertyOptions.None);
+        MewProperty<ImeMode>.Register<TextBase>(nameof(ImeMode), ImeMode.Auto);
+
+    private static readonly MewPropertyKey<int> SelectionStartPropertyKey =
+        MewProperty<int>.RegisterReadOnly<TextBase>(nameof(SelectionStart), 0);
+
+    public static readonly MewProperty<int> SelectionStartProperty = SelectionStartPropertyKey.Property;
+
+    private static readonly MewPropertyKey<int> SelectionLengthPropertyKey =
+        MewProperty<int>.RegisterReadOnly<TextBase>(nameof(SelectionLength), 0);
+
+    public static readonly MewProperty<int> SelectionLengthProperty = SelectionLengthPropertyKey.Property;
+
+    public static readonly MewProperty<string> PlaceholderProperty =
+        MewProperty<string>.Register<TextBase>(nameof(Placeholder), string.Empty,
+            MewPropertyOptions.AffectsRender);
+
+    public static readonly MewProperty<bool> IsReadOnlyProperty =
+        MewProperty<bool>.Register<TextBase>(nameof(IsReadOnly), false,
+            MewPropertyOptions.AffectsRender);
+
+    public static readonly MewProperty<Color?> SelectionForegroundProperty =
+        MewProperty<Color?>.Register<TextBase>(nameof(SelectionForeground), null,
+            MewPropertyOptions.AffectsRender);
+
+    public static readonly MewProperty<bool> AcceptTabProperty =
+        MewProperty<bool>.Register<TextBase>(nameof(AcceptTab), false);
+
+    public static readonly MewProperty<int> MaxLengthProperty =
+        MewProperty<int>.Register<TextBase>(nameof(MaxLength), 0);
+
+    // The invalidation hangs off the value rather than the blink tick, so no path can change the
+    // phase without repainting the caret. AffectsRender is deliberately absent: it would discard
+    // the whole visual where only the caret changed.
+    private static readonly MewPropertyKey<bool> CaretVisiblePropertyKey =
+        MewProperty<bool>.RegisterReadOnly<TextBase>(nameof(CaretVisible), true,
+            changed: static (self, _, _) => self.InvalidateCaret());
+
+    public static readonly MewProperty<bool> CaretVisibleProperty = CaretVisiblePropertyKey.Property;
+
+    // Shared editing state: derived controls access the document/session directly, matching
+    // the field names they used before the extraction. Reassigned only by ReplaceDocumentCore.
+    private protected EditableTextDocument _document;
+    private protected TextEditorSession _editor;
+    private protected bool _suppressNewLineInput;
+    private protected bool _suppressTabInput;
+    private protected int _compositionStart;
+    private protected int _compositionLength;
+    private protected CompositionAttr[]? _compositionAttributes;
+    private protected bool _syncingText;
+    private string _textSnapshot = string.Empty;
+    private long _textSnapshotVersion = -1;
+    private DispatcherTimer? _caretTimer;
 
     static TextBase()
     {
         FocusableProperty.OverrideDefaultValue<TextBase>(true);
     }
+
+    protected TextBase()
+        : this(new EditableTextDocument())
+    {
+    }
+
+    protected TextBase(EditableTextDocument document)
+    {
+        _document = document ?? throw new ArgumentNullException(nameof(document));
+        _editor = new TextEditorSession(_document);
+        Cursor = CursorType.IBeam;
+        _document.Changed += OnDocumentTextChanged;
+        _editor.StateChanged += SyncSelectionMirrors;
+        BindStandardEditCommands();
+
+        if (_document.TextLength > 0 && TextSyncProperty is MewProperty<string> mirror)
+        {
+            _syncingText = true;
+            try
+            {
+                SetValue(mirror, GetTextSnapshot());
+            }
+            finally
+            {
+                _syncingText = false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The control-declared property mirroring the document text (Text, Password, ...).
+    /// The base never exposes a Text property itself; document changes are committed to this
+    /// mirror so controls decide the name and shape of their text surface.
+    /// </summary>
+    private protected virtual MewProperty<string>? TextSyncProperty => null;
+
+    public int SelectionStart => GetValue(SelectionStartProperty);
+    public int SelectionLength => GetValue(SelectionLengthProperty);
+
+    /// <summary>
+    /// Whether the caret is in the visible half of its blink. A layer drawing the caret in place of
+    /// the built-in one reads this instead of keeping a second clock. Carries no render option: the
+    /// blink invalidates the caret alone, and a whole-visual invalidation would undo that.
+    /// </summary>
+    public bool CaretVisible => GetValue(CaretVisibleProperty);
+
+    /// <summary>
+    /// Color the selected glyphs are painted in. Null keeps the colors they already have, so a
+    /// colorized document stays readable through a selection.
+    /// </summary>
+    public Color? SelectionForeground
+    {
+        get => GetValue(SelectionForegroundProperty);
+        set => SetValue(SelectionForegroundProperty, value);
+    }
+
+    public event Action<string>? TextChanged;
 
     /// <summary>
     /// Gets or sets the IME mode for this text control.
@@ -30,169 +140,13 @@ public abstract partial class TextBase : Control, ITextCompositionClient, ITextI
         set => SetValue(ImeModeProperty, value);
     }
 
-    public event Action<TextCompositionEventArgs>? TextCompositionUpdate;
-
-    public event Action<TextCompositionEventArgs>? TextCompositionEnd;
-
-    private string? _cachedText;
-    private int _cachedTextVersion = -1;
-    private readonly TextEditorCore _editor;
-    private readonly TextViewState _view = new();
-
-    private bool _suppressTextInputNewline;
-    private bool _suppressTextInputTab;
-
-    private bool _isTextComposing;
-    private int _compositionStart;
-    private int _compositionLength;
-    private CompositionAttr[]? _compositionAttributes;
-
-    private ContextMenu? _defaultContextMenu;
-
-    private DispatcherTimer? _caretTimer;
-    private bool _caretVisible = true;
-    private int _lastSyncedCaretPosition;
-
     /// <summary>
-    /// Gets whether the caret is currently visible (toggles during blink).
-    /// </summary>
-    internal bool CaretVisible => _caretVisible;
-
-    /// <summary>
-    /// Gets the text document.
-    /// </summary>
-    private protected TextDocument Document { get; } = new();
-
-    /// <summary>
-    /// Gets the document version number for change tracking.
-    /// </summary>
-    protected int DocumentVersion { get; private set; }
-
-    /// <summary>
-    /// Initializes a new instance of the TextBase class.
-    /// </summary>
-    protected TextBase()
-    {
-        Cursor = CursorType.IBeam;
-        _editor = new TextEditorCore(
-            GetTextLengthCore,
-            GetTextCharCore,
-            GetTextSubstringCore,
-            ApplyInsertForEdit,
-            ApplyRemoveForEdit,
-            OnEditCommitted);
-    }
-
-    /// <summary>
-    /// Copies the selected text to the clipboard.
-    /// </summary>
-    public void Copy()
-    {
-        CopyToClipboardCore();
-    }
-
-    /// <summary>
-    /// Cuts the selected text to the clipboard.
-    /// </summary>
-    public void Cut()
-    {
-        if (IsReadOnly)
-        {
-            return;
-        }
-
-        CutToClipboardCore();
-        EnsureCaretVisibleCore(GetInteractionContentBounds());
-        InvalidateVisual();
-    }
-
-    /// <summary>
-    /// Pastes text from the clipboard.
-    /// </summary>
-    public void Paste()
-    {
-        if (IsReadOnly)
-        {
-            return;
-        }
-
-        PasteFromClipboardCore();
-        EnsureCaretVisibleCore(GetInteractionContentBounds());
-        InvalidateVisual();
-    }
-
-    /// <summary>
-    /// Selects all text in the control.
-    /// </summary>
-    public void SelectAll()
-    {
-        SelectAllCore();
-        InvalidateVisual();
-    }
-
-    /// <summary>
-    /// Scrolls the view so the caret is visible.
-    /// </summary>
-    public void ScrollToCaret()
-    {
-        EnsureCaretVisibleCore(GetInteractionContentBounds());
-        InvalidateVisual();
-    }
-
-    /// <summary>
-    /// Appends text to the end of the document without allocating a full new <see cref="Text"/> string.
-    /// This is the preferred way to build large logs in a MultiLineTextBox.
-    /// </summary>
-    public void AppendText(string? text, bool scrollToCaret = false)
-    {
-        var normalized = NormalizeText(text ?? string.Empty);
-        if (normalized.Length == 0)
-        {
-            return;
-        }
-
-        // Append at end (WPF-style). We intentionally move the caret to the end so ScrollToCaret works.
-        _editor.SetCaretAndSelection(GetTextLengthCore(), extendSelection: false);
-        SyncSelectionProperties();
-        InsertTextAtCaretForEdit(normalized);
-
-        if (scrollToCaret)
-        {
-            EnsureCaretVisibleCore(GetInteractionContentBounds());
-        }
-
-        InvalidateVisual();
-    }
-
-
-    public static readonly MewProperty<string> PlaceholderProperty =
-        MewProperty<string>.Register<TextBase>(nameof(Placeholder), string.Empty, MewPropertyOptions.AffectsRender);
-
-    public static readonly MewProperty<bool> IsReadOnlyProperty =
-        MewProperty<bool>.Register<TextBase>(nameof(IsReadOnly), false, MewPropertyOptions.AffectsRender);
-
-    public static readonly MewProperty<bool> AcceptTabProperty =
-        MewProperty<bool>.Register<TextBase>(nameof(AcceptTab), false, MewPropertyOptions.None);
-
-    /// <summary>
-    /// Gets or sets the placeholder text shown when the control is empty.
+    /// Gets or sets the placeholder text shown while the document is empty.
     /// </summary>
     public string Placeholder
     {
         get => GetValue(PlaceholderProperty);
         set => SetValue(PlaceholderProperty, value ?? string.Empty);
-    }
-
-    public static readonly MewProperty<int> MaxLengthProperty =
-        MewProperty<int>.Register<TextBase>(nameof(MaxLength), 0);
-
-    /// <summary>
-    /// Gets or sets the maximum number of characters allowed. 0 means no limit.
-    /// </summary>
-    public int MaxLength
-    {
-        get => GetValue(MaxLengthProperty);
-        set => SetValue(MaxLengthProperty, value);
     }
 
     /// <summary>
@@ -204,329 +158,498 @@ public abstract partial class TextBase : Control, ITextCompositionClient, ITextI
         set => SetValue(IsReadOnlyProperty, value);
     }
 
+    /// <summary>
+    /// Gets or sets whether Tab inserts a tab character instead of moving focus.
+    /// </summary>
     public bool AcceptTab
     {
         get => GetValue(AcceptTabProperty);
         set => SetValue(AcceptTabProperty, value);
     }
 
-    protected bool AcceptReturn { get; set; }
+    /// <summary>
+    /// Gets or sets the maximum text length in UTF-16 code units. 0 means unlimited.
+    /// </summary>
+    public int MaxLength
+    {
+        get => GetValue(MaxLengthProperty);
+        set => SetValue(MaxLengthProperty, Math.Max(0, value));
+    }
 
+    /// <summary>
+    /// Gets or sets the caret index in document coordinates.
+    /// </summary>
     public int CaretPosition
     {
         get => _editor.CaretPosition;
         set
         {
-            int old = _editor.CaretPosition;
-            _editor.SetCaretPosition(value);
-            SyncSelectionProperties();
-            if (old != _editor.CaretPosition)
-            {
-                InvalidateVisual();
-            }
+            _editor.SetCaret(value);
+            EnsureCaretVisible();
         }
     }
 
-    bool ITextCompositionClient.IsComposing => _isTextComposing;
+    public event Action<TextInputEventArgs>? TextInput;
+    public event Action<TextCompositionEventArgs>? TextCompositionStart;
+    public event Action<TextCompositionEventArgs>? TextCompositionUpdate;
+    public event Action<TextCompositionEventArgs>? TextCompositionEnd;
 
-    int ITextCompositionClient.CompositionStartIndex => _compositionStart;
+    /// <summary>Optional clipboard override for hosted editors and tests.</summary>
+    public IClipboardService? ClipboardService { get; set; }
 
-    protected internal bool IsComposing => _isTextComposing;
-
-    protected internal int CompositionStartIndex => _compositionStart;
-
-    protected internal int CompositionLength => _compositionLength;
-
-    protected internal CompositionAttr[]? CompositionAttributes => _compositionAttributes;
-
-    internal (int start, int end) SelectionRange
-    {
-        get
-        {
-            return _editor.GetSelectionRange();
-        }
-    }
-
-    private static readonly MewPropertyKey<int> SelectionStartPropertyKey =
-        MewProperty<int>.RegisterReadOnly<TextBase>(nameof(SelectionStart), 0);
-
-    /// <summary>Start index of the current selection (caret index when nothing is selected). Read-only.</summary>
-    public static readonly MewProperty<int> SelectionStartProperty = SelectionStartPropertyKey.Property;
-
-    public int SelectionStart => GetValue(SelectionStartProperty);
-
-    private static readonly MewPropertyKey<int> SelectionLengthPropertyKey =
-        MewProperty<int>.RegisterReadOnly<TextBase>(nameof(SelectionLength), 0);
-
-    /// <summary>Length of the current selection (0 when nothing is selected). Read-only.</summary>
-    public static readonly MewProperty<int> SelectionLengthProperty = SelectionLengthPropertyKey.Property;
-
-    public int SelectionLength => GetValue(SelectionLengthProperty);
-
-    /// <summary>The currently selected text (empty when nothing is selected).</summary>
-    public virtual string SelectedText
-    {
-        get
-        {
-            var (start, end) = _editor.GetSelectionRange();
-            return end > start ? GetTextSubstringCore(start, end - start) : string.Empty;
-        }
-    }
-
-    // Selection/caret state lives in the editor; mirror it onto the read-only MewProperties so it is
-    // bindable/observable. _editor is private to this class, so every mutation of its caret/selection
-    // state happens in a method here - each such method calls this right after mutating. SetValue is a
-    // no-op when unchanged, so callers that end up not actually moving anything cost nothing.
-    private void SyncSelectionProperties()
-    {
-        int caretPosition = _editor.CaretPosition;
-        bool caretMoved = caretPosition != _lastSyncedCaretPosition;
-        _lastSyncedCaretPosition = caretPosition;
-
-        var (start, end) = _editor.GetSelectionRange();
-        SetValue(SelectionStartPropertyKey, start);
-        SetValue(SelectionLengthPropertyKey, end - start);
-
-        if (caretMoved)
-        {
-            ResetCaretBlink();
-        }
-    }
-
-    // Platform text services (IME) sometimes report a replacement range (e.g. AppKit insertText/setMarkedText).
-    // We need a controlled way for backends to align our caret/selection with that range *before* starting
-    // a composition, so the composition replaces the correct characters.
-    internal void SetSelectionRangeForPlatform(int start, int end)
-    {
-        int textLength = GetTextLengthCore();
-        start = Math.Clamp(start, 0, textLength);
-        end = Math.Clamp(end, 0, textLength);
-
-        // Ensure a predictable direction.
-        if (end < start)
-        {
-            (start, end) = (end, start);
-        }
-
-        // Select [start, end) with caret at end.
-        _editor.SetCaretAndSelection(start, extendSelection: false);
-        _editor.SetCaretAndSelection(end, extendSelection: true);
-        SyncSelectionProperties();
-    }
-
-    internal int TextLengthInternal => GetTextLengthCore();
-
-    internal string GetTextSubstringInternal(int start, int length) => GetTextSubstringCore(start, length);
-
-    public event Action<string>? TextChanged;
-
-    public event Action<bool>? WrapChanged;
+    /// <summary>
+    /// Returns the raw selected document text. SelectedText is deliberately not exposed on the
+    /// base: only controls whose text is public (TextBox, MultiLineTextBox) surface it.
+    /// </summary>
+    private protected string GetSelectedDocumentText() => _editor.Selection.Length == 0
+        ? string.Empty
+        : _document.GetText(_editor.Selection.Start, _editor.Selection.Length);
 
     public bool CanUndo => _editor.CanUndo;
-
     public bool CanRedo => _editor.CanRedo;
 
-    internal override void OnAccessKey()
+    private void BindStandardEditCommands()
     {
-        Focus();
-        SelectAll();
+        // One shared handler set for keyboard defaults, menus and toolbars. Semantic edit gestures
+        // are resolved by InputMap; direct key handling is limited to caret/navigation mechanics.
+        Commands.Register(StandardCommands.Copy, this,
+            static textBase => textBase.Copy(),
+            static textBase => textBase._editor.Selection.Length > 0);
+        Commands.Register(StandardCommands.Cut, this,
+            static textBase => textBase.Cut(),
+            static textBase => !textBase.IsReadOnly && textBase._editor.Selection.Length > 0);
+        Commands.Register(StandardCommands.Paste, this,
+            static textBase => textBase.Paste(),
+            static textBase => !textBase.IsReadOnly);
+        Commands.Register(StandardCommands.SelectAll, this,
+            static textBase => textBase.SelectAll(),
+            static textBase => textBase._document.TextLength > 0);
+        Commands.Register(StandardCommands.Undo, this,
+            static textBase => textBase.Undo(),
+            static textBase => !textBase.IsReadOnly && textBase.CanUndo);
+        Commands.Register(StandardCommands.Redo, this,
+            static textBase => textBase.Redo(),
+            static textBase => !textBase.IsReadOnly && textBase.CanRedo);
     }
 
-    protected double HorizontalOffset => _view.HorizontalOffset;
+    public void Select(int start, int length) => _editor.SetSelection(start, length);
 
-    protected double VerticalOffset => _view.VerticalOffset;
-
-    protected void SetHorizontalOffset(double value, bool invalidateVisual = true)
+    /// <summary>
+    /// Moves the caret, keeping the selection anchor where it is when extending. Extending is what
+    /// a shifted arrow key does, and it is the only way to build a selection whose caret sits at its
+    /// start: <see cref="Select"/> always leaves the caret at the end.
+    /// </summary>
+    public void MoveCaret(int position, bool extendSelection)
     {
-        var dpiScale = GetDpi() / 96.0;
-        if (_view.SetHorizontalOffset(value, dpiScale) && invalidateVisual)
+        _editor.SetCaret(position, extendSelection);
+        EnsureCaretVisible();
+    }
+
+    public void SelectAll() => _editor.SelectAll();
+
+    /// <summary>Scrolls the view so the caret is visible.</summary>
+    public void ScrollToCaret() => EnsureCaretVisible();
+
+    /// <summary>
+    /// Appends text at the end of the document without allocating a full new Text string.
+    /// </summary>
+    public void AppendText(string? text, bool scrollToCaret = false)
+    {
+        if (string.IsNullOrEmpty(text))
         {
-            InvalidateVisual();
-        }
-    }
-
-    protected void SetVerticalOffset(double value, bool invalidateVisual = true)
-    {
-        var dpiScale = GetDpi() / 96.0;
-        if (_view.SetVerticalOffset(value, dpiScale) && invalidateVisual)
-        {
-            InvalidateVisual();
-        }
-    }
-
-    protected void SetScrollOffsets(double horizontal, double vertical, bool invalidateVisual = true)
-    {
-        var dpiScale = GetDpi() / 96.0;
-        if (_view.SetScrollOffsets(horizontal, vertical, dpiScale) && invalidateVisual)
-        {
-            InvalidateVisual();
-        }
-    }
-
-    protected virtual TextAlignment PlaceholderVerticalAlignment => TextAlignment.Center;
-
-    protected virtual UIElement? HitTestOverride(Point point) => null;
-
-    protected override UIElement? OnHitTest(Point point)
-    {
-        if (!IsVisible || !IsHitTestVisible || !IsEffectivelyEnabled)
-        {
-            return null;
-        }
-
-        var hit = HitTestOverride(point);
-        if (hit != null)
-        {
-            return hit;
-        }
-
-        return base.OnHitTest(point);
-    }
-
-    protected bool HasSelection => _editor.HasSelection;
-
-    protected (int start, int end) GetSelectionRange()
-    {
-        return _editor.GetSelectionRange();
-    }
-
-    protected bool IsSelectionActive => IsFocused && FindVisualRoot() is Window { IsActive: true };
-
-    protected virtual string NormalizeText(string text)
-    {
-        text ??= string.Empty;
-        if (text.Length == 0)
-        {
-            return string.Empty;
-        }
-
-        bool needsTabRemoval = !AcceptTab && text.IndexOf('\t') >= 0;
-
-        if (AcceptReturn)
-        {
-            int firstCr = text.IndexOf('\r');
-            if (firstCr < 0 && !needsTabRemoval)
-            {
-                return text;
-            }
-
-            if (firstCr >= 0)
-            {
-                text = text.Replace("\r\n", "\n").Replace('\r', '\n');
-            }
-        }
-        else
-        {
-            bool hasCr = text.IndexOf('\r') >= 0;
-            bool hasLf = text.IndexOf('\n') >= 0;
-            if (!hasCr && !hasLf && !needsTabRemoval)
-            {
-                return text;
-            }
-
-            if (hasCr || hasLf)
-            {
-                text = text.Replace("\r\n", string.Empty).Replace("\r", string.Empty).Replace("\n", string.Empty);
-            }
-        }
-
-        if (needsTabRemoval)
-        {
-            text = text.Replace("\t", string.Empty);
-        }
-
-        return text;
-    }
-
-    protected virtual string NormalizePastedText(string text) => text ?? string.Empty;
-
-    protected virtual Rect GetInteractionContentBounds() => Bounds.Deflate(Padding);
-
-    protected Rect GetTextInnerBounds()
-    {
-        var bounds = GetSnappedBorderBounds(Bounds);
-        var borderInset = GetBorderVisualInset();
-        return bounds.Deflate(new Thickness(borderInset));
-    }
-
-    protected virtual Rect AdjustViewportBoundsForScrollbars(Rect innerBounds, Theme theme) => innerBounds;
-
-    protected Rect GetViewportInnerBounds()
-    {
-        var innerBounds = GetTextInnerBounds();
-        return AdjustViewportBoundsForScrollbars(innerBounds, Theme);
-    }
-
-    protected Rect GetViewportContentBounds()
-    {
-        var viewportBounds = GetViewportInnerBounds();
-        var dpiScale = GetDpi() / 96.0;
-        // Viewport/clip rect should not shrink due to edge rounding; snap outward.
-        return LayoutRounding.SnapViewportRectToPixels(viewportBounds.Deflate(Padding), dpiScale);
-    }
-
-    protected abstract void RenderTextContent(IGraphicsContext context, Rect contentBounds, IFont font, Theme theme, in VisualState state);
-
-    protected virtual void RenderAfterContent(IGraphicsContext context, Theme theme, in VisualState state)
-    {
-    }
-
-    protected override sealed void OnRender(IGraphicsContext context)
-    {
-        var bounds = GetSnappedBorderBounds(Bounds);
-        double radius = CornerRadius;
-
-        var state = CurrentVisualState;
-        var borderColor = PickAccentBorder(Theme, BorderBrush, state, 0.6);
-
-        DrawBackgroundAndBorder(
-            context,
-            bounds,
-            PickControlBackground(state),
-            borderColor,
-            BorderThickness,
-            radius);
-
-        var contentBounds = GetViewportContentBounds();
-
-        context.Save();
-        var dpiScale = GetDpi() / 96.0;
-        context.SetClip(LayoutRounding.MakeClipRect(contentBounds, dpiScale));
-
-        var font = GetFont();
-
-        if (Document.IsEmpty && !string.IsNullOrEmpty(Placeholder) && !state.IsFocused)
-        {
-            context.DrawText(Placeholder, contentBounds, font, Theme.Palette.PlaceholderText,
-                TextAlignment.Left, PlaceholderVerticalAlignment, TextWrapping.NoWrap);
-        }
-        else
-        {
-            RenderTextContent(context, contentBounds, font, Theme, state);
-        }
-
-        context.Restore();
-
-        RenderAfterContent(context, Theme, state);
-    }
-
-    protected abstract void SetCaretFromPoint(Point point, Rect contentBounds);
-
-    protected override void OnMouseDoubleClick(MouseEventArgs e)
-    {
-        base.OnMouseDoubleClick(e);
-
-        if (e.Handled || e.Button != MouseButton.Left || !IsEffectivelyEnabled)
             return;
+        }
+        _editor.SetCaret(_document.TextLength);
+        InsertText(text);
+        if (scrollToCaret)
+        {
+            EnsureCaretVisible();
+        }
+    }
 
-        var contentBounds = GetInteractionContentBounds();
-        SetCaretFromPoint(e.Position, contentBounds);
-        _editor.SelectWordAt(CaretPosition);
-        SyncSelectionProperties();
+    public void ReplaceSelection(string? text)
+    {
+        if (IsReadOnly)
+        {
+            return;
+        }
+        InsertText(text);
+        EnsureCaretVisible();
+    }
 
-        EnsureCaretVisibleCore(contentBounds);
+    public void Undo()
+    {
+        if (!IsReadOnly)
+        {
+            _editor.Undo();
+            EnsureCaretVisible();
+        }
+    }
+
+    public void Redo()
+    {
+        if (!IsReadOnly)
+        {
+            _editor.Redo();
+            EnsureCaretVisible();
+        }
+    }
+
+    public void Copy()
+    {
+        if (_editor.Selection.Length > 0)
+        {
+            CopyToClipboardCore();
+        }
+    }
+
+    public void Cut()
+    {
+        if (IsReadOnly || _editor.Selection.Length == 0)
+        {
+            return;
+        }
+        CutToClipboardCore();
+    }
+
+    public void Paste()
+    {
+        if (!IsReadOnly && TryGetClipboardText(out string text))
+        {
+            PasteFromClipboardCore(text);
+        }
+    }
+
+    /// <summary>
+    /// The text a clipboard copy exposes. Null by default: only controls that surface their
+    /// document text (TextBox, MultiLineTextBox) opt in, so masking controls are safe without overrides.
+    /// </summary>
+    private protected virtual string? GetClipboardCopyText() => null;
+
+    /// <summary>Writes the selection to the clipboard when the control exposes copyable text.</summary>
+    private protected virtual void CopyToClipboardCore()
+    {
+        if (GetClipboardCopyText() is string text)
+        {
+            TrySetClipboardText(text);
+        }
+    }
+
+    /// <summary>Cuts the selection; the clipboard write follows the copy opt-in.</summary>
+    private protected virtual void CutToClipboardCore()
+    {
+        CopyToClipboardCore();
+        _editor.ReplaceSelection(string.Empty);
+    }
+
+    /// <summary>Inserts clipboard text at the selection after per-control normalization.</summary>
+    private protected virtual void PasteFromClipboardCore(string text)
+    {
+        InsertText(NormalizePastedText(text));
+        EnsureCaretVisible();
+    }
+
+    /// <summary>Per-control paste normalization (single-line controls convert newlines to spaces).</summary>
+    private protected virtual string NormalizePastedText(string text) => text;
+
+    /// <summary>
+    /// Handles the shared primary-modifier editing shortcuts. Returns whether the key was consumed.
+    /// </summary>
+    private protected bool HandlePrimaryKey(KeyEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case Key.Home:
+                _editor.SetCaret(0, e.ShiftKey);
+                return true;
+            case Key.End:
+                _editor.SetCaret(_document.TextLength, e.ShiftKey);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Draws clause-segmented IME composition underlines using caret geometry from the view.
+    /// Wrapped segments underline to <paramref name="wrapRightEdge"/> on their starting line.
+    /// </summary>
+    private protected void DrawCompositionUnderlines(IGraphicsContext context, double wrapRightEdge)
+    {
+        if (!_editor.IsComposing || _compositionLength <= 0)
+        {
+            return;
+        }
+
+        var color = Theme.Palette.WindowText;
+        int index = 0;
+        while (index < _compositionLength)
+        {
+            var attr = GetCompositionAttr(index);
+            var startRect = GetCharRectInWindow(_compositionStart + index);
+            double lineY = startRect.Y;
+
+            int segmentEnd = index + 1;
+            var endRect = GetCharRectInWindow(_compositionStart + segmentEnd);
+            while (segmentEnd < _compositionLength && GetCompositionAttr(segmentEnd) == attr && endRect.Y == lineY)
+            {
+                segmentEnd++;
+                endRect = GetCharRectInWindow(_compositionStart + segmentEnd);
+            }
+
+            double endX = endRect.Y == lineY ? endRect.X : wrapRightEdge;
+            DrawCompositionUnderline(context, startRect.X, endX, lineY + startRect.Height, color, attr);
+            index = segmentEnd;
+        }
+    }
+
+    private CompositionAttr GetCompositionAttr(int offsetInComposition)
+        => _compositionAttributes is { Length: > 0 } attrs && offsetInComposition < attrs.Length
+            ? attrs[offsetInComposition]
+            : CompositionAttr.Input;
+
+    private static void DrawCompositionUnderline(
+        IGraphicsContext context, double startX, double endX, double y, Color color, CompositionAttr attr)
+    {
+        double thickness = attr is CompositionAttr.TargetConverted or CompositionAttr.TargetNotConverted ? 2 : 1;
+        bool dashed = attr is CompositionAttr.Input or CompositionAttr.TargetNotConverted;
+
+        if (!dashed)
+        {
+            context.DrawLine(new Point(startX, y), new Point(endX, y), color, thickness, pixelSnap: true);
+            return;
+        }
+
+        const double DASH = 3;
+        const double GAP = 2;
+        double x = startX;
+        while (x < endX)
+        {
+            double dashEnd = Math.Min(x + DASH, endX);
+            context.DrawLine(new Point(x, y), new Point(dashEnd, y), color, thickness, pixelSnap: true);
+            x = dashEnd + GAP;
+        }
+    }
+
+    /// <summary>Per-control typed-text normalization (single-line controls drop newline characters).</summary>
+    private protected virtual string NormalizeTypedText(string text) => text;
+
+    /// <summary>Per-control normalization of externally assigned mirror-property text.</summary>
+    private protected virtual string NormalizeExternalText(string text) => text;
+
+    /// <summary>
+    /// Applies an externally assigned mirror-property value to the document. Control text
+    /// property callbacks route here.
+    /// </summary>
+    private protected void ApplyExternalTextCore(string value)
+    {
+        if (_syncingText)
+        {
+            return;
+        }
+        _syncingText = true;
+        try
+        {
+            _editor.CommitComposition();
+            string normalized = NormalizeExternalText(_document.Normalize(value));
+            _document.SetText(normalized);
+            _textSnapshot = normalized;
+            _textSnapshotVersion = _document.Version;
+            _editor.ClearHistory();
+            _editor.SetCaret(Math.Min(_editor.CaretPosition, _document.TextLength));
+        }
+        finally
+        {
+            _syncingText = false;
+        }
+    }
+
+    /// <summary>Swaps the backing document; session state resets while control identity and subscribers survive.</summary>
+    private protected void ReplaceDocumentCore(EditableTextDocument document)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        if (_editor.IsComposing)
+        {
+            _editor.CancelComposition();
+        }
+        _compositionStart = 0;
+        _compositionLength = 0;
+        _compositionAttributes = null;
+        _document.Changed -= OnDocumentTextChanged;
+        _editor.StateChanged -= SyncSelectionMirrors;
+        _document = document;
+        _editor = new TextEditorSession(document);
+        _document.Changed += OnDocumentTextChanged;
+        _editor.StateChanged += SyncSelectionMirrors;
+        _textSnapshotVersion = -1;
+        SyncSelectionMirrors();
+        if (TextSyncProperty is MewProperty<string> mirror)
+        {
+            _syncingText = true;
+            try
+            {
+                SetValue(mirror, GetTextSnapshot());
+            }
+            finally
+            {
+                _syncingText = false;
+            }
+        }
+    }
+
+    private protected string GetTextSnapshot()
+    {
+        if (_textSnapshotVersion != _document.Version)
+        {
+            _textSnapshot = _document.ToString();
+            _textSnapshotVersion = _document.Version;
+        }
+        return _textSnapshot;
+    }
+
+    private void OnDocumentTextChanged(TextChange change)
+    {
+        _textSnapshotVersion = -1;
+        string? currentText = null;
+        var mirror = TextSyncProperty;
+        if (!_syncingText && mirror is not null && (HasPropertyBinding(mirror.Id) || HasTextChangedSubscribers))
+        {
+            _syncingText = true;
+            try
+            {
+                currentText = _document.ToString();
+                CommitTargetValue(mirror, currentText);
+            }
+            finally
+            {
+                _syncingText = false;
+            }
+        }
+        if (HasTextChangedSubscribers)
+        {
+            currentText ??= _document.ToString();
+            RaiseTextChanged(currentText);
+        }
+        InvalidateMeasure();
         InvalidateVisual();
+    }
+
+    /// <summary>Whether raising the text-changed notification is worth materializing the full text.</summary>
+    private protected virtual bool HasTextChangedSubscribers => TextChanged is not null;
+
+    /// <summary>Raises the text-changed notification. Masking controls redirect it (e.g. PasswordChanged).</summary>
+    private protected virtual void RaiseTextChanged(string text) => TextChanged?.Invoke(text);
+
+    private void SyncSelectionMirrors()
+    {
+        var selection = _editor.Selection;
+        SetValue(SelectionStartPropertyKey, selection.Start);
+        SetValue(SelectionLengthPropertyKey, selection.Length);
+        ResetCaretBlink();
+        InvalidateVisual();
+    }
+
+    protected override void OnGotFocus()
+    {
+        base.OnGotFocus();
+        StartCaretBlink();
+        if (ImeMode != ImeMode.Auto && FindVisualRoot() is Window { Backend: not null } window)
+        {
+            window.Backend.SetImeMode(ImeMode);
+        }
+    }
+
+    protected override void OnLostFocus()
+    {
+        StopCaretBlink();
+        SetValue(CaretVisiblePropertyKey, true);
+        if (_editor.IsComposing) _editor.CommitComposition();
+        if (ImeMode != ImeMode.Auto && FindVisualRoot() is Window { Backend: not null } window)
+        {
+            window.Backend.SetImeMode(ImeMode.Auto);
+        }
+        base.OnLostFocus();
+    }
+
+    private protected void StartCaretBlink()
+    {
+        StopCaretBlink();
+        SetValue(CaretVisiblePropertyKey, true);
+        _caretTimer ??= new DispatcherTimer(TimeSpan.FromMilliseconds(500));
+        _caretTimer.Tick += OnCaretBlink;
+        _caretTimer.Start();
+    }
+
+    private protected void StopCaretBlink()
+    {
+        if (_caretTimer is null) return;
+        _caretTimer.Stop();
+        _caretTimer.Tick -= OnCaretBlink;
+    }
+
+    private protected void ResetCaretBlink()
+    {
+        if (IsFocused) StartCaretBlink();
+        else SetValue(CaretVisiblePropertyKey, true);
+    }
+
+    private void OnCaretBlink() => SetValue(CaretVisiblePropertyKey, !CaretVisible);
+
+    /// <summary>
+    /// Discards what the caret drawing produced. Overridden where the caret is a layer entry, so a
+    /// host that caches its layers repaints that one alone rather than the whole stack.
+    /// </summary>
+    private protected virtual void InvalidateCaret() => InvalidateVisual();
+
+    protected override void OnDispose()
+    {
+        StopCaretBlink();
+        _document.Changed -= OnDocumentTextChanged;
+        _editor.StateChanged -= SyncSelectionMirrors;
+        base.OnDispose();
+    }
+
+    private ContextMenu? _defaultContextMenu;
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (e.Handled || !IsEffectivelyEnabled || e.Button != MouseButton.Right)
+        {
+            return;
+        }
+
+        // A user-assigned context menu is shown by the shared Control path instead.
+        if (ContextMenu != null)
+        {
+            return;
+        }
+
+        ShowDefaultTextContextMenu(e.Position);
         e.Handled = true;
+    }
+
+    private protected virtual void ShowDefaultTextContextMenu(Point positionInWindow)
+    {
+        var menu = _defaultContextMenu ??= new ContextMenu();
+        TextContextMenu.Show(menu, this, positionInWindow,
+            StandardCommands.Undo,
+            StandardCommands.Redo,
+            StandardCommands.Cut,
+            StandardCommands.Copy,
+            StandardCommands.Paste,
+            StandardCommands.SelectAll);
+    }
+
+    private protected bool TrySetClipboardText(string text)
+        => (ClipboardService ?? (Application.IsRunning ? Application.Current.PlatformServices.Clipboard : null))
+            ?.TrySetText(text) == true;
+
+    private protected bool TryGetClipboardText(out string text)
+    {
+        text = string.Empty;
+        var clipboard = ClipboardService ?? (Application.IsRunning ? Application.Current.PlatformServices.Clipboard : null);
+        return clipboard is not null && clipboard.TryGetText(out text);
     }
 
     /// <summary>
@@ -534,1007 +657,167 @@ public abstract partial class TextBase : Control, ITextCompositionClient, ITextI
     /// </summary>
     public abstract Rect GetCharRectInWindow(int charIndex);
 
-    protected virtual void AutoScrollForSelectionDrag(Point point, Rect contentBounds)
-    {
-    }
+    /// <summary>Scrolls the view so the caret is visible.</summary>
+    private protected abstract void EnsureCaretVisible();
 
-    protected virtual void EnsureCaretVisibleCore(Rect contentBounds)
-    {
-    }
+    bool ITextCompositionClient.IsComposing => _editor.IsComposing;
+    int ITextCompositionClient.CompositionStartIndex => _compositionStart;
 
-    protected virtual void MoveCaretHorizontalKey(int direction, bool extendSelection, bool word)
-        => MoveCaretHorizontal(direction, extendSelection, word);
+    int ITextCompositionEditor.CompositionLength => _compositionLength;
+    (int Start, int End) ITextCompositionEditor.SelectionRange
+        => (_editor.Selection.Start, _editor.Selection.Start + _editor.Selection.Length);
+    void ITextCompositionEditor.SetSelectionRangeForPlatform(int start, int end)
+        => _editor.SetSelection(Math.Min(start, end), Math.Abs(end - start));
+    int ITextCompositionEditor.TextLength => _document.TextLength;
+    string ITextCompositionEditor.GetTextSubstring(int start, int length) => _document.GetText(start, length);
 
-    protected virtual void MoveCaretVerticalKey(int deltaLines, bool extendSelection)
+    void ITextCompositionEditor.CommitActiveComposition()
     {
-    }
-
-    protected virtual string GetTextCore()
-    {
-        if (_cachedTextVersion == DocumentVersion && _cachedText != null)
+        if (!_editor.IsComposing) return;
+        // Through the same door typed text uses, which removes the preedit and inserts the result:
+        // platforms differ in how they deliver a commit (some send the result as text input while
+        // the preedit is still up, others commit what is already there), and a subscriber has to
+        // see one contract either way. HandleTextInput does the preedit removal itself.
+        string composed = _compositionLength > 0
+            ? _document.GetText(_compositionStart, _compositionLength)
+            : string.Empty;
+        if (composed.Length > 0)
         {
-            return _cachedText;
-        }
-
-        _cachedText = Document.GetText();
-        _cachedTextVersion = DocumentVersion;
-        return _cachedText;
-    }
-
-    protected virtual void SetTextCore(string normalizedText)
-    {
-        BumpDocumentVersion();
-        Document.SetText(normalizedText ?? string.Empty);
-    }
-
-    protected virtual int GetTextLengthCore() => Document.Length;
-
-    protected virtual char GetTextCharCore(int index) => Document[index];
-
-    protected virtual string GetTextSubstringCore(int start, int length) => Document.GetText(start, length);
-
-    protected virtual void OnTextChanged(string oldText, string newText)
-    {
-        InvalidateVisual();
-    }
-
-    protected override void OnKeyDown(KeyEventArgs e)
-    {
-        base.OnKeyDown(e);
-        if (e.Handled)
-        {
+            ((ITextInputClient)this).HandleTextInput(new TextInputEventArgs(composed));
             return;
         }
-
-        if (e.PrimaryKey)
-        {
-            switch (e.Key)
-            {
-                case Key.Home:
-                    MoveCaretToDocumentEdge(true, e.ShiftKey);
-                    e.Handled = true;
-                    EnsureCaretVisibleCore(GetInteractionContentBounds());
-                    InvalidateVisual();
-                    return;
-
-                case Key.End:
-                    MoveCaretToDocumentEdge(false, e.ShiftKey);
-                    e.Handled = true;
-                    EnsureCaretVisibleCore(GetInteractionContentBounds());
-                    InvalidateVisual();
-                    return;
-
-                case Key.Z:
-                    if (!IsReadOnly)
-                    {
-                        if (e.ShiftKey)
-                        {
-                            _editor.Redo();
-                        }
-                        else
-                        {
-                            _editor.Undo();
-                        }
-
-                        SyncSelectionProperties();
-                        EnsureCaretVisibleCore(GetInteractionContentBounds());
-                        InvalidateVisual();
-                    }
-
-                    e.Handled = true;
-                    return;
-
-                case Key.Y:
-                    if (!IsReadOnly)
-                    {
-                        _editor.Redo();
-                        SyncSelectionProperties();
-                        EnsureCaretVisibleCore(GetInteractionContentBounds());
-                        InvalidateVisual();
-                    }
-
-                    e.Handled = true;
-                    return;
-
-                case Key.A:
-                    SelectAllCore();
-                    e.Handled = true;
-                    return;
-
-                case Key.C:
-                    CopyToClipboardCore();
-                    e.Handled = true;
-                    return;
-
-                case Key.X:
-                    if (!IsReadOnly)
-                    {
-                        CutToClipboardCore();
-                        EnsureCaretVisibleCore(GetInteractionContentBounds());
-                        InvalidateVisual();
-                    }
-
-                    e.Handled = true;
-                    return;
-
-                case Key.V:
-                    if (!IsReadOnly)
-                    {
-                        PasteFromClipboardCore();
-                        EnsureCaretVisibleCore(GetInteractionContentBounds());
-                        InvalidateVisual();
-                    }
-
-                    e.Handled = true;
-                    return;
-            }
-        }
-
-        switch (e.Key)
-        {
-            case Key.Home:
-                MoveCaretToLineEdge(true, e.ShiftKey);
-                e.Handled = true;
-                break;
-
-            case Key.End:
-                MoveCaretToLineEdge(false, e.ShiftKey);
-                e.Handled = true;
-                break;
-
-            case Key.Left:
-                MoveCaretHorizontalKey(-1, e.ShiftKey, e.ControlKey);
-                e.Handled = true;
-                break;
-
-            case Key.Right:
-                MoveCaretHorizontalKey(1, e.ShiftKey, e.ControlKey);
-                e.Handled = true;
-                break;
-
-            case Key.Up:
-                MoveCaretVerticalKey(-1, e.ShiftKey);
-                e.Handled = true;
-                break;
-
-            case Key.Down:
-                MoveCaretVerticalKey(1, e.ShiftKey);
-                e.Handled = true;
-                break;
-
-            case Key.Backspace:
-                if (!IsReadOnly)
-                {
-                    _editor.BackspaceForEdit(e.ControlKey);
-                    SyncSelectionProperties();
-                }
-
-                e.Handled = true;
-                break;
-
-            case Key.Delete:
-                if (!IsReadOnly)
-                {
-                    _editor.DeleteForEdit(e.ControlKey);
-                    SyncSelectionProperties();
-                }
-
-                e.Handled = true;
-                break;
-
-            case Key.Tab:
-                if (!IsReadOnly && AcceptTab)
-                {
-                    _editor.InsertTextAtCaretForEdit("\t");
-                    SyncSelectionProperties();
-                    _suppressTextInputTab = true;
-                    e.Handled = true;
-                }
-
-                break;
-
-            case Key.Enter:
-                if (!IsReadOnly && AcceptReturn)
-                {
-                    _editor.InsertTextAtCaretForEdit("\n");
-                    SyncSelectionProperties();
-                    _suppressTextInputNewline = true;
-                    e.Handled = true;
-                }
-
-                break;
-        }
-
-        if (e.Handled)
-        {
-            EnsureCaretVisibleCore(GetInteractionContentBounds());
-            InvalidateVisual();
-        }
+        _editor.CommitComposition();
+        _compositionLength = 0;
+        _compositionAttributes = null;
+        EnsureCaretVisible();
     }
 
-    protected virtual void OnTextInput(TextInputEventArgs e)
+    void ITextInputClient.HandleTextInput(TextInputEventArgs e)
     {
+        // Win32 forwards the IME result string through TextInput while the preedit is still
+        // active; the preedit must be removed, not committed, or the candidate doubles up. It goes
+        // before the event, so a subscriber that edits the document itself, or reads it, sees the
+        // document without the preedit.
+        if (_editor.IsComposing && !IsReadOnly && NormalizeTypedText(e.Text ?? string.Empty).Length > 0)
+        {
+            _editor.CancelComposition();
+            _compositionLength = 0;
+            _compositionAttributes = null;
+        }
         TextInput?.Invoke(e);
-        if (e.Handled || IsReadOnly)
+        if (e.Handled || IsReadOnly) return;
+        string text = e.Text ?? string.Empty;
+        if (_suppressNewLineInput && (text.Contains('\r') || text.Contains('\n')))
         {
+            _suppressNewLineInput = false;
+            e.Handled = true;
             return;
         }
-
-        // If the platform provides IME composition updates, we may have a transient preedit range inserted
-        // into the document. If we receive committed text (WM_CHAR / KeyDown->TextInput path) while a
-        // composition is active, treat this as the commit point and clear the transient range first.
-        if (_isTextComposing)
+        if (_suppressTabInput && text.Contains('\t'))
         {
-            EndTextCompositionInternal();
+            _suppressTabInput = false;
+            e.Handled = true;
+            return;
         }
-
-        var text = e.Text ?? string.Empty;
-
-        if (_suppressTextInputNewline)
-        {
-            _suppressTextInputNewline = false;
-            if (text.Contains('\r') || text.Contains('\n'))
-            {
-                e.Handled = true;
-                return;
-            }
-        }
-
-        if (_suppressTextInputTab)
-        {
-            _suppressTextInputTab = false;
-            if (text.Contains('\t'))
-            {
-                e.Handled = true;
-                return;
-            }
-        }
-
-        text = NormalizeText(text);
+        text = NormalizeTypedText(text);
         if (text.Length == 0)
         {
+            e.Handled = true;
             return;
         }
-
-        InsertTextAtCaretForEdit(text);
+        InsertText(text);
+        EnsureCaretVisible();
         e.Handled = true;
-
-        EnsureCaretVisibleCore(GetInteractionContentBounds());
-        InvalidateVisual();
-    }
-
-    protected virtual void OnTextCompositionStart(TextCompositionEventArgs e)
-    {
-        TextCompositionStart?.Invoke(e);
-        if (e.Handled || IsReadOnly || !IsEffectivelyEnabled)
-        {
-            return;
-        }
-
-        BeginTextCompositionInternal();
-    }
-
-    protected virtual void OnTextCompositionUpdate(TextCompositionEventArgs e)
-    {
-        TextCompositionUpdate?.Invoke(e);
-        if (e.Handled || IsReadOnly || !IsEffectivelyEnabled)
-        {
-            return;
-        }
-
-        if (!_isTextComposing)
-        {
-            BeginTextCompositionInternal();
-        }
-
-        string text = e.Text ?? string.Empty;
-
-        // Replace the previous preedit range with the latest IME composition string.
-        if (_compositionLength > 0)
-        {
-            ApplyRemoveForEdit(_compositionStart, _compositionLength);
-        }
-
-        if (text.Length > 0)
-        {
-            ApplyInsertForEdit(_compositionStart, text);
-        }
-
-        _compositionLength = text.Length;
-        _compositionAttributes = e.Attributes;
-
-        SetCaretAndSelection(_compositionStart + _compositionLength, extendSelection: false);
-        EnsureCaretVisibleCore(GetInteractionContentBounds());
-        InvalidateMeasure();
-        InvalidateVisual();
-    }
-
-    protected virtual void OnTextCompositionEnd(TextCompositionEventArgs e)
-    {
-        TextCompositionEnd?.Invoke(e);
-        if (e.Handled || IsReadOnly || !IsEffectivelyEnabled)
-        {
-            return;
-        }
-
-        EndTextCompositionInternal();
-        EnsureCaretVisibleCore(GetInteractionContentBounds());
-        InvalidateMeasure();
-        InvalidateVisual();
     }
 
     void ITextCompositionClient.HandleTextCompositionStart(TextCompositionEventArgs e)
-        => OnTextCompositionStart(e);
+    {
+        TextCompositionStart?.Invoke(e);
+        if (e.Handled || IsReadOnly) return;
+        _editor.BeginComposition();
+        _compositionStart = _editor.CaretPosition;
+        _compositionLength = 0;
+    }
 
     void ITextCompositionClient.HandleTextCompositionUpdate(TextCompositionEventArgs e)
-        => OnTextCompositionUpdate(e);
+    {
+        TextCompositionUpdate?.Invoke(e);
+        if (e.Handled || IsReadOnly) return;
+        if (!_editor.IsComposing)
+        {
+            _editor.BeginComposition();
+            _compositionStart = _editor.CaretPosition;
+        }
+        UpdateCompositionText(e.Text);
+        _compositionAttributes = e.Attributes;
+        EnsureCaretVisible();
+    }
 
     void ITextCompositionClient.HandleTextCompositionEnd(TextCompositionEventArgs e)
-        => OnTextCompositionEnd(e);
-
-    void ITextInputClient.HandleTextInput(TextInputEventArgs e)
-        => OnTextInput(e);
-
-    protected override void OnGotFocus()
     {
-        base.OnGotFocus();
-        StartCaretBlink();
-        if (ImeMode != ImeMode.Auto)
+        TextCompositionEnd?.Invoke(e);
+        if (e.Handled || IsReadOnly) return;
+        if (!string.IsNullOrEmpty(e.Text))
         {
-            var root = FindVisualRoot();
-            if (root is Window w && w.Backend != null)
-                w.Backend.SetImeMode(ImeMode);
+            UpdateCompositionText(e.Text);
         }
-    }
-
-    protected override void OnLostFocus()
-    {
-        if (ImeMode != ImeMode.Auto)
-        {
-            var root = FindVisualRoot();
-            if (root is Window w && w.Backend != null)
-                w.Backend.SetImeMode(ImeMode.Auto);
-        }
-        StopCaretBlink();
-        _caretVisible = true;
-        base.OnLostFocus();
-        if (_isTextComposing)
-        {
-            // Commit rather than discard - preserves typed text and records undo.
-            CommitTextCompositionInternal();
-            InvalidateMeasure();
-            InvalidateVisual();
-        }
-    }
-
-    private void StartCaretBlink()
-    {
-        StopCaretBlink();
-        _caretVisible = true;
-        _caretTimer ??= new DispatcherTimer(TimeSpan.FromMilliseconds(500));
-        _caretTimer.Tick += OnCaretBlinkTick;
-        _caretTimer.Start();
-    }
-
-    private void StopCaretBlink()
-    {
-        if (_caretTimer == null)
-        {
-            return;
-        }
-        _caretTimer.Stop();
-        _caretTimer.Tick -= OnCaretBlinkTick;
-    }
-
-    private void OnCaretBlinkTick()
-    {
-        _caretVisible = !_caretVisible && FindVisualRoot() is Window window && window.IsActive;
-        InvalidateVisual();
-    }
-
-    private void ResetCaretBlink()
-    {
-        if (!IsFocused) return;
-        StartCaretBlink();
-    }
-
-    private void BeginTextCompositionInternal()
-    {
-        // If there is a selection, treat it as the initial composition range
-        // so that the first composition update replaces it (e.g. Hanja conversion).
-        if (HasSelection)
-        {
-            var (start, end) = GetSelectionRange();
-            _isTextComposing = true;
-            _compositionStart = start;
-            _compositionLength = end - start;
-            return;
-        }
-
-        _isTextComposing = true;
-        _compositionStart = CaretPosition;
+        _editor.CommitComposition();
         _compositionLength = 0;
         _compositionAttributes = null;
+        EnsureCaretVisible();
     }
 
-    private void EndTextCompositionInternal()
+    private protected void InsertText(string? value)
     {
-        if (!_isTextComposing)
-        {
-            return;
-        }
-
-        if (_compositionLength > 0)
-        {
-            ApplyRemoveForEdit(_compositionStart, _compositionLength);
-        }
-
-        SetCaretAndSelection(_compositionStart, extendSelection: false);
-
-        _isTextComposing = false;
-        _compositionStart = 0;
-        _compositionLength = 0;
-        _compositionAttributes = null;
-    }
-
-    internal void CommitTextCompositionInternal()
-    {
-        if (!_isTextComposing)
-        {
-            return;
-        }
-
-        // Record the committed composition text for undo.
-        // The text is already in the document (placed by CompositionUpdate), so we only record - not apply.
-        // Split into individual characters so that Undo removes one character at a time
-        // (macOS Korean IME may commit multi-character compositions).
-        if (_compositionLength > 0)
-        {
-            string committed = GetTextSubstringCore(_compositionStart, _compositionLength);
-            var enumerator = System.Globalization.StringInfo.GetTextElementEnumerator(committed);
-            int offset = 0;
-            while (enumerator.MoveNext())
-            {
-                string element = enumerator.GetTextElement();
-                _editor.RecordInsertForUndo(_compositionStart + offset, element);
-                offset += element.Length;
-            }
-        }
-
-        SetCaretAndSelection(_compositionStart + _compositionLength, extendSelection: false);
-
-        _isTextComposing = false;
-        _compositionStart = 0;
-        _compositionLength = 0;
-        _compositionAttributes = null;
-    }
-
-    protected override void OnMouseDown(MouseEventArgs e)
-    {
-        base.OnMouseDown(e);
-
-        if (e.Handled)
-        {
-            return;
-        }
-
-        if (!IsEffectivelyEnabled)
-        {
-            return;
-        }
-
-        if (e.Button == MouseButton.Right)
-        {
-            // If the user assigned a custom context menu, let Control handle it.
-            if (ContextMenu != null)
-            {
-                return;
-            }
-
-            ShowDefaultTextContextMenu(e.Position);
-            e.Handled = true;
-            return;
-        }
-
-        if (e.Button != MouseButton.Left)
-        {
-            return;
-        }
-
-        Focus();
-
-        // Skip caret/selection setup on 2nd click of a double-click -
-        // OnMouseDoubleClick will handle word selection instead.
-        if (e.ClickCount >= 2)
-        {
-            e.Handled = true;
-            return;
-        }
-
-        var contentBounds = GetInteractionContentBounds();
-
-        SetCaretFromPoint(e.Position, contentBounds);
-        _editor.BeginSelectionAtCaret();
-        SyncSelectionProperties();
-
-        var root = FindVisualRoot();
-        if (root is Window window)
-        {
-            window.CaptureMouse(this);
-        }
-
-        EnsureCaretVisibleCore(contentBounds);
-        InvalidateVisual();
-        e.Handled = true;
-    }
-
-    private void ShowDefaultTextContextMenu(Point positionInWindow)
-    {
-        var menu = _defaultContextMenu ??= new ContextMenu();
-        menu.Items.Clear();
-
-        bool canPaste = false;
-        if (!IsReadOnly && TryClipboardGetText(out var clip) && !string.IsNullOrEmpty(clip))
-        {
-            canPaste = true;
-        }
-
-        var p = ModifierKeys.Primary;
-        menu.AddItem(MewUIStrings.TextBoxContextMenuUndo.Value, () => Undo(), !IsReadOnly && CanUndo, new KeyGesture(Key.Z, p));
-        menu.AddItem(MewUIStrings.TextBoxContextMenuRedo.Value, () => Redo(), !IsReadOnly && CanRedo, new KeyGesture(Key.Y, p));
-        menu.AddSeparator();
-        menu.AddItem(MewUIStrings.TextBoxContextMenuCut.Value, () => Cut(), !IsReadOnly && HasSelection, new KeyGesture(Key.X, p));
-        menu.AddItem(MewUIStrings.TextBoxContextMenuCopy.Value, () => Copy(), HasSelection, new KeyGesture(Key.C, p));
-        menu.AddItem(MewUIStrings.TextBoxContextMenuPaste.Value, () => Paste(), canPaste, new KeyGesture(Key.V, p));
-        menu.AddSeparator();
-        menu.AddItem(MewUIStrings.TextBoxContextMenuSelectAll.Value, () => SelectAll(), GetTextLengthCore() > 0, new KeyGesture(Key.A, p));
-
-        menu.ShowAt(this, positionInWindow);
-    }
-
-    protected override void OnMouseMove(MouseEventArgs e)
-    {
-        base.OnMouseMove(e);
-
-        if (!IsEffectivelyEnabled || !IsMouseCaptured || !e.LeftButton)
-        {
-            return;
-        }
-
-        var contentBounds = GetInteractionContentBounds();
-        AutoScrollForSelectionDrag(e.Position, contentBounds);
-        SetCaretFromPoint(e.Position, contentBounds);
-        _editor.UpdateSelectionToCaret();
-        SyncSelectionProperties();
-        EnsureCaretVisibleCore(contentBounds);
-        InvalidateVisual();
-        e.Handled = true;
-    }
-
-    protected override void OnMouseUp(MouseEventArgs e)
-    {
-        base.OnMouseUp(e);
-
-        if (e.Button != MouseButton.Left)
-        {
-            return;
-        }
-
-        var root = FindVisualRoot();
-        if (root is Window window)
-        {
-            window.ReleaseMouseCapture();
-        }
-    }
-
-    protected override void OnDispose()
-    {
-        Document.Dispose();
-        base.OnDispose();
-    }
-
-    protected virtual void NotifyTextChanged()
-    {
-        RaiseTextChanged();
-    }
-
-    /// <summary>
-    /// Raises <see cref="TextChanged"/> with the current text. Subclasses whose text must never
-    /// be exposed through this channel (e.g. <see cref="PasswordBox"/>) can override to suppress it.
-    /// </summary>
-    protected virtual void RaiseTextChanged()
-    {
-        TextChanged?.Invoke(GetTextCore());
-    }
-
-    protected void NotifyWrapChanged(bool value)
-    {
-        WrapChanged?.Invoke(value);
-    }
-
-    /// <summary>
-    /// Applies a text change originating from outside the editing pipeline (e.g. property setter or binding).
-    /// Subclasses call this from their MewProperty change callback.
-    /// </summary>
-    protected void ApplyExternalTextChange(string newValue)
-    {
-        var normalized = NormalizeText(newValue ?? string.Empty);
-        var current = GetTextCore();
-        if (current != normalized)
-        {
-            SetTextCore(normalized);
-            _editor.ResetAfterTextSet();
-            SyncSelectionProperties();
-            InvalidateVisual();
-            OnTextChanged(current, normalized);
-        }
-
-        RaiseTextChanged();
-    }
-
-    private bool _syncingTextProperty;
-
-    /// <summary>
-    /// Shared reentrancy guard used by <see cref="SyncTextPropertyFromDocument"/> and
-    /// <see cref="ApplyExternalTextPropertyChange"/> so a subclass's mirrored string property
-    /// (e.g. <c>Text</c> or <c>Password</c>) does not bounce back and forth with the document.
-    /// </summary>
-    protected bool IsSyncingTextProperty => _syncingTextProperty;
-
-    /// <summary>
-    /// Common body for a mirrored string property's public setter: normalizes, skips if unchanged,
-    /// otherwise pushes the value through the MewProperty (which runs the registered changed callback).
-    /// </summary>
-    protected void SetMirroredTextProperty(MewProperty<string> property, string? value)
-    {
-        var normalized = NormalizeText(value ?? string.Empty);
-        if (GetTextCore() == normalized)
-        {
-            return;
-        }
-
-        SetValue(property, normalized);
-    }
-
-    /// <summary>
-    /// Pushes the current document text into <paramref name="property"/> without re-entering that
-    /// property's change callback. Call from a <see cref="NotifyTextChanged"/> override that mirrors
-    /// the document onto a MewProperty (e.g. <c>TextProperty</c> or <c>PasswordProperty</c>).
-    /// </summary>
-    protected void SyncTextPropertyFromDocument(MewProperty<string> property)
-    {
-        _syncingTextProperty = true;
-        try
-        {
-            SetValue(property, GetTextCore());
-        }
-        finally
-        {
-            _syncingTextProperty = false;
-        }
-    }
-
-    /// <summary>
-    /// Applies an externally set value of a mirrored string property to the document, guarding against
-    /// reentrancy from <see cref="SyncTextPropertyFromDocument"/>. Call from that property's change callback.
-    /// </summary>
-    protected void ApplyExternalTextPropertyChange(string newValue)
-    {
-        if (_syncingTextProperty)
-        {
-            return;
-        }
-
-        _syncingTextProperty = true;
-        try
-        {
-            ApplyExternalTextChange(newValue);
-        }
-        finally
-        {
-            _syncingTextProperty = false;
-        }
-    }
-
-    public void Undo()
-    {
-        if (IsReadOnly)
-        {
-            return;
-        }
-
-        _editor.Undo();
-        SyncSelectionProperties();
-    }
-
-    public void Redo()
-    {
-        if (IsReadOnly)
-        {
-            return;
-        }
-
-        _editor.Redo();
-        SyncSelectionProperties();
-    }
-
-    protected void BumpDocumentVersion()
-    {
-        DocumentVersion++;
-        _cachedTextVersion = -1;
-        _cachedText = null;
-    }
-
-    protected void InsertIntoDocument(int index, ReadOnlySpan<char> text)
-    {
-        if (text.Length == 0)
-        {
-            return;
-        }
-
-        BumpDocumentVersion();
-        Document.Insert(index, text);
-    }
-
-    protected void RemoveFromDocument(int index, int length)
-    {
-        if (length <= 0)
-        {
-            return;
-        }
-
-        BumpDocumentVersion();
-        Document.Remove(index, length);
-    }
-
-    protected int ApplyInsertCore(int index, ReadOnlySpan<char> text)
-    {
-        if (text.Length == 0)
-        {
-            return index;
-        }
-
-        int max = GetTextLengthCore();
-        index = Math.Clamp(index, 0, max);
-        InsertIntoDocument(index, text);
-        return index;
-    }
-
-    protected int ApplyRemoveCore(int index, int length)
-    {
-        if (length <= 0)
-        {
-            return 0;
-        }
-
-        int max = GetTextLengthCore();
-        index = Math.Clamp(index, 0, max);
-        length = Math.Min(length, max - index);
-        if (length <= 0)
-        {
-            return 0;
-        }
-
-        RemoveFromDocument(index, length);
-        return length;
-    }
-
-    protected virtual void SelectAllCore()
-    {
-        _editor.SelectAll();
-        SyncSelectionProperties();
-        InvalidateVisual();
-    }
-
-    protected virtual void CopyToClipboardCore()
-    {
-        if (!HasSelection)
-        {
-            return;
-        }
-
-        var (start, end) = GetSelectionRange();
-        string selected = GetTextSubstringCore(start, end - start);
-        TryClipboardSetText(selected);
-    }
-
-    protected virtual void CutToClipboardCore()
-    {
-        if (!HasSelection)
-        {
-            return;
-        }
-
-        CopyToClipboardCore();
-        DeleteSelectionForEdit();
-    }
-
-    protected virtual void PasteFromClipboardCore()
-    {
-        if (!TryClipboardGetText(out var text) || string.IsNullOrEmpty(text))
-        {
-            return;
-        }
-
-        InsertTextAtCaretForEdit(NormalizePastedText(text));
-    }
-
-    protected virtual void ApplyInsertForEdit(int index, string text) => InsertIntoDocument(index, text.AsSpan());
-
-    protected virtual void ApplyRemoveForEdit(int index, int length) => RemoveFromDocument(index, length);
-
-    protected virtual void OnEditCommitted() => NotifyTextChanged();
-
-    protected void SetCaretAndSelection(int newPos, bool extendSelection)
-    {
-        _editor.SetCaretAndSelection(newPos, extendSelection);
-        SyncSelectionProperties();
-    }
-
-    protected void MoveCaretHorizontal(int direction, bool extendSelection, bool word)
-    {
-        _editor.MoveCaretHorizontal(direction, extendSelection, word);
-        SyncSelectionProperties();
-    }
-
-    protected void MoveCaretToDocumentEdge(bool start, bool extendSelection)
-    {
-        _editor.MoveCaretToDocumentEdge(start, extendSelection);
-        SyncSelectionProperties();
-    }
-
-    protected virtual void MoveCaretToLineEdge(bool start, bool extendSelection)
-        => MoveCaretToDocumentEdge(start, extendSelection);
-
-    protected void BackspaceForEdit(bool word)
-    {
-        _editor.BackspaceForEdit(word);
-        SyncSelectionProperties();
-    }
-
-    protected void DeleteForEdit(bool word)
-    {
-        _editor.DeleteForEdit(word);
-        SyncSelectionProperties();
-    }
-
-    protected int FindPreviousWordBoundary(int from)
-    {
-        return _editor.FindPreviousWordBoundary(from);
-    }
-
-    protected int FindNextWordBoundary(int from)
-    {
-        return _editor.FindNextWordBoundary(from);
-    }
-
-    protected virtual bool DeleteSelectionForEdit()
-    {
-        bool deleted = _editor.DeleteSelectionForEdit();
-        SyncSelectionProperties();
-        return deleted;
-    }
-
-    protected virtual void InsertTextAtCaretForEdit(string text)
-    {
-        text = NormalizeText(text ?? string.Empty);
-        if (text.Length == 0)
-        {
-            return;
-        }
-
+        string text = _document.Normalize(value);
         if (MaxLength > 0)
         {
-            var (start, end) = GetSelectionRange();
-            int selectionLength = HasSelection ? end - start : 0;
-            int remaining = MaxLength - GetTextLengthCore() + selectionLength;
-            if (remaining <= 0) return;
-            if (text.Length > remaining)
-            {
-                // Avoid splitting a surrogate pair.
-                if (remaining > 0 && char.IsHighSurrogate(text[remaining - 1]))
-                    remaining--;
-                if (remaining <= 0) return;
-                text = text[..remaining];
-            }
-        }
-
-        _editor.InsertTextAtCaretForEdit(text);
-        SyncSelectionProperties();
-    }
-
-    protected bool TryClipboardSetText(string text)
-    {
-        if (!Application.IsRunning)
-        {
-            return false;
-        }
-
-        var clipboard = Application.Current.PlatformHost.Clipboard;
-        return clipboard.TrySetText(text ?? string.Empty);
-    }
-
-    protected bool TryClipboardGetText(out string text)
-    {
-        text = string.Empty;
-        if (!Application.IsRunning)
-        {
-            return false;
-        }
-
-        var clipboard = Application.Current.PlatformHost.Clipboard;
-        return clipboard.TryGetText(out text);
-    }
-
-    protected virtual bool SupportsWrap => false;
-
-    protected bool WrapEnabled
-    {
-        get;
-        private set
-        {
-            if (field == value)
+            int remaining = MaxLength - (_document.TextLength - _editor.Selection.Length);
+            if (remaining <= 0)
             {
                 return;
             }
-
-            var old = field;
-            field = value;
-            OnWrapChanged(old, value);
-            WrapChanged?.Invoke(value);
+            if (text.Length > remaining)
+            {
+                text = TruncateAtTextElementBoundary(text, remaining);
+            }
+        }
+        if (text.Length > 0)
+        {
+            _editor.EnterText(text);
         }
     }
 
-    protected void SetWrapEnabled(bool value)
+    private void UpdateCompositionText(string? value)
     {
-        if (!SupportsWrap)
+        string text = _document.Normalize(value);
+        if (MaxLength > 0)
         {
-            WrapEnabled = false;
-            return;
+            int remaining = MaxLength - (_document.TextLength - _compositionLength);
+            text = remaining <= 0
+                ? string.Empty
+                : TruncateAtTextElementBoundary(text, remaining);
         }
-
-        WrapEnabled = value;
+        _editor.UpdateComposition(text);
+        _compositionLength = text.Length;
     }
 
-    protected virtual void OnWrapChanged(bool oldValue, bool newValue)
+    private protected static string TruncateAtTextElementBoundary(string text, int maximumLength)
     {
+        if (maximumLength <= 0)
+        {
+            return string.Empty;
+        }
+        if (text.Length <= maximumLength)
+        {
+            return text;
+        }
+
+        int[] boundaries = StringInfo.ParseCombiningCharacters(text);
+        int boundaryIndex = Array.BinarySearch(boundaries, maximumLength);
+        int length = boundaryIndex >= 0
+            ? maximumLength
+            : boundaries[Math.Max(0, ~boundaryIndex - 1)];
+        return length == 0 ? string.Empty : text[..length];
     }
-
-    protected static double ClampOffset(double value, double extent, double viewport)
-    {
-        extent = Math.Max(0, extent);
-        viewport = Math.Max(0, viewport);
-        double max = Math.Max(0, extent - viewport);
-        if (double.IsNaN(value) || double.IsInfinity(value))
-        {
-            return 0;
-        }
-
-        if (value < 0)
-        {
-            return 0;
-        }
-
-        if (value > max)
-        {
-            return max;
-        }
-
-        return value;
-    }
-
-    protected static double ClampOffset(double value, double extent, double viewport, double dpiScale)
-    {
-        double clamped = ClampOffset(value, extent, viewport);
-
-        if (dpiScale <= 0 || double.IsNaN(dpiScale) || double.IsInfinity(dpiScale))
-        {
-            return clamped;
-        }
-
-        clamped = LayoutRounding.RoundToPixel(clamped, dpiScale);
-        return ClampOffset(clamped, extent, viewport);
-    }
-
-    protected void ClearUndoRedo() => _editor.ClearUndoRedo();
 }

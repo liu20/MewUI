@@ -118,6 +118,13 @@ public interface IWindowBackend : IDisposable
     void SetPosition(double leftDip, double topDip);
 
     /// <summary>
+    /// Sets the window position in screen device pixels.
+    /// </summary>
+    /// <param name="leftPx">Left in screen device pixels.</param>
+    /// <param name="topPx">Top in screen device pixels.</param>
+    void SetPositionPx(int leftPx, int topPx);
+
+    /// <summary>
     /// Captures mouse input at the native window level so the window continues to receive mouse events,
     /// even when the pointer leaves the client area (platform dependent).
     /// </summary>

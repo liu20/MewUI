@@ -17,7 +17,7 @@ partial class GalleryView
                     .Spacing(8)
                     .Children(
                         new TextBlock()
-                            .FontSize(11)
+                            .FontSize(ThemeFontSize.Small)
                             .Text("ShowDialog() blocks this click handler (no await)\nwhile a nested loop keeps input and paint live."),
                         new Button()
                             .Content("Show (sync)")
@@ -28,7 +28,7 @@ partial class GalleryView
                                 dialog.ShowDialog(window);
                                 syncStatus.Value = $"Result: {dialog.Result}, clicks={dialog.ClickCount}";
                             }),
-                        new TextBlock().BindText(syncStatus).FontSize(11)
+                        new TextBlock().BindText(syncStatus).FontSize(ThemeFontSize.Small)
                     )
             ),
             Card(
@@ -38,7 +38,7 @@ partial class GalleryView
                     .Spacing(8)
                     .Children(
                         new TextBlock()
-                            .FontSize(11)
+                            .FontSize(ThemeFontSize.Small)
                             .Text("ShowDialogAsync() returns a Task on the same loop.\nSame dialog, awaited instead of blocking."),
                         new Button()
                             .Content("Show (async)")
@@ -48,7 +48,7 @@ partial class GalleryView
                                 await dialog.ShowDialogAsync(window);
                                 asyncStatus.Value = $"Result: {dialog.Result}, clicks={dialog.ClickCount}";
                             }),
-                        new TextBlock().BindText(asyncStatus).FontSize(11)
+                        new TextBlock().BindText(asyncStatus).FontSize(ThemeFontSize.Small)
                     )
             )
         );

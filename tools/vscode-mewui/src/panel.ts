@@ -13,6 +13,7 @@ export interface PanelCallbacks {
     onViewport(width: number, height: number, dpi: number): void;
     onSetTheme(mode: string): void;
     onInput(kind: string, body: object): void;
+    onSetNavigate(value: boolean): void;
     onDisposed(): void;
 }
 
@@ -26,14 +27,14 @@ export class PreviewPanel {
     private pendingStatus: StatusInfo | undefined;
     private pendingState: { state: string; detail?: string } | undefined;
 
-    constructor(title: string, private readonly callbacks: PanelCallbacks) {
+    constructor(title: string, navigateOnSelect: boolean, private readonly callbacks: PanelCallbacks) {
         this.panel = vscode.window.createWebviewPanel(
             "mewuiPreview",
             title,
             { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
             { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] },
         );
-        this.panel.webview.html = createHtml();
+        this.panel.webview.html = createHtml(navigateOnSelect);
         this.panel.webview.onDidReceiveMessage((message) => this.onMessage(message));
         this.panel.onDidDispose(() => callbacks.onDisposed());
     }
@@ -143,11 +144,14 @@ export class PreviewPanel {
             case "input":
                 this.callbacks.onInput(message.kind as string, message.body as object);
                 break;
+            case "setNavigate":
+                this.callbacks.onSetNavigate(message.value as boolean);
+                break;
         }
     }
 }
 
-function createHtml(): string {
+function createHtml(navigateOnSelect: boolean): string {
     const nonce = Math.random().toString(36).slice(2);
     return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -185,7 +189,7 @@ function createHtml(): string {
 <body>
   <div id="toolbar">
     <select id="targets" title="Preview target"></select>
-    <select id="zoom" title="Zoom (display scale only)">
+    <select id="zoom" title="Zoom (re-renders at the zoomed scale)">
       <option value="fit" selected>Fit</option>
       <option value="50">50%</option>
       <option value="100">100%</option>
@@ -195,6 +199,8 @@ function createHtml(): string {
     <button id="theme" title="Toggle light/dark theme">Theme</button>
     <button id="refresh" title="Rebuild the current target">Refresh</button>
     <button id="restart" title="Restart the preview session (full state reset)">Restart</button>
+    <label title="Jump to the target's declaration when the preview target changes">
+      <input type="checkbox" id="navigate"${navigateOnSelect ? " checked" : ""}>Go to code</label>
     <span id="state">Starting...</span>
   </div>
   <div id="surface"><canvas id="canvas" width="1" height="1" tabindex="0"></canvas></div>
@@ -212,18 +218,22 @@ function createHtml(): string {
   let themeMode = "";
   let lastDpiScale = 1;
 
-  // Zoom is display-only (plan.md 4.5): 100% maps one frame pixel to one device pixel.
+  // Zoom rides the requested DPI: the session re-renders the vectors at the zoomed scale and
+  // the canvas shows the frame at one frame pixel per device pixel, so zoom stays crisp.
+  // Fit remains a display-side downscale of the natural-scale render.
+  function zoomFactor() {
+    return zoomSelect.value === "fit" ? 1 : parseInt(zoomSelect.value, 10) / 100;
+  }
+
   function applyZoom() {
-    const zoom = zoomSelect.value;
-    if (zoom === "fit") {
+    if (zoomSelect.value === "fit") {
       canvas.classList.add("fit");
       canvas.style.width = "";
       canvas.style.height = "";
     } else {
-      const scale = parseInt(zoom, 10) / 100;
       canvas.classList.remove("fit");
-      canvas.style.width = (canvas.width / window.devicePixelRatio * scale) + "px";
-      canvas.style.height = (canvas.height / window.devicePixelRatio * scale) + "px";
+      canvas.style.width = (canvas.width / window.devicePixelRatio) + "px";
+      canvas.style.height = (canvas.height / window.devicePixelRatio) + "px";
     }
   }
 
@@ -300,7 +310,10 @@ function createHtml(): string {
   targetsSelect.addEventListener("change", () => {
     vscode.postMessage({ type: "selectTarget", id: targetsSelect.value });
   });
-  zoomSelect.addEventListener("change", () => applyZoom());
+  zoomSelect.addEventListener("change", () => {
+    applyZoom();
+    postViewport();
+  });
   themeButton.addEventListener("click", () => {
     vscode.postMessage({ type: "setTheme", mode: themeMode === "dark" ? "light" : "dark" });
   });
@@ -310,6 +323,9 @@ function createHtml(): string {
   document.getElementById("restart").addEventListener("click", () => {
     vscode.postMessage({ type: "restart" });
   });
+  document.getElementById("navigate").addEventListener("change", (event) => {
+    vscode.postMessage({ type: "setNavigate", value: event.target.checked });
+  });
 
   function postViewport() {
     const surface = document.getElementById("surface");
@@ -317,7 +333,7 @@ function createHtml(): string {
       type: "viewport",
       width: Math.max(1, surface.clientWidth - 16),
       height: Math.max(1, surface.clientHeight - 16),
-      dpi: 96 * window.devicePixelRatio,
+      dpi: 96 * window.devicePixelRatio * zoomFactor(),
     });
   }
 

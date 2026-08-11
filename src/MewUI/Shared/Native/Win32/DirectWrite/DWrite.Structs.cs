@@ -49,3 +49,37 @@ internal readonly struct DWRITE_TEXT_METRICS(
     public readonly uint maxBidiReorderingDepth = maxBidiReorderingDepth;
     public readonly uint lineCount = lineCount;
 }
+
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct DWRITE_GLYPH_RUN
+{
+    public nint fontFace;
+    public float fontEmSize;
+    public uint glyphCount;
+    public ushort* glyphIndices;
+    public float* glyphAdvances;
+    public DWRITE_GLYPH_OFFSET* glyphOffsets;
+    public int isSideways;
+    public uint bidiLevel;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct DWRITE_GLYPH_RUN_DESCRIPTION
+{
+    public char* localeName;
+    public char* text;
+    public uint textLength;
+    public ushort* clusterMap;
+    public uint textPosition;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct DWRITE_MATRIX
+{
+    public float m11;
+    public float m12;
+    public float m21;
+    public float m22;
+    public float dx;
+    public float dy;
+}

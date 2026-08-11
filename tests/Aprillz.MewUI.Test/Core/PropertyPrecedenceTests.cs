@@ -4,12 +4,9 @@ using Aprillz.MewUI.Controls;
 namespace MewUI.Test.Core;
 
 /// <summary>
-/// Characterizes the observable property-source precedence (Local &gt; Trigger &gt; Style &gt; Default)
-/// that the value store must preserve. These are invariants: they lock the resolution order that any
-/// future multi-slot store rewrite has to keep. The separate clear-reveals-lower behavior (which the
-/// single-slot store does not do today - a cleared source drops to Default and the control layer
-/// re-applies) is intentionally NOT locked here, because that store-level semantic is what a
-/// multi-slot migration changes.
+/// Characterizes the observable property-source precedence
+/// (Local &gt; ElementTrigger &gt; Style &gt; Default) that the multi-slot value store preserves.
+/// Clear-and-reveal behavior is covered separately by <see cref="PropertyMultiSlotTests"/>.
 /// </summary>
 [TestClass]
 public sealed class PropertyPrecedenceTests
@@ -48,7 +45,7 @@ public sealed class PropertyPrecedenceTests
     {
         var owner = new PrecedenceOwner();
         owner.PropertyStore.SetStyle(Prop, 10);
-        owner.PropertyStore.SetTrigger(Prop, 20);
+        owner.PropertyStore.SetElementTrigger(Prop, 20);
         Assert.AreEqual(20, owner.Value);
     }
 
@@ -57,7 +54,7 @@ public sealed class PropertyPrecedenceTests
     {
         var owner = new PrecedenceOwner();
         owner.PropertyStore.SetStyle(Prop, 10);
-        owner.PropertyStore.SetTrigger(Prop, 20);
+        owner.PropertyStore.SetElementTrigger(Prop, 20);
         owner.PropertyStore.SetLocal(Prop, 30);
         Assert.AreEqual(30, owner.Value);
     }
@@ -70,7 +67,7 @@ public sealed class PropertyPrecedenceTests
 
         // A style/trigger arriving after a local value must not lower the effective value.
         owner.PropertyStore.SetStyle(Prop, 10);
-        owner.PropertyStore.SetTrigger(Prop, 20);
+        owner.PropertyStore.SetElementTrigger(Prop, 20);
 
         Assert.AreEqual(30, owner.Value);
     }
@@ -82,10 +79,10 @@ public sealed class PropertyPrecedenceTests
         var a = new PrecedenceOwner();
         a.PropertyStore.SetLocal(Prop, 30);
         a.PropertyStore.SetStyle(Prop, 10);
-        a.PropertyStore.SetTrigger(Prop, 20);
+        a.PropertyStore.SetElementTrigger(Prop, 20);
 
         var b = new PrecedenceOwner();
-        b.PropertyStore.SetTrigger(Prop, 20);
+        b.PropertyStore.SetElementTrigger(Prop, 20);
         b.PropertyStore.SetStyle(Prop, 10);
         b.PropertyStore.SetLocal(Prop, 30);
 

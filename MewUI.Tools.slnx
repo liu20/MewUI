@@ -1,0 +1,33 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MewUI/MewUI.csproj" />
+    <Project Path="src/MewUI.Preview/MewUI.Preview.csproj" />
+  </Folder>
+  <Folder Name="/visualstudio/">
+    <Project Path="tools/MewUI.VisualStudio/MewUI.VisualStudio.csproj" />
+  </Folder>
+  <Folder Name="/vscode/">
+    <File Path="tools/vscode-mewui/README.md" />
+    <File Path="tools/vscode-mewui/package.json" />
+    <File Path="tools/vscode-mewui/tsconfig.json" />
+    <File Path="tools/vscode-mewui/src/extension.ts" />
+    <File Path="tools/vscode-mewui/src/panel.ts" />
+    <File Path="tools/vscode-mewui/src/protocol.ts" />
+    <File Path="tools/vscode-mewui/src/session.ts" />
+  </Folder>
+  <Folder Name="/rider/">
+    <File Path="tools/rider-mewui/README.md" />
+    <File Path="tools/rider-mewui/build.gradle.kts" />
+    <File Path="tools/rider-mewui/settings.gradle.kts" />
+    <File Path="tools/rider-mewui/gradle.properties" />
+    <File Path="tools/rider-mewui/src/main/resources/META-INF/plugin.xml" />
+    <File Path="tools/rider-mewui/src/main/kotlin/com/aprillz/mewui/preview/OpenPreviewAction.kt" />
+    <File Path="tools/rider-mewui/src/main/kotlin/com/aprillz/mewui/preview/PreviewPanel.kt" />
+    <File Path="tools/rider-mewui/src/main/kotlin/com/aprillz/mewui/preview/PreviewProtocol.kt" />
+    <File Path="tools/rider-mewui/src/main/kotlin/com/aprillz/mewui/preview/PreviewSession.kt" />
+    <File Path="tools/rider-mewui/src/main/kotlin/com/aprillz/mewui/preview/PreviewToolWindowFactory.kt" />
+    <File Path="tools/rider-mewui/src/main/kotlin/com/aprillz/mewui/preview/ProjectLocator.kt" />
+    <File Path="tools/rider-mewui/src/main/kotlin/com/aprillz/mewui/preview/ShimProject.kt" />
+    <File Path="tools/rider-mewui/src/main/kotlin/com/aprillz/mewui/preview/W3cInput.kt" />
+  </Folder>
+</Solution>

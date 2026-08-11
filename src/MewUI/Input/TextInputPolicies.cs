@@ -5,6 +5,6 @@ namespace Aprillz.MewUI.Input;
 internal static class TextInputPolicies
 {
     internal static bool AllowsTabTextInput(UIElement? focusedElement)
-        => focusedElement is TextBase tb && tb.AcceptTab && !tb.IsReadOnly;
+        => focusedElement is TextBase textBase && textBase.AcceptTab && !textBase.IsReadOnly;
 }
 

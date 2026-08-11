@@ -38,7 +38,7 @@ public sealed class NavigationViewIconTests
     {
         var geometry = PathGeometry.Parse("M 0,0 L 16,0 L 16,16 Z");
         var items = new[] { new PathIconItem("Path", geometry) };
-        var view = new NavigationView { PaneDisplayMode = PaneDisplayMode.Expanded };
+        var view = new NavigationView { PaneDisplayMode = PaneDisplayMode.Inline, IsPaneOpen = true };
         view.Items(items, item => item.Text, icon: item => item.Icon);
 
         Layout(view);
@@ -95,7 +95,7 @@ public sealed class NavigationViewIconTests
             new IconItem("Group", null, NavigationItemKind.Header),
             new IconItem("Item", new GlyphElement(), NavigationItemKind.Item),
         };
-        var view = new NavigationView { PaneDisplayMode = PaneDisplayMode.Expanded };
+        var view = new NavigationView { PaneDisplayMode = PaneDisplayMode.Inline, IsPaneOpen = true };
         view.Items(
             items,
             item => item.Text,
@@ -121,7 +121,7 @@ public sealed class NavigationViewIconTests
 
     private static NavigationView CreateView(IReadOnlyList<IconItem> items)
     {
-        var view = new NavigationView { PaneDisplayMode = PaneDisplayMode.Expanded };
+        var view = new NavigationView { PaneDisplayMode = PaneDisplayMode.Inline, IsPaneOpen = true };
         view.Items(items, item => item.Text, icon: item => item.Icon);
         return view;
     }

@@ -107,115 +107,6 @@ internal sealed partial class MewVGX11GraphicsContext
 
     #region Text Rendering
 
-    protected override void DrawTextCore(ReadOnlySpan<char> text, Rect bounds, IFont font, Color color,
-        TextAlignment horizontalAlignment = TextAlignment.Left,
-        TextAlignment verticalAlignment = TextAlignment.Top,
-        TextWrapping wrapping = TextWrapping.NoWrap,
-        TextTrimming trimming = TextTrimming.None)
-    {
-        if (text.IsEmpty)
-        {
-            return;
-        }
-
-        if (font is not FreeTypeFont ftFont)
-        {
-            return;
-        }
-
-        var boundsPx = ToPixelRect(bounds);
-
-        int widthPx = boundsPx.Width;
-        int heightPx = boundsPx.Height;
-
-        // Point-based draw uses measured size.
-        if (widthPx <= 0 || heightPx <= 0)
-        {
-            return;
-        }
-
-        widthPx = ClampTextRasterExtent(widthPx, boundsPx, axis: 0);
-        heightPx = ClampTextRasterExtent(heightPx, boundsPx, axis: 1);
-        boundsPx = new PixelRect(boundsPx.Left, boundsPx.Top, widthPx, heightPx);
-
-        // Wrap + vertical alignment: shift the bitmap top so shorter text is positioned correctly.
-        if (wrapping != TextWrapping.NoWrap && verticalAlignment != TextAlignment.Top && bounds.Height > 0)
-        {
-            var measured = MeasureText(text, font, bounds.Width > 0 ? bounds.Width : MeasureText(text, font).Width);
-            int textHeightPx = Math.Max(1, RenderingUtil.CeilToPixelInt(measured.Height, DpiScale));
-            int remaining = heightPx - textHeightPx;
-            if (remaining > 0)
-            {
-                int yOffsetPx = verticalAlignment == TextAlignment.Bottom ? remaining : remaining / 2;
-
-                boundsPx = new PixelRect(boundsPx.Left, boundsPx.Top + yOffsetPx, widthPx, textHeightPx);
-                heightPx = textHeightPx;
-            }
-        }
-
-        // Early clip cull: skip text entirely outside the current scissor region. Use the FULL transform (4-corner
-        // AABB) so rotated text is not wrongly culled - a translation-only box left rotated text blank.
-        if (_clipBoundsWorld.HasValue)
-        {
-            var c = _clipBoundsWorld.Value;
-            var textWorld = TransformRectToWorldAABB(new Rect(bounds.X, bounds.Y, widthPx / DpiScale, heightPx / DpiScale));
-            if (textWorld.Right <= c.X || textWorld.X >= c.Right || textWorld.Bottom <= c.Y || textWorld.Y >= c.Bottom)
-            {
-                return;
-            }
-        }
-
-        // FreeType bakes both horizontal and vertical alignment into the rasterized bitmap.
-        // Draw at the (possibly adjusted) boundsPx origin; no extra drawX/drawY shift needed.
-        // Skip snapping during transitions to avoid visible jumping.
-        double drawX = _textPixelSnap
-            ? RenderingUtil.RoundToPixelInt(boundsPx.Left / DpiScale, DpiScale) / DpiScale
-            : boundsPx.Left / DpiScale;
-        double drawY = _textPixelSnap
-            ? RenderingUtil.RoundToPixelInt(boundsPx.Top / DpiScale, DpiScale) / DpiScale
-            : boundsPx.Top / DpiScale;
-        double widthDip = widthPx / DpiScale;
-        double heightDip = heightPx / DpiScale;
-
-        var key = new MewVGTextCacheKey(new TextCacheKey(
-            string.GetHashCode(text),
-            0,
-            ftFont.FontPath,
-            ftFont.PixelHeight,
-            color.ToArgb(),
-            widthPx,
-            heightPx,
-            (int)horizontalAlignment,
-            (int)verticalAlignment,
-            (int)wrapping,
-            (int)trimming));
-
-        if (!_textCache.TryGet(key, text, out var entry))
-        {
-            var bmp = FreeTypeText.Rasterize(
-                text,
-                ftFont,
-                widthPx,
-                heightPx,
-                color,
-                horizontalAlignment,
-                verticalAlignment,
-                wrapping,
-                trimming);
-            entry = _textCache.CreateImage(key, text, ref bmp);
-        }
-
-        if (entry.ImageId == 0)
-        {
-            return;
-        }
-
-        var drawRect = new Rect(drawX, drawY, widthDip, heightDip);
-        var srcRect = new Rect(entry.X, entry.Y, entry.WidthPx, entry.HeightPx);
-        DrawImagePattern(entry.ImageId, drawRect, alpha: 1f, sourceRect: srcRect, entry.AtlasWidthPx, entry.AtlasHeightPx);
-    }
-
-
     private Size MeasureTextCore(ReadOnlySpan<char> text, IFont font)
     {
         if (font is FreeTypeFont ftFont)
@@ -249,8 +140,8 @@ internal sealed partial class MewVGX11GraphicsContext
     public override Size MeasureText(ReadOnlySpan<char> text, IFont font, double maxWidth)
         => MeasureTextCore(text, font, maxWidth);
 
-    public override TextLayout CreateTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, in TextLayoutConstraints constraints)
+    public override BackendTextLayout CreateBackendTextLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, in BackendTextLayoutConstraints constraints)
     {
         var bounds = constraints.Bounds;
         var safeBounds = new Rect(bounds.X, bounds.Y,
@@ -282,7 +173,7 @@ internal sealed partial class MewVGX11GraphicsContext
         var effectiveBounds = new Rect(safeBounds.X, safeBounds.Y,
             widthPx / DpiScale, heightPx / DpiScale);
 
-        return new TextLayout
+        return new BackendTextLayout
         {
             MeasuredSize = measured,
             EffectiveBounds = effectiveBounds,
@@ -291,8 +182,8 @@ internal sealed partial class MewVGX11GraphicsContext
         };
     }
 
-    public override void DrawTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, TextLayout layout, Color color)
+    public override void DrawBackendTextLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, BackendTextLayout layout, Color color)
     {
         if (text.IsEmpty) return;
         if (format.Font is not FreeTypeFont ftFont) return;

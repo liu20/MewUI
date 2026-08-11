@@ -29,12 +29,32 @@ public sealed class Application
     // Run-scoped state (window registry, main-window identity) and its ordered teardown. Non-null only
     // for the duration of a Run; created at run start, disposed at run end.
     private ApplicationRuntime? _runtime;
+    private Action<string[]>? _startup;
 
     /// <summary>
-    /// Determines when the run loop ends automatically as windows close. Process-level policy; set
-    /// before <see cref="Run"/>. Defaults to <see cref="MewUI.ShutdownMode.OnLastWindowClose"/>.
+    /// Determines when the run loop ends automatically as windows close. Scoped to this run; configure it
+    /// before the run through <see cref="AppOptions.ShutdownMode"/>, or assign it from the startup
+    /// callback. Defaults to <see cref="MewUI.ShutdownMode.OnLastWindowClose"/>.
     /// </summary>
-    public static ShutdownMode ShutdownMode { get; set; } = ShutdownMode.OnLastWindowClose;
+    public ShutdownMode ShutdownMode { get; set; } = ShutdownMode.OnLastWindowClose;
+
+    /// <summary>
+    /// The window whose close ends the run under <see cref="MewUI.ShutdownMode.OnMainWindowClose"/>.
+    /// Set by the window-based <see cref="Run(Window)"/> overloads; assign it to promote a window opened
+    /// later, which is the only way a run started without a main window can use that mode. Null clears
+    /// the identity, leaving that mode with nothing to trigger on.
+    /// </summary>
+    public Window? MainWindow
+    {
+        get => _runtime?.MainWindow;
+        set
+        {
+            if (_runtime != null)
+            {
+                _runtime.MainWindow = value;
+            }
+        }
+    }
     private readonly ThemeManager _themeManager;
     private readonly RenderLoopSettings _renderLoopSettings = new();
     private IGraphicsFactory? _graphicsFactory;
@@ -55,16 +75,38 @@ public sealed class Application
     /// </summary>
     public Theme Theme => _themeManager.CurrentTheme;
 
+    private StyleSheet _styleSheet = CreateDefaultStyleSheet();
+
     /// <summary>
-    /// Gets the application-level style sheet. Named styles defined here are available to all controls
-    /// as a fallback when no closer StyleSheet is found in the visual tree.
+    /// Gets or sets the application-level style sheet. Named styles defined here are available to all
+    /// controls as a fallback when no closer StyleSheet is found in the context chain. Replace the
+    /// instance with a fully configured sheet to change application styles after live lookup begins.
     /// </summary>
-    public StyleSheet StyleSheet { get; } = CreateDefaultStyleSheet();
+    public StyleSheet StyleSheet
+    {
+        get => _styleSheet;
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            if (ReferenceEquals(_styleSheet, value))
+            {
+                return;
+            }
+
+            _styleSheet = value;
+            var windows = _runtime?.SnapshotWindows() ?? Array.Empty<Window>();
+            for (int i = 0; i < windows.Length; i++)
+            {
+                windows[i].RefreshStyles(scope: null, animate: true);
+            }
+        }
+    }
 
     private static StyleSheet CreateDefaultStyleSheet()
     {
         var sheet = new StyleSheet();
         BuiltInStyles.Register(sheet);
+        FileDialogStyles.Register(sheet);
         return sheet;
     }
 
@@ -145,6 +187,14 @@ public sealed class Application
     /// </summary>
     internal IPlatformHost PlatformHost { get; }
 
+    /// <summary>
+    /// The services the running platform offers: clipboard, message boxes, file dialogs and the
+    /// shell's file icons. The host behind them stays internal.
+    /// </summary>
+    public PlatformServices PlatformServices => _platformServices ??= new PlatformServices(PlatformHost);
+
+    private PlatformServices? _platformServices;
+
     internal static event Action<IDispatcher?>? DispatcherChanged;
 
     public IDispatcher? Dispatcher
@@ -165,6 +215,41 @@ public sealed class Application
     /// Gets currently tracked windows for this application instance.
     /// </summary>
     public IReadOnlyList<Window> AllWindows => _runtime?.Windows ?? (IReadOnlyList<Window>)Array.Empty<Window>();
+
+    private CommandScope? _commands;
+    private InputMap? _inputMap;
+
+    /// <summary>
+    /// Gets the application-level command scope, the last stage of command routing.
+    /// </summary>
+    public CommandScope Commands => _commands ??= new CommandScope();
+
+    /// <summary>
+    /// Gets the application-level input map, pre-populated with the standard edit gestures.
+    /// </summary>
+    public InputMap InputMap => _inputMap ??= CreateDefaultInputMap();
+
+    internal static CommandScope? CurrentCommandScopeOrNull => _current?._commands;
+
+    internal static InputMap? CurrentInputMapOrNull => _current != null ? _current.InputMap : null;
+
+    internal Window[] SnapshotWindows() => _runtime?.SnapshotWindows() ?? Array.Empty<Window>();
+
+    private static InputMap CreateDefaultInputMap()
+    {
+        // Redo has no single cross-platform gesture; Primary+Y covers Windows/Linux convention and
+        // Primary+Shift+Z covers the macOS convention, both routed to the same command.
+        var map = new InputMap();
+        map.Map(StandardCommands.Cut, new KeyGesture(Key.X, ModifierKeys.Primary));
+        map.Map(StandardCommands.Copy, new KeyGesture(Key.C, ModifierKeys.Primary));
+        map.Map(StandardCommands.Paste, new KeyGesture(Key.V, ModifierKeys.Primary));
+        map.Map(StandardCommands.SelectAll, new KeyGesture(Key.A, ModifierKeys.Primary));
+        map.Map(StandardCommands.Undo, new KeyGesture(Key.Z, ModifierKeys.Primary));
+        map.Map(StandardCommands.Redo,
+            new KeyGesture(Key.Y, ModifierKeys.Primary),
+            new KeyGesture(Key.Z, ModifierKeys.Primary | ModifierKeys.Shift));
+        return map;
+    }
 
     /// <summary>
     /// Gets the selected graphics backend used by windows/controls.
@@ -191,7 +276,7 @@ public sealed class Application
     /// </summary>
     /// <summary>
     /// Gets the default graphics factory (the pre-<see cref="Current"/> reference). Rendering code that may run
-    /// before <see cref="Run"/> uses this as a fallback. The setter is internal - backends register the factory.
+    /// before <see cref="Run(Window)"/> uses this as a fallback. The setter is internal - backends register the factory.
     /// </summary>
     public static IGraphicsFactory DefaultGraphicsFactory
     {
@@ -244,6 +329,55 @@ public sealed class Application
     /// </summary>
     public static void Run(Window mainWindow)
     {
+        ArgumentNullException.ThrowIfNull(mainWindow);
+        RunInternal(mainWindow, startup: null, shutdownMode: null);
+    }
+
+    /// <summary>
+    /// Runs the application with the specified main window and invokes <paramref name="startup"/>
+    /// on the UI thread after the dispatcher is installed and before the window is shown.
+    /// </summary>
+    public static void Run(Window mainWindow, Action startup)
+    {
+        ArgumentNullException.ThrowIfNull(mainWindow);
+        ArgumentNullException.ThrowIfNull(startup);
+        RunInternal(mainWindow, _ => startup(), shutdownMode: null);
+    }
+
+    /// <summary>
+    /// Runs the application with the specified main window and invokes <paramref name="startup"/> with the
+    /// command-line arguments on the UI thread after the dispatcher is installed and before the window is shown.
+    /// </summary>
+    public static void Run(Window mainWindow, Action<string[]> startup)
+    {
+        ArgumentNullException.ThrowIfNull(mainWindow);
+        ArgumentNullException.ThrowIfNull(startup);
+        RunInternal(mainWindow, startup, shutdownMode: null);
+    }
+
+    /// <summary>
+    /// Runs the application without a main window and invokes <paramref name="startup"/> on the UI
+    /// thread after the dispatcher is installed and before the platform message loop begins.
+    /// </summary>
+    public static void Run(Action startup)
+    {
+        ArgumentNullException.ThrowIfNull(startup);
+        RunInternal(mainWindow: null, _ => startup(), shutdownMode: null);
+    }
+
+    /// <summary>
+    /// Runs the application without a main window and invokes <paramref name="startup"/> with the
+    /// command-line arguments on the UI thread after the dispatcher is installed and before the platform
+    /// message loop begins.
+    /// </summary>
+    public static void Run(Action<string[]> startup)
+    {
+        ArgumentNullException.ThrowIfNull(startup);
+        RunInternal(mainWindow: null, startup, shutdownMode: null);
+    }
+
+    internal static void RunInternal(Window? mainWindow, Action<string[]>? startup, ShutdownMode? shutdownMode)
+    {
         if (_current != null)
         {
             throw new InvalidOperationException("Application is already running.");
@@ -263,9 +397,17 @@ public sealed class Application
                 app = new Application(host);
                 _current = app;
                 app._runtime = new ApplicationRuntime();
+                app._startup = startup;
+                if (shutdownMode != null)
+                {
+                    app.ShutdownMode = shutdownMode.Value;
+                }
                 _ = app.Theme;
-                app._runtime.SetMainWindow(mainWindow);
-                app.RegisterWindow(mainWindow);
+                if (mainWindow != null)
+                {
+                    app._runtime.MainWindow = mainWindow;
+                    app.RegisterWindow(mainWindow);
+                }
                 app.RunCore(mainWindow);
             }
             finally
@@ -274,6 +416,7 @@ public sealed class Application
                 {
                     if (app != null)
                     {
+                        app._startup = null;
                         // Ordered teardown of run-scoped state (drag reset then registry clear).
                         app._runtime?.Dispose();
                         app._runtime = null;
@@ -326,6 +469,26 @@ public sealed class Application
         }
     }
 
+    internal void InvalidateStyleCachesForHotReload()
+    {
+        _styleSheet.InvalidateLazyCache();
+
+        var windows = _runtime?.SnapshotWindows() ?? Array.Empty<Window>();
+        for (int i = 0; i < windows.Length; i++)
+        {
+            windows[i].InvalidateStyleSheetLazyCaches();
+        }
+    }
+
+    internal void RefreshStylesAfterHotReload()
+    {
+        var windows = _runtime?.SnapshotWindows() ?? Array.Empty<Window>();
+        for (int i = 0; i < windows.Length; i++)
+        {
+            windows[i].RefreshStyles(scope: null, animate: false);
+        }
+    }
+
     private void ApplyThemeChange(Theme oldTheme, Theme newTheme)
     {
         var windows = _runtime?.SnapshotWindows() ?? Array.Empty<Window>();
@@ -341,7 +504,7 @@ public sealed class Application
 
     // The shutdown decision is owned by ApplicationRuntime (policy-driven, one place) rather than each
     // platform host; hosts only maintain their own hwnd registry for routing.
-    internal void UnregisterWindow(Window window) => _runtime?.Unregister(window);
+    internal void UnregisterWindow(Window window) => _runtime?.Unregister(window, ShutdownMode);
 
     // Pure decision so the policy is unit-testable in isolation.
     internal static bool ShouldShutdownAfterClose(ShutdownMode mode, bool wasMainWindow, int remainingWindows)
@@ -352,7 +515,22 @@ public sealed class Application
             _ => remainingWindows == 0,
         };
 
-    private void RunCore(Window mainWindow)
+    internal void OnHostLoopStarting(Window? mainWindow)
+    {
+        var startup = Interlocked.Exchange(ref _startup, null);
+        startup?.Invoke(GetCommandLineArguments());
+        mainWindow?.Show();
+    }
+
+    // The framework supplies the arguments rather than the caller, so startup logic assembled outside the
+    // entry point still receives them. Matches what a Main(string[] args) sees: no executable path.
+    private static string[] GetCommandLineArguments()
+    {
+        var arguments = Environment.GetCommandLineArgs();
+        return arguments.Length > 1 ? arguments[1..] : [];
+    }
+
+    private void RunCore(Window? mainWindow)
     {
         PlatformHost.Run(this, mainWindow);
 
@@ -364,15 +542,26 @@ public sealed class Application
     }
 
     /// <summary>
-    /// Quits the application.
+    /// Ends the run loop with exit code 0. Does nothing when no run is in progress.
     /// </summary>
-    public static void Quit()
+    // Separate from the exit-code overload rather than an optional parameter, so the method group still
+    // converts to Action for command and event handlers.
+    public static void Shutdown() => Shutdown(0);
+
+    /// <summary>
+    /// Ends the run loop and sets the process exit code. Does nothing when no run is in progress.
+    /// </summary>
+    /// <param name="exitCode">Value assigned to <see cref="Environment.ExitCode"/>.</param>
+    public static void Shutdown(int exitCode)
     {
         if (_current == null)
         {
             return;
         }
 
+        // Assigned before the loop exit request so the code survives even when Run rethrows a fatal
+        // exception instead of returning normally.
+        Environment.ExitCode = exitCode;
         _current.PlatformHost.Quit(_current);
     }
 
@@ -427,9 +616,11 @@ public sealed class Application
     /// <summary>
     /// Registers the platform host. Platform packages call this once at startup; only one is allowed per process.
     /// <paramref name="surface"/> is the native surface family the host produces, checked against the
-    /// registered graphics backend.
+    /// registered graphics backend. <paramref name="systemFontFamily"/> is the platform's system UI font,
+    /// taken here rather than from the host instance so themes resolve fonts before the host is created.
     /// </summary>
-    internal static void RegisterPlatformHost(Func<IPlatformHost> factory, PlatformSurfaceKind surface, string origin)
+    internal static void RegisterPlatformHost(Func<IPlatformHost> factory, PlatformSurfaceKind surface, string origin,
+        string systemFontFamily)
     {
         ArgumentNullException.ThrowIfNull(factory);
         EnsureNotRunning("platform host");
@@ -440,6 +631,7 @@ public sealed class Application
             throw new InvalidOperationException("A platform host is already registered. Register only one per process.");
         }
 
+        ThemeMetrics.PlatformFontFamily = systemFontFamily;
         _platformSurfaceKind = surface;
         _platformSurfaceOrigin = origin;
         VerifySurfaceKindMatch();
@@ -517,21 +709,9 @@ public sealed class Application
 
     private static void ApplyPlatformFontDefaults(IPlatformHost host)
     {
-        var fontFamily = host.DefaultFontFamily;
-        if (string.IsNullOrEmpty(fontFamily))
-        {
-            return;
-        }
+        // Normally already set by RegisterPlatformHost; repeated here for hosts swapped by an interceptor.
+        ThemeMetrics.PlatformFontFamily = host.DefaultFontFamily;
 
-        ThemeMetrics.DefaultFontFamily = fontFamily;
-
-        var metrics = ThemeManager.DefaultMetrics;
-        if (metrics.FontFamily != fontFamily)
-        {
-            ThemeManager.DefaultMetrics = metrics with { FontFamily = fontFamily };
-        }
-
-        // Apply platform default font fallback chain (same pattern as DefaultFontFamily).
         Rendering.FontFallback.ApplyPlatformDefaults(host.DefaultFontFallbacks);
     }
 

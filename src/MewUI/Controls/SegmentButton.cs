@@ -12,17 +12,23 @@ namespace Aprillz.MewUI.Controls;
 /// <item><see cref="IsCheckable"/> = whether a click flips <see cref="IsChecked"/>.</item>
 /// </list>
 /// A <see cref="SegmentedControl"/> drives <see cref="IsChecked"/> exclusively (selection); a
-/// <see cref="ButtonGroup"/> segment flips it per-click when checkable, or just raises
-/// <see cref="Click"/> when it is a plain command.
+/// <see cref="ButtonGroup"/> segment flips it per-click when checkable. Independent action segments
+/// can invoke a semantic <see cref="Command"/> and may also raise <see cref="Click"/>.
 /// </summary>
-public sealed class SegmentButton : ContentControl
+public sealed class SegmentButton : ContentControl, ICommandSource
 {
+    public static readonly MewProperty<Command?> CommandProperty =
+        MewProperty<Command?>.Register<SegmentButton>(nameof(Command), null,
+            MewPropertyOptions.None,
+            static (self, _, _) => self.OnCommandChanged());
+
     public static readonly MewProperty<bool> IsCheckedProperty =
         MewProperty<bool>.Register<SegmentButton>(nameof(IsChecked), false,
             MewPropertyOptions.AffectsRender | MewPropertyOptions.AffectsVisualState,
             static (self, _, _) => self.RefreshVisualState());
 
     private readonly PressCaptureHelper _pressCapture;
+    private Window? _commandSourceWindow;
 
     public SegmentButton()
     {
@@ -30,6 +36,15 @@ public sealed class SegmentButton : ContentControl
         // horizontal StackPanel (Auto sizing) does not over-tall the strip.
         MinHeight = 0;
         _pressCapture = new PressCaptureHelper(this, SetPressed);
+    }
+
+    /// <summary>
+    /// Gets or sets the semantic command invoked when this segment is activated.
+    /// </summary>
+    public Command? Command
+    {
+        get => GetValue(CommandProperty);
+        set => SetValue(CommandProperty, value);
     }
 
     /// <summary>Gets or sets the active-fill visual state (selected or toggled-on).</summary>
@@ -42,7 +57,7 @@ public sealed class SegmentButton : ContentControl
     /// <summary>Gets or sets whether a mouse click flips <see cref="IsChecked"/> (independent toggle).</summary>
     public bool IsCheckable { get; set; }
 
-    /// <summary>Occurs when the segment is activated by a mouse click (command channel).</summary>
+    /// <summary>Occurs when the segment is activated by a mouse click or keyboard input.</summary>
     public event Action? Click;
 
     /// <summary>Occurs when <see cref="IsChecked"/> flips due to a click (checkable segments only).</summary>
@@ -72,6 +87,43 @@ public sealed class SegmentButton : ContentControl
     /// handled by the owning control.
     /// </summary>
     internal Action<int>? ClickedCallback { get; set; }
+
+    private void OnCommandChanged()
+    {
+        UpdateCommandSourceRegistration();
+        ReevaluateSuggestedIsEnabled();
+    }
+
+    protected override void OnVisualRootChanged(Element? oldRoot, Element? newRoot)
+    {
+        base.OnVisualRootChanged(oldRoot, newRoot);
+        UpdateCommandSourceRegistration();
+    }
+
+    private void UpdateCommandSourceRegistration()
+    {
+        var window = Command != null ? FindVisualRoot() as Window : null;
+        if (ReferenceEquals(_commandSourceWindow, window))
+        {
+            return;
+        }
+
+        _commandSourceWindow?.UnregisterCommandSource(this);
+        _commandSourceWindow = window;
+        window?.RegisterCommandSource(this);
+    }
+
+    void ICommandSource.EvaluateCommandState() => ReevaluateSuggestedIsEnabled();
+
+    protected override bool ComputeIsEnabledSuggestion()
+    {
+        if (Command is Command command && FindVisualRoot() is Window window)
+        {
+            return window.CommandRouter.CanExecute(command, CommandTarget.From(this));
+        }
+
+        return true;
+    }
 
     private void RefreshVisualState()
     {
@@ -165,7 +217,16 @@ public sealed class SegmentButton : ContentControl
         }
 
         Click?.Invoke();
+        InvokeCommand();
         ClickedCallback?.Invoke(Index);
+    }
+
+    private void InvokeCommand()
+    {
+        if (Command is Command command && FindVisualRoot() is Window window)
+        {
+            window.CommandRouter.TryExecuteFromInput(command, CommandTarget.From(this), this);
+        }
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -210,5 +271,12 @@ public sealed class SegmentButton : ContentControl
             }
             e.Handled = true;
         }
+    }
+
+    protected override void OnDispose()
+    {
+        _commandSourceWindow?.UnregisterCommandSource(this);
+        _commandSourceWindow = null;
+        base.OnDispose();
     }
 }

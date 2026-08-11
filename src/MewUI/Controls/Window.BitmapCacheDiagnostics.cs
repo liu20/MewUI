@@ -17,9 +17,9 @@ public partial class Window
 
     private void InitializeBitmapCacheDiagnostics()
     {
-        KeyBindings.Add(new KeyBinding(
+        InputMap.Map(
             new KeyGesture(Key.B, ModifierKeys.Primary | ModifierKeys.Shift),
-            ToggleBitmapCacheInvalidationOverlay));
+            ToggleBitmapCacheInvalidationOverlay);
     }
 
     /// <summary>

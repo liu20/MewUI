@@ -16,6 +16,8 @@ internal interface IBindingPathSegment
 
     void Detach(object endpoint, BindingPathSubscription subscription);
 
+    void ValidateWrite(object endpoint, object? value);
+
     void Write(object endpoint, object? value);
 }
 
@@ -35,6 +37,9 @@ internal sealed class GetterBindingPathSegment<TSource, TValue>(
     public void Detach(object endpoint, BindingPathSubscription subscription)
     {
     }
+
+    public void ValidateWrite(object endpoint, object? value)
+        => throw new InvalidOperationException("A getter path segment is not writable.");
 
     public void Write(object endpoint, object? value)
         => throw new InvalidOperationException("A getter path segment is not writable.");
@@ -73,6 +78,10 @@ internal sealed class ObservableBindingPathSegment<TSource, TValue>(
             ObservableValueWeakEvents<TValue>.Changed,
             (ObservableValue<TValue>)endpoint,
             subscription);
+    }
+
+    public void ValidateWrite(object endpoint, object? value)
+    {
     }
 
     public void Write(object endpoint, object? value)
@@ -119,6 +128,9 @@ internal sealed class MewPropertyBindingPathSegment<TOwner, TValue> : IBindingPa
     public void Detach(object endpoint, BindingPathSubscription subscription)
         => WeakEventManager.RemoveHandler(_changedEvent, (TOwner)endpoint, subscription);
 
+    public void ValidateWrite(object endpoint, object? value)
+        => ((TOwner)endpoint).PropertyStore.ValidateValueCandidate(_property, value);
+
     public void Write(object endpoint, object? value)
-        => ((TOwner)endpoint).SetBindingValue(_property, (TValue)value!);
+        => ((TOwner)endpoint).PropertyStore.SetLocalPrevalidated(_property, value);
 }

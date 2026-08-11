@@ -1,5 +1,5 @@
-using Aprillz.MewUI.Controls.Text;
 using Aprillz.MewUI.Rendering;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Controls;
 
@@ -8,7 +8,6 @@ namespace Aprillz.MewUI.Controls;
 /// </summary>
 public sealed class ItemsControl : ScrollableItemsBase
 {
-    private readonly TextWidthCache _textWidthCache = new(512);
     private IItemsPresenter _presenter;
     private IDataTemplate _itemTemplate;
 
@@ -159,7 +158,8 @@ public sealed class ItemsControl : ScrollableItemsBase
         }
         else
         {
-            using var measure = BeginTextMeasurement();
+            var factory = GetGraphicsFactory();
+            var style = GetTextRunStyle();
             maxWidth = 0;
 
             if (count > 0 && widthLimit > 0)
@@ -176,8 +176,6 @@ public sealed class ItemsControl : ScrollableItemsBase
                     int visibleEstimate = itemHeightEstimate <= 0 ? count : (int)Math.Ceiling(viewportEstimate / itemHeightEstimate) + 1;
                     int sampleCount = Math.Clamp(visibleEstimate, 32, 256);
                     sampleCount = Math.Min(sampleCount, count);
-                    _textWidthCache.SetCapacity(Math.Clamp(visibleEstimate * 4, 256, 4096));
-
                     for (int i = 0; i < sampleCount; i++)
                     {
                         var text = ItemsSource.GetText(i);
@@ -186,7 +184,7 @@ public sealed class ItemsControl : ScrollableItemsBase
                             continue;
                         }
 
-                        maxWidth = Math.Max(maxWidth, _textWidthCache.GetOrMeasure(measure.Context, measure.Font, dpi, text) + itemPadW);
+                        maxWidth = Math.Max(maxWidth, TextLayoutOperations.Measure(factory, text, dpi, in style).Width + itemPadW);
                         if (maxWidth >= widthLimit)
                         {
                             // Stop measuring, but keep the uncapped width: the scroll extent must
@@ -197,7 +195,6 @@ public sealed class ItemsControl : ScrollableItemsBase
                 }
                 else
                 {
-                    _textWidthCache.SetCapacity(Math.Clamp(count, 64, 4096));
                     for (int i = 0; i < count; i++)
                     {
                         var text = ItemsSource.GetText(i);
@@ -206,7 +203,7 @@ public sealed class ItemsControl : ScrollableItemsBase
                             continue;
                         }
 
-                        maxWidth = Math.Max(maxWidth, _textWidthCache.GetOrMeasure(measure.Context, measure.Font, dpi, text) + itemPadW);
+                        maxWidth = Math.Max(maxWidth, TextLayoutOperations.Measure(factory, text, dpi, in style).Width + itemPadW);
                         if (maxWidth >= widthLimit)
                         {
                             // Stop measuring, but keep the uncapped width: the scroll extent must

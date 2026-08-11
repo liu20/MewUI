@@ -1,6 +1,22 @@
+using System.Collections;
+
 namespace Aprillz.MewUI.Controls;
 
-public abstract class MenuEntry
+[Flags]
+internal enum MenuModelChange
+{
+    None = 0,
+    Structure = 1 << 0,
+    Text = 1 << 1,
+    Icon = 1 << 2,
+    Enabled = 1 << 3,
+    Command = 1 << 4,
+    Shortcut = 1 << 5,
+    SubMenu = 1 << 6,
+    All = Structure | Text | Icon | Enabled | Command | Shortcut | SubMenu,
+}
+
+public abstract class MenuEntry : MewObject
 {
     internal MenuEntry() { }
 }
@@ -16,116 +32,389 @@ public sealed class MenuSeparator : MenuEntry
 
 public sealed class MenuItem : MenuEntry
 {
-    private string _text = string.Empty;
+    public static readonly MewProperty<Command?> CommandProperty =
+        MewProperty<Command?>.Register<MenuItem>(nameof(Command), null,
+            MewPropertyOptions.None,
+            static (self, oldValue, newValue) => self.OnCommandChanged(oldValue, newValue));
+
+    public static readonly MewProperty<string> TextProperty =
+        MewProperty<string>.Register<MenuItem>(nameof(Text), string.Empty,
+            MewPropertyOptions.None,
+            static (self, _, _) => self.OnTextChanged());
+
+    public static readonly MewProperty<IconTemplate?> IconProperty =
+        MewProperty<IconTemplate?>.Register<MenuItem>(nameof(Icon), null,
+            MewPropertyOptions.None,
+            static (self, _, _) => self.Changed?.Invoke(self, MenuModelChange.Icon));
+
+    public static readonly MewProperty<bool> IsEnabledProperty =
+        MewProperty<bool>.Register<MenuItem>(nameof(IsEnabled), true,
+            MewPropertyOptions.None,
+            static (self, _, _) => self.Changed?.Invoke(self, MenuModelChange.Enabled));
+
+    public static readonly MewProperty<Menu?> SubMenuProperty =
+        MewProperty<Menu?>.Register<MenuItem>(nameof(SubMenu), null,
+            MewPropertyOptions.None,
+            static (self, _, _) => self.Changed?.Invoke(self, MenuModelChange.SubMenu));
+
     private string? _cachedDisplayText;
     private char _cachedAccessKey;
     private int _cachedUnderlineIndex = -1;
-    private KeyGesture? _shortcut;
-    private string? _cachedShortcutDisplayText;
+    private bool _commandCanExecute = true;
+    private string? _commandShortcutDisplayText;
 
     public MenuItem() { }
 
+    /// <summary>
+    /// Creates a presentation-only item. A single underscore in <paramref name="text"/> marks the
+    /// following character as the access key; use a double underscore for a literal underscore.
+    /// </summary>
     public MenuItem(string text) => Text = text ?? string.Empty;
 
-    public string Text
+    /// <summary>
+    /// Creates an item using the command's current default presentation.
+    /// </summary>
+    public MenuItem(Command command) => Command = command ?? throw new ArgumentNullException(nameof(command));
+
+    /// <summary>
+    /// Creates a command item with a presentation and access-key override.
+    /// </summary>
+    public MenuItem(string text, Command command)
     {
-        get => _text;
-        set
-        {
-            value ??= string.Empty;
-            if (_text == value) return;
-            _text = value;
-            _cachedDisplayText = null;
-        }
+        Text = text ?? string.Empty;
+        Command = command ?? throw new ArgumentNullException(nameof(command));
     }
 
     /// <summary>
-    /// Returns cached access key parse results. Parsed once per Text change.
+    /// Gets or sets the semantic command this item invokes.
+    /// </summary>
+    public Command? Command
+    {
+        get => GetValue(CommandProperty);
+        set => SetValue(CommandProperty, value);
+    }
+
+    /// <summary>
+    /// Gets or sets this placement's presentation text override. A single underscore marks the
+    /// following character as the access key. When this property has no value source, the command's
+    /// default presentation supplies the text; an explicitly assigned empty string remains empty.
+    /// </summary>
+    public string Text
+    {
+        get => GetValue(TextProperty);
+        set => SetValue(TextProperty, value ?? string.Empty);
+    }
+
+    /// <summary>
+    /// Gets or sets this placement's icon override. When this property has no value source, the
+    /// command's default icon is used; an explicitly assigned null suppresses that icon.
+    /// </summary>
+    public IconTemplate? Icon
+    {
+        get => GetValue(IconProperty);
+        set => SetValue(IconProperty, value);
+    }
+
+    /// <summary>
+    /// Gets or sets the local enabled state. Command CanExecute is combined with this value without
+    /// replacing it.
+    /// </summary>
+    public bool IsEnabled
+    {
+        get => GetValue(IsEnabledProperty);
+        set => SetValue(IsEnabledProperty, value);
+    }
+
+    public Menu? SubMenu
+    {
+        get => GetValue(SubMenuProperty);
+        set => SetValue(SubMenuProperty, value);
+    }
+
+    internal event Action<MenuItem, MenuModelChange>? Changed;
+
+    internal bool IsEffectivelyEnabled => IsEnabled && _commandCanExecute;
+
+    internal IconTemplate? ResolveIconTemplate()
+        => HasExplicitValue(IconProperty) ? Icon : Command?.Presentation.Icon;
+
+    /// <summary>
+    /// Returns cached access-key presentation, using a local item value before the command default.
     /// </summary>
     internal (string displayText, char accessKey, int underlineIndex) GetParsedText()
     {
         if (_cachedDisplayText != null)
+        {
             return (_cachedDisplayText, _cachedAccessKey, _cachedUnderlineIndex);
+        }
 
-        if (AccessKeyHelper.TryParse(_text, out var key, out var display))
+        if (!HasExplicitValue(TextProperty) && Command is Command command)
         {
-            _cachedAccessKey = key;
-            _cachedUnderlineIndex = AccessKeyHelper.GetUnderlineIndex(_text);
+            var presentation = command.Presentation;
+            _cachedDisplayText = presentation.DisplayText ?? string.Empty;
+            _cachedAccessKey = presentation.AccessKey;
+            _cachedUnderlineIndex = presentation.AccessKeyIndex;
+            return (_cachedDisplayText, _cachedAccessKey, _cachedUnderlineIndex);
         }
-        else
-        {
-            display = _text;
-            _cachedAccessKey = default;
-            _cachedUnderlineIndex = -1;
-        }
+
+        var rawText = Text;
+        bool hasAccessKey = AccessKeyHelper.TryParse(rawText, out var key, out var display);
+        _cachedAccessKey = hasAccessKey ? key : default;
+        _cachedUnderlineIndex = hasAccessKey ? AccessKeyHelper.GetUnderlineIndex(rawText) : -1;
 
         _cachedDisplayText = display;
         return (_cachedDisplayText, _cachedAccessKey, _cachedUnderlineIndex);
     }
 
-    public bool IsEnabled { get; set; } = true;
+    internal string? GetShortcutDisplayText() => _commandShortcutDisplayText;
 
-    /// <summary>
-    /// Optional predicate evaluated when the menu opens.
-    /// When set, <see cref="IsEnabled"/> is updated automatically.
-    /// </summary>
-    public Func<bool>? CanClick { get; set; }
-
-    /// <summary>
-    /// Keyboard shortcut gesture. Auto-generates display text and registers with Window.KeyBindings.
-    /// </summary>
-    public KeyGesture? Shortcut
+    internal bool ApplyCommandState(bool canExecute, string? shortcutDisplayText)
     {
-        get => _shortcut;
+        bool enabledChanged = _commandCanExecute != canExecute;
+        bool shortcutChanged = _commandShortcutDisplayText != shortcutDisplayText;
+        if (!enabledChanged && !shortcutChanged)
+        {
+            return false;
+        }
+
+        _commandCanExecute = canExecute;
+        _commandShortcutDisplayText = shortcutDisplayText;
+        var change = (enabledChanged ? MenuModelChange.Enabled : MenuModelChange.None) |
+            (shortcutChanged ? MenuModelChange.Shortcut : MenuModelChange.None);
+        Changed?.Invoke(this, change);
+        return true;
+    }
+
+    public override string ToString() => GetParsedText().displayText;
+
+    private bool HasExplicitValue(MewProperty property)
+        => GetPropertyValueTrace(property).EffectiveSource != ValueSource.Default;
+
+    private void OnTextChanged()
+    {
+        ClearParsedText();
+        Changed?.Invoke(this, MenuModelChange.Text);
+    }
+
+    private void OnCommandChanged(Command? oldCommand, Command? newCommand)
+    {
+        if (oldCommand != null)
+        {
+            WeakEventManager.RemoveHandler(
+                CommandPresentationWeakEvents.Changed,
+                oldCommand.Presentation,
+                this);
+        }
+
+        _commandCanExecute = true;
+        _commandShortcutDisplayText = null;
+        ClearParsedText();
+
+        if (newCommand != null)
+        {
+            WeakEventManager.AddHandler(
+                CommandPresentationWeakEvents.Changed,
+                newCommand.Presentation,
+                this,
+                static item => item.OnCommandPresentationChanged());
+        }
+
+        Changed?.Invoke(this,
+            MenuModelChange.Command | MenuModelChange.Text | MenuModelChange.Icon |
+            MenuModelChange.Enabled | MenuModelChange.Shortcut);
+    }
+
+    private void OnCommandPresentationChanged()
+    {
+        ClearParsedText();
+        Changed?.Invoke(this, MenuModelChange.Text | MenuModelChange.Icon);
+    }
+
+    private void ClearParsedText()
+    {
+        _cachedDisplayText = null;
+        _cachedAccessKey = default;
+        _cachedUnderlineIndex = -1;
+    }
+}
+
+internal sealed class MenuEntryCollection : IList<MenuEntry>
+{
+    private readonly List<MenuEntry> _items = [];
+
+    internal event Action<MenuModelChange>? Changed;
+
+    public MenuEntry this[int index]
+    {
+        get => _items[index];
         set
         {
-            if (_shortcut == value) return;
-            _shortcut = value;
-            _cachedShortcutDisplayText = null;
+            ArgumentNullException.ThrowIfNull(value);
+            var old = _items[index];
+            if (ReferenceEquals(old, value)) return;
+            Unsubscribe(old);
+            _items[index] = value;
+            Subscribe(value);
+            Changed?.Invoke(MenuModelChange.All);
         }
     }
 
-    /// <summary>
-    /// Returns the cached shortcut display string (e.g. "Ctrl+S"), or null if no shortcut is set.
-    /// Computed once per <see cref="Shortcut"/> change.
-    /// </summary>
-    internal string? GetShortcutDisplayText()
-    {
-        if (_shortcut == null)
-            return null;
+    public int Count => _items.Count;
+    public bool IsReadOnly => false;
 
-        return _cachedShortcutDisplayText ??= _shortcut.Value.ToDisplayString();
+    public void Add(MenuEntry item)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        _items.Add(item);
+        Subscribe(item);
+        Changed?.Invoke(MenuModelChange.Structure);
     }
 
-    public Action? Click { get; set; }
-
-    public Menu? SubMenu { get; set; }
-
-    /// <summary>
-    /// Re-evaluates <see cref="CanClick"/> and updates <see cref="IsEnabled"/>.
-    /// </summary>
-    internal void ReevaluateCanClick()
+    public void Clear()
     {
-        if (CanClick != null)
-            IsEnabled = CanClick();
+        if (_items.Count == 0) return;
+        foreach (var item in _items) Unsubscribe(item);
+        _items.Clear();
+        Changed?.Invoke(MenuModelChange.All);
     }
 
-    public override string ToString() => Text;
+    public bool Contains(MenuEntry item) => _items.Contains(item);
+    public void CopyTo(MenuEntry[] array, int arrayIndex) => _items.CopyTo(array, arrayIndex);
+    public IEnumerator<MenuEntry> GetEnumerator() => _items.GetEnumerator();
+    public int IndexOf(MenuEntry item) => _items.IndexOf(item);
+
+    public void Insert(int index, MenuEntry item)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        _items.Insert(index, item);
+        Subscribe(item);
+        Changed?.Invoke(MenuModelChange.Structure);
+    }
+
+    public bool Remove(MenuEntry item)
+    {
+        if (!_items.Remove(item)) return false;
+        Unsubscribe(item);
+        Changed?.Invoke(MenuModelChange.All);
+        return true;
+    }
+
+    public void RemoveAt(int index)
+    {
+        var item = _items[index];
+        _items.RemoveAt(index);
+        Unsubscribe(item);
+        Changed?.Invoke(MenuModelChange.All);
+    }
+
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+    private void Subscribe(MenuEntry entry)
+    {
+        if (entry is MenuItem item) item.Changed += OnItemChanged;
+    }
+
+    private void Unsubscribe(MenuEntry entry)
+    {
+        if (entry is MenuItem item) item.Changed -= OnItemChanged;
+    }
+
+    private void OnItemChanged(MenuItem _, MenuModelChange change) => Changed?.Invoke(change);
+}
+
+internal sealed class MenuBarItemCollection : IList<MenuItem>
+{
+    private readonly List<MenuItem> _items = [];
+
+    internal event Action<MenuModelChange>? Changed;
+
+    public MenuItem this[int index]
+    {
+        get => _items[index];
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            var old = _items[index];
+            if (ReferenceEquals(old, value)) return;
+            old.Changed -= OnItemChanged;
+            _items[index] = value;
+            value.Changed += OnItemChanged;
+            Changed?.Invoke(MenuModelChange.All);
+        }
+    }
+
+    public int Count => _items.Count;
+    public bool IsReadOnly => false;
+
+    public void Add(MenuItem item)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        _items.Add(item);
+        item.Changed += OnItemChanged;
+        Changed?.Invoke(MenuModelChange.Structure);
+    }
+
+    public void Clear()
+    {
+        if (_items.Count == 0) return;
+        foreach (var item in _items) item.Changed -= OnItemChanged;
+        _items.Clear();
+        Changed?.Invoke(MenuModelChange.All);
+    }
+
+    public bool Contains(MenuItem item) => _items.Contains(item);
+    public void CopyTo(MenuItem[] array, int arrayIndex) => _items.CopyTo(array, arrayIndex);
+    public IEnumerator<MenuItem> GetEnumerator() => _items.GetEnumerator();
+    public int IndexOf(MenuItem item) => _items.IndexOf(item);
+
+    public void Insert(int index, MenuItem item)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        _items.Insert(index, item);
+        item.Changed += OnItemChanged;
+        Changed?.Invoke(MenuModelChange.Structure);
+    }
+
+    public bool Remove(MenuItem item)
+    {
+        if (!_items.Remove(item)) return false;
+        item.Changed -= OnItemChanged;
+        Changed?.Invoke(MenuModelChange.All);
+        return true;
+    }
+
+    public void RemoveAt(int index)
+    {
+        var item = _items[index];
+        _items.RemoveAt(index);
+        item.Changed -= OnItemChanged;
+        Changed?.Invoke(MenuModelChange.All);
+    }
+
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+    private void OnItemChanged(MenuItem _, MenuModelChange change) => Changed?.Invoke(change);
 }
 
 public sealed class Menu
 {
-    private readonly List<MenuEntry> _items = new();
+    private readonly MenuEntryCollection _items = new();
 
     public IList<MenuEntry> Items => _items;
 
+    internal event Action<MenuModelChange> Changed
+    {
+        add => _items.Changed += value;
+        remove => _items.Changed -= value;
+    }
+
     /// <summary>
-    /// Optional per-menu item height override (in DIP). When NaN, the visual presenter chooses a theme-based default.
+    /// Optional per-menu item height override (in DIP). When NaN, the presenter uses its default.
     /// </summary>
     public double ItemHeight { get; set; } = double.NaN;
 
     /// <summary>
-    /// Optional per-menu item padding override. When null, the visual presenter chooses a theme-based default.
+    /// Optional per-menu item padding override. When null, the presenter uses its default.
     /// </summary>
     public Thickness? ItemPadding { get; set; }
 }

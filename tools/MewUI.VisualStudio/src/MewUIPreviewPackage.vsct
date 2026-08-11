@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <Extern href="stdidcmd.h" />
+  <Extern href="vsshlids.h" />
+
+  <Commands package="guidMewUIPreviewPackage">
+    <Groups>
+      <Group guid="guidMewUIPreviewCommandSet" id="grpCodeWindowContext" priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_CODEWIN" />
+      </Group>
+    </Groups>
+    <Buttons>
+      <Button guid="guidMewUIPreviewCommandSet" id="cmdidPreviewWindow" priority="0x0100" type="Button">
+        <Parent guid="guidSHLMainMenu" id="IDG_VS_WNDO_OTRWNDWS1" />
+        <Strings>
+          <ButtonText>MewUI Preview</ButtonText>
+        </Strings>
+      </Button>
+      <Button guid="guidMewUIPreviewCommandSet" id="cmdidOpenPreviewContext" priority="0x0100" type="Button">
+        <Parent guid="guidMewUIPreviewCommandSet" id="grpCodeWindowContext" />
+        <Strings>
+          <ButtonText>Open MewUI Preview</ButtonText>
+        </Strings>
+      </Button>
+    </Buttons>
+  </Commands>
+
+  <Symbols>
+    <GuidSymbol name="guidMewUIPreviewPackage" value="{6b4084d0-1b60-49a8-9255-07401588f550}" />
+    <GuidSymbol name="guidMewUIPreviewCommandSet" value="{19af801b-62f4-4b49-a83b-023df968a6a6}">
+      <IDSymbol name="cmdidPreviewWindow" value="0x0100" />
+      <IDSymbol name="cmdidOpenPreviewContext" value="0x0101" />
+      <IDSymbol name="grpCodeWindowContext" value="0x1020" />
+    </GuidSymbol>
+  </Symbols>
+</CommandTable>

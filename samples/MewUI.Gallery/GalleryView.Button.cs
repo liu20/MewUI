@@ -12,7 +12,7 @@ partial class GalleryView
                 .Vertical()
                 .Spacing(4)
                 .Children(
-                    new TextBlock().Text(name).FontSize(11),
+                    new TextBlock().Text(name).FontSize(ThemeFontSize.Small),
                     content);
 
         // ButtonGroup of icon + text segments (recycle-safe template).
@@ -152,6 +152,7 @@ partial class GalleryView
                         new ProgressBar().Value(20),
                         new ProgressBar().Value(65),
                         new ProgressBar().Value(65).Disable(),
+                        new ProgressBar().IsIndeterminate(),
                         new Slider().Minimum(0).Maximum(100).Value(25),
                         new Slider().Minimum(0).Maximum(100).Value(25).Disable()
                     )

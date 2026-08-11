@@ -130,7 +130,7 @@ partial class GalleryView
 
                         new TextBlock()
                             .BindText(canvasInfo)
-                            .FontSize(11)
+                            .FontSize(ThemeFontSize.Small)
                     ),
                 minWidth: 320
             ),

@@ -1,18 +1,27 @@
 using Aprillz.MewUI.Native;
 using Aprillz.MewUI.Native.Constants;
 using Aprillz.MewUI.Native.Structs;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Rendering.Gdi;
 
 /// <summary>
 /// A lightweight graphics context for text measurement only.
 /// </summary>
-internal sealed class GdiMeasurementContext : MeasureGraphicsContextBase
+internal sealed class GdiMeasurementContext : MeasureGraphicsContextBase, ITextAdvanceSource
 {
     private readonly nint _hdc;
     private bool _disposed;
 
     public override double DpiScale { get; }
+
+    internal double[] GetUtf16PrefixAdvances(ReadOnlySpan<char> text, GdiFont font)
+        => GdiTextAdvances.GetUtf16PrefixAdvances(_hdc, font, text, DpiScale);
+
+    double[] ITextAdvanceSource.GetUtf16PrefixAdvances(ReadOnlySpan<char> text, IFont font)
+        => font is GdiFont gdiFont
+            ? GetUtf16PrefixAdvances(text, gdiFont)
+            : throw new ArgumentException("Font must be a GdiFont.", nameof(font));
 
     public GdiMeasurementContext(nint hdc, uint dpi)
     {
@@ -30,24 +39,6 @@ internal sealed class GdiMeasurementContext : MeasureGraphicsContextBase
         }
     }
 
-    public override TextLayout CreateTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, in TextLayoutConstraints constraints)
-    {
-        var bounds = constraints.Bounds;
-        double maxWidth = double.IsPositiveInfinity(bounds.Width) ? 0 : bounds.Width;
-        Size measured = format.Wrapping == TextWrapping.NoWrap
-            ? MeasureText(text, format.Font)
-            : MeasureText(text, format.Font, maxWidth > 0 ? maxWidth : MeasureText(text, format.Font).Width);
-        double effectiveMaxWidth = maxWidth > 0 ? maxWidth : measured.Width;
-        return new TextLayout
-        {
-            MeasuredSize = measured,
-            EffectiveBounds = bounds,
-            EffectiveMaxWidth = effectiveMaxWidth,
-            ContentHeight = measured.Height
-        };
-    }
-
     public override unsafe Size MeasureText(ReadOnlySpan<char> text, IFont font)
     {
         if (text.IsEmpty || font is not GdiFont gdiFont)
@@ -59,6 +50,18 @@ internal sealed class GdiMeasurementContext : MeasureGraphicsContextBase
         try
         {
             var hasLineBreaks = text.IndexOfAny('\r', '\n') >= 0;
+            if (!hasLineBreaks)
+            {
+                fixed (char* textPointer = text)
+                {
+                    SIZE size;
+                    if (Gdi32.GetTextExtentPoint32(_hdc, textPointer, text.Length, &size))
+                    {
+                        return new Size(size.cx / DpiScale, size.cy / DpiScale);
+                    }
+                }
+            }
+
             var rect = hasLineBreaks
                 ? new RECT(0, 0, LayoutRounding.RoundToPixelInt(1_000_000, DpiScale), 0)
                 : new RECT(0, 0, 0, 0);

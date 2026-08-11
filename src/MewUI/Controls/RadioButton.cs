@@ -68,7 +68,7 @@ public class RadioButton : ToggleBase
 
     protected override void ToggleFromKeyboard()
     {
-        IsChecked = true;
+        CommitIsChecked(true);
     }
 
     protected override void OnParentChanged()
@@ -220,7 +220,7 @@ public class RadioButton : ToggleBase
 
         if (IsEffectivelyEnabled && Bounds.Contains(e.Position))
         {
-            IsChecked = true;
+            CommitIsChecked(true);
         }
 
         e.Handled = true;

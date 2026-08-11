@@ -75,7 +75,8 @@ public abstract partial class SvgTextBase
             {
                 _pathBuiltWithRenderer = false;
                 var factory = Application.Current?.GraphicsFactory ?? Application.DefaultGraphicsFactory;
-                using var context = factory.CreateMeasurementContext(96);
+                using var surface = factory.CreateSurface(RenderSurfaceDescriptor.CachedImage(1, 1, 1));
+                using var context = factory.CreateContext(surface);
                 using var tempRenderer = new MewSvgRenderer(factory, context);
                 SetPath(new TextDrawingState(tempRenderer, this));
             }

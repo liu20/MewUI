@@ -155,7 +155,7 @@ partial class GalleryView
                             .Content("Open Zoom & Pan Window")
                             .OnClick(OpenZoomPanWindow),
                         new TextBlock()
-                            .FontSize(11)
+                            .FontSize(ThemeFontSize.Small)
                             .TextWrapping(TextWrapping.Wrap)
                             .Text("Wheel to zoom (anchored to cursor),\ndrag to pan. Animated zoom with\nReset/Fit controls.")
                     )

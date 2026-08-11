@@ -47,4 +47,15 @@ public class Adorner : Panel
             Children[i].Arrange(rect);
         }
     }
+
+    /// <summary>
+    /// Only what an adorner draws takes the pointer. An adorner spans the whole element it adorns,
+    /// so answering for the empty space around its children - which is what a panel does - would put
+    /// a sheet of glass over everything underneath.
+    /// </summary>
+    protected override UIElement? OnHitTest(Point point)
+    {
+        var hit = base.OnHitTest(point);
+        return ReferenceEquals(hit, this) ? null : hit;
+    }
 }

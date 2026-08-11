@@ -45,6 +45,42 @@ public sealed class PopupContextTests
         window.ClosePopup(popupRoot);
     }
 
+    [TestMethod]
+    public void StyleSheetReplacement_ReResolvesOpenPopupThroughOwnerContext()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Inconclusive("GDI backend is Windows-only.");
+            return;
+        }
+
+        static StyleSheet AccentSheet(Color color)
+        {
+            var result = new StyleSheet();
+            result.Define("accent", () => new Style(typeof(Border))
+            {
+                Setters = [Setter.Create(Control.BackgroundProperty, color)],
+            });
+            return result;
+        }
+
+        var first = Color.FromRgb(121, 0, 0);
+        var second = Color.FromRgb(0, 122, 0);
+        var window = HeadlessWindow.Create();
+        var owner = new Border { StyleSheet = AccentSheet(first) };
+        window.Content = owner;
+        window.PerformLayout();
+
+        var popupRoot = new Border { StyleName = "accent" };
+        window.ShowPopup(owner, popupRoot, new Rect(10, 10, 100, 40));
+        Assert.AreEqual(first, popupRoot.Background);
+
+        owner.StyleSheet = AccentSheet(second);
+
+        Assert.AreEqual(second, popupRoot.Background, "open popup refreshed without close/reopen");
+        window.ClosePopup(popupRoot);
+    }
+
     // Real text measurement must use the owner's font: the same content measures larger
     // when opened from an owner with a larger inherited font size.
     [TestMethod]

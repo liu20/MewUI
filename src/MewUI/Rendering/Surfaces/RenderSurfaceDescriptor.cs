@@ -78,18 +78,18 @@ public readonly record struct RenderSurfaceDescriptor(
         int pixelWidth,
         int pixelHeight,
         double dpiScale = 1.0,
-        string? debugName = null)
+        string? debugName = null,
+        bool hasAlpha = true)
         => new(
             pixelWidth,
             pixelHeight,
             dpiScale,
-            RenderPixelFormat.Bgra8888Premultiplied,
+            hasAlpha ? RenderPixelFormat.Bgra8888Premultiplied : RenderPixelFormat.Bgra8888,
             SurfaceUsage.Offscreen | SurfaceUsage.ImageSource | SurfaceUsage.CachedImageSource,
             SurfaceCapabilities.Renderable |
             SurfaceCapabilities.GpuSampleable |
             SurfaceCapabilities.CacheableImageSource |
-            SurfaceCapabilities.Alpha |
-            SurfaceCapabilities.Premultiplied,
+            (hasAlpha ? SurfaceCapabilities.Alpha | SurfaceCapabilities.Premultiplied : SurfaceCapabilities.None),
             SurfaceLifetimeHint.Cached,
             debugName);
 

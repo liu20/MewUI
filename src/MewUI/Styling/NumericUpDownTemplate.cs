@@ -15,13 +15,19 @@ internal static class NumericUpDownTemplate
     public static DelegateControlTemplate<NumericUpDown> Instance
         => _instance ??= new DelegateControlTemplate<NumericUpDown>(Build);
 
-    // Build reads theme values at build time; Control invalidates template instances on theme
-    // change, so a rebuilt tree always bakes the current theme's metrics and colors.
+    // Build reads theme and DPI at build time; Control invalidates template instances on either
+    // change, so a rebuilt tree always bakes the current metrics, colors and scale.
     private static Element Build(NumericUpDown owner, ControlTemplateContext ctx)
     {
         var theme = owner.ThemeInternal;
-        double separatorWidth = theme.Metrics.ControlBorderThickness;
-        double spinnerWidth = theme.Metrics.BaseControlHeight - theme.Metrics.ControlBorderThickness * 2;
+        // Both columns are whole device pixels: a fractional-pixel column puts the boundary between two
+        // columns on a half pixel, where the separator can collapse to nothing and leave a seam, and it
+        // would also let the hairline render two pixels wide next to a one-pixel chrome border.
+        double dpiScale = owner.GetDpi() / 96.0;
+        double separatorWidth = LayoutRounding.SnapThicknessToPixels(
+            theme.Metrics.ControlBorderThickness, dpiScale, 1);
+        double spinnerWidth = LayoutRounding.SnapThicknessToPixels(
+            theme.Metrics.BaseControlHeight - theme.Metrics.ControlBorderThickness * 2, dpiScale, 1);
 
         var displayText = new TextBlock().CenterVertical();
         ctx.Register(NumericUpDown.PART_DISPLAY_TEXT, displayText);
@@ -33,6 +39,8 @@ internal static class NumericUpDownTemplate
             Background = Color.Transparent,
             Padding = Thickness.Zero,
             MinHeight = 0,
+            MinWidth = 0,
+            VerticalAlignment = VerticalAlignment.Center,
             IsVisible = false,
             IsHitTestVisible = false,
             // Focus enters via SetIsEditing, not Tab; keeps the control a single tab stop while editing.

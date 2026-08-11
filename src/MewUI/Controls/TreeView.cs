@@ -1,6 +1,6 @@
 using Aprillz.MewUI.Input;
-using Aprillz.MewUI.Controls.Text;
 using Aprillz.MewUI.Rendering;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Controls;
 
@@ -9,7 +9,6 @@ namespace Aprillz.MewUI.Controls;
 /// </summary>
 public sealed class TreeView : Control, ISubtreeInvalidationHost, IFocusIntoViewHost, IVirtualizedTabNavigationHost, ISelector, IMultiSelector
 {
-    private readonly TextWidthCache _textWidthCache = new(512);
     private readonly FixedHeightItemsPresenter _presenter;
     private readonly ScrollViewer _scrollViewer;
     private uint _itemBindingGeneration;
@@ -23,6 +22,8 @@ public sealed class TreeView : Control, ISubtreeInvalidationHost, IFocusIntoView
     private ScrollIntoViewRequest _scrollIntoViewRequest;
     private readonly PendingTabFocusHelper _tabFocusHelper;
     private double _observedExtentWidth;
+    // Observed widths are DIP values that never shrink, so they must not outlive their scale.
+    private uint _observedExtentDpi;
 
     /// <summary>
     /// Gets or sets the root nodes collection.
@@ -60,7 +61,7 @@ public sealed class TreeView : Control, ISubtreeInvalidationHost, IFocusIntoView
             // rather than leaving stale references to the previous source's item/node.
             _selectedNode = _itemsSource.SelectedItem as TreeViewNode;
             _selectedItem = _itemsSource.SelectedItem;
-            SyncSelectionProperties();
+            SyncSelectionProperties(commit: false);
 
             _presenter.ItemsSource = _itemsSource;
             _presenter.RecycleAll();
@@ -186,7 +187,7 @@ public sealed class TreeView : Control, ISubtreeInvalidationHost, IFocusIntoView
         _syncingSelection = true;
         try { SetSelectedNodeCore(node); }
         finally { _syncingSelection = false; }
-        SyncSelectionProperties();
+        SyncSelectionProperties(commit: false);
     }
 
     private void OnSelectedItemPropertyChanged(object? item)
@@ -201,19 +202,27 @@ public sealed class TreeView : Control, ISubtreeInvalidationHost, IFocusIntoView
                 _itemsSource.SelectedItem = item;
         }
         finally { _syncingSelection = false; }
-        SyncSelectionProperties();
+        SyncSelectionProperties(commit: false);
     }
 
     // Mirrors the model selection (_selectedNode/_selectedItem) into the bindable properties.
     // Guarded so the property change callbacks do not re-enter the model.
-    private void SyncSelectionProperties()
+    private void SyncSelectionProperties(bool commit)
     {
         bool wasSyncing = _syncingSelection;
         _syncingSelection = true;
         try
         {
-            SetValue(SelectedNodeProperty, _selectedNode);
-            SetValue(SelectedItemProperty, _selectedItem ?? _selectedNode);
+            if (!commit)
+            {
+                SetCurrentValue(SelectedNodeProperty, _selectedNode);
+                SetCurrentValue(SelectedItemProperty, _selectedItem ?? _selectedNode);
+            }
+            else
+            {
+                CommitTargetValue(SelectedNodeProperty, _selectedNode);
+                CommitTargetValue(SelectedItemProperty, _selectedItem ?? _selectedNode);
+            }
         }
         finally { _syncingSelection = wasSyncing; }
         RefreshSelectedItems();
@@ -479,7 +488,7 @@ public sealed class TreeView : Control, ISubtreeInvalidationHost, IFocusIntoView
 
         _selectedNode = node;
         _selectedItem = item;
-        SyncSelectionProperties();
+        SyncSelectionProperties(commit: !_syncingSelection);
         InvalidateItemBindings();
 
         SelectedNodeChanged?.Invoke(node);
@@ -658,12 +667,12 @@ public sealed class TreeView : Control, ISubtreeInvalidationHost, IFocusIntoView
         double extentWidth = 0;
         if (_itemsSource.Count > 0)
         {
-            using var measure = BeginTextMeasurement();
+            var factory = GetGraphicsFactory();
+            var style = GetTextRunStyle();
 
             int count = _itemsSource.Count;
             int sampleCount = Math.Clamp(count, 32, 256);
 
-            _textWidthCache.SetCapacity(Math.Clamp(sampleCount * 4, 256, 4096));
             double padW = ItemPadding.HorizontalThickness;
 
             // Sample across the whole flattened list (not just the first N items) to avoid
@@ -682,7 +691,7 @@ public sealed class TreeView : Control, ISubtreeInvalidationHost, IFocusIntoView
 
                 int depth = _itemsSource.GetDepth(idx);
                 double indentW = depth * Indent + Indent; // includes glyph column
-                double itemW = indentW + _textWidthCache.GetOrMeasure(measure.Context, measure.Font, dpi, text) + padW;
+                double itemW = indentW + TextLayoutOperations.Measure(factory, text, dpi, in style).Width + padW;
                 extentWidth = Math.Max(extentWidth, itemW);
             }
         }
@@ -779,6 +788,13 @@ public sealed class TreeView : Control, ISubtreeInvalidationHost, IFocusIntoView
             return;
         }
 
+        uint dpi = GetDpi();
+        if (dpi != _observedExtentDpi)
+        {
+            _observedExtentWidth = 0;
+            _observedExtentDpi = dpi;
+        }
+
         double max = _observedExtentWidth;
         _presenter.VisitRealized((index, element) =>
         {
@@ -800,10 +816,12 @@ public sealed class TreeView : Control, ISubtreeInvalidationHost, IFocusIntoView
             double padW = ItemPadding.HorizontalThickness;
             double rowW = indentW + w + padW;
 
-            double boundsW = Math.Max(0, element.Bounds.Width);
-            if (boundsW > 0)
+            if (w <= 0)
             {
-                rowW = Math.Max(rowW, indentW + boundsW + padW);
+                // Arranged width is a last resort only: rows stretch to the viewport, so feeding it
+                // back would make the extent track the viewport and grow by the snapping error
+                // every pass.
+                rowW = Math.Max(rowW, indentW + Math.Max(0, element.Bounds.Width) + padW);
             }
 
             if (rowW > max)

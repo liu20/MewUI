@@ -1,9 +1,33 @@
 using Aprillz.MewUI.Rendering.FreeType;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Rendering.OpenGL;
 
-internal sealed partial class OpenGLMeasurementContext
+internal sealed partial class OpenGLMeasurementContext : ITextAdvanceSource
 {
+    double[] ITextAdvanceSource.GetUtf16PrefixAdvances(ReadOnlySpan<char> text, IFont font)
+    {
+        if (!text.IsEmpty && font is FreeTypeFont ftFont)
+        {
+            var advances = FreeTypeText.GetUtf16PrefixAdvancesPx(text, ftFont);
+            double scale = DpiScale;
+            for (int index = 0; index < advances.Length; index++)
+            {
+                advances[index] /= scale;
+            }
+            return advances;
+        }
+
+        // Mirrors the approximate MeasureText fallback for non-FreeType fonts.
+        double charWidth = (font.Size <= 0 ? 12 : font.Size) * 0.6;
+        var fallback = new double[text.Length];
+        for (int index = 0; index < fallback.Length; index++)
+        {
+            fallback[index] = (index + 1) * charWidth;
+        }
+        return fallback;
+    }
+
     static partial void TryMeasureTextNative(
         ReadOnlySpan<char> text,
         IFont font,

@@ -1,6 +1,7 @@
 using Aprillz.MewVG;
 using Aprillz.MewUI.Platform;
 using Aprillz.MewUI.Rendering.CoreText;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Rendering.MewVG;
 
@@ -86,7 +87,7 @@ public sealed partial class MewVGMacOSGraphicsFactory
         return ctx;
     }
 
-    private partial IGraphicsContext CreateMeasurementContextCore(uint dpi)
+    private partial ITextBackendMeasurementContext CreateMeasurementContextCore(uint dpi)
         => new MewVGMetalMeasurementContext(dpi);
 
     partial void TryCreatePixelSurface(int pixelWidth, int pixelHeight, double dpiScale, bool hasAlpha, ref bool handled, ref IRenderSurface? renderTarget)

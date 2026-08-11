@@ -9,7 +9,7 @@ namespace Aprillz.MewUI.Controls;
 /// <summary>
 /// Base class for all UI elements. Provides the core Measure/Arrange layout system.
 /// </summary>
-public abstract class Element : MewObject
+public abstract partial class Element : MewObject
 {
     private Element? _cachedVisualRoot;
     private int _visualRootCacheVersion = -1;
@@ -140,6 +140,11 @@ public abstract class Element : MewObject
                 {
                     NotifyVisualRootChanged(oldRoot, newRoot);
                 }
+
+                // Both attach and detach change the subtree's inherited context. The epoch flush is
+                // lazy, so eagerly diff observed/cached inherited values for consumers that need a
+                // pushed update instead of a later property read.
+                RefreshInheritedSubtree();
             }
         }
     }
@@ -873,7 +878,7 @@ public abstract class Element : MewObject
     /// value from the parent chain and caches it, so a re-resolve during inherited-change propagation
     /// can read and forward the fresh value without knowing the property's static type.
     /// </summary>
-    internal object? ResolveInheritedValueBoxed(MewProperty property)
+    internal override object? ResolveInheritedValueBoxed(MewProperty property)
     {
         EnsureInheritedEpoch();
 
@@ -899,6 +904,7 @@ public abstract class Element : MewObject
     internal void RefreshInheritedSubtree()
     {
         List<int> inheritedIds = new();
+        List<int> observedIds = new();
         List<object?> oldValues = new();
 
         VisualTree.Visit(this, element =>
@@ -910,6 +916,21 @@ public abstract class Element : MewObject
 
             inheritedIds.Clear();
             element.PropertyStore.GetInheritedPropertyIds(inheritedIds);
+
+            // An inherited property nobody has resolved yet has no cached entry, but a binding
+            // sourced from it still captured the registered default when it was created; include
+            // whatever is observed so those bindings pick the value up on attach.
+            observedIds.Clear();
+            element.GetObservedPropertyIds(observedIds);
+            for (int i = 0; i < observedIds.Count; i++)
+            {
+                int id = observedIds[i];
+                if (!inheritedIds.Contains(id) && MewPropertyRegistry.GetProperty(id) is MewProperty observed && observed.Inherits)
+                {
+                    inheritedIds.Add(id);
+                }
+            }
+
             if (inheritedIds.Count == 0)
             {
                 return;
@@ -932,7 +953,7 @@ public abstract class Element : MewObject
                     continue;
                 }
 
-                object? newValue = element.ResolveInheritedValueBoxed(property);
+                object? newValue = element.GetBindingValue(property);
                 if (Equals(oldValues[i], newValue))
                 {
                     continue;

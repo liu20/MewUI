@@ -115,14 +115,16 @@ internal sealed class FlexTabButton : Button
     private void ShowContextMenu(Point localPosition)
     {
         var menu = new ContextMenu();
-        BuildDefaultMenu(menu);
-        _context.ConfigureTabMenu?.Invoke(_tab, menu); // host appends app commands
+        var commands = new CommandScope();
+        BuildDefaultMenu(menu, commands);
+        _context.ConfigureTabMenu?.Invoke(_tab, menu, commands); // host appends app commands
+        menu.SetCommandTarget(CommandTarget.From(commands));
         menu.ShowAt(this, new Point(Bounds.X + localPosition.X, Bounds.Y + localPosition.Y));
     }
 
     // Default items differ by kind: a document tab gets close-variants / split / maximize; a (pinned) tool tab
     // mirrors the caption menu (float / auto-hide / close).
-    private void BuildDefaultMenu(ContextMenu menu)
+    private void BuildDefaultMenu(ContextMenu menu, CommandScope commands)
     {
         var model = _tabSet.Model;
         string tabId = _tab.GetId();
@@ -133,32 +135,32 @@ internal sealed class FlexTabButton : Button
         {
             bool othersClosable = _tabSet.Children.Any(c => c is TabNode other && !ReferenceEquals(other, _tab) && other.IsEnableClose);
             bool anyClosable = _tabSet.Children.Any(c => c is TabNode closable && closable.IsEnableClose);
-            menu.AddItem(MewUIDockString.MenuClose.Value, OnCloseClick, _tab.IsEnableClose);
-            menu.AddItem(MewUIDockString.MenuCloseOthers.Value, CloseOthers, othersClosable);
-            menu.AddItem(MewUIDockString.MenuCloseAll.Value, CloseAll, anyClosable);
+            DockMenuCommands.Add(menu, commands, "close", MewUIDockString.MenuClose.Value, OnCloseClick, _tab.IsEnableClose);
+            DockMenuCommands.Add(menu, commands, "closeOthers", MewUIDockString.MenuCloseOthers.Value, CloseOthers, othersClosable);
+            DockMenuCommands.Add(menu, commands, "closeAll", MewUIDockString.MenuCloseAll.Value, CloseAll, anyClosable);
             menu.AddSeparator();
-            menu.AddItem(MewUIDockString.MenuFloat.Value, () => model.DoAction(DockAction.PopoutTab(tabId)), _tab.IsEnablePopout);
+            DockMenuCommands.Add(menu, commands, "float", MewUIDockString.MenuFloat.Value, () => model.DoAction(DockAction.PopoutTab(tabId)), _tab.IsEnablePopout);
             // Vertical group = a side-by-side split (vertical splitter); horizontal group = a stacked split.
-            menu.AddItem(MewUIDockString.MenuNewVerticalTabGroup.Value,
+            DockMenuCommands.Add(menu, commands, "newVerticalGroup", MewUIDockString.MenuNewVerticalTabGroup.Value,
                 () => model.DoAction(DockAction.MoveNode(tabId, setId, DockLocation.Right, -1)), tabCount > 1);
-            menu.AddItem(MewUIDockString.MenuNewHorizontalTabGroup.Value,
+            DockMenuCommands.Add(menu, commands, "newHorizontalGroup", MewUIDockString.MenuNewHorizontalTabGroup.Value,
                 () => model.DoAction(DockAction.MoveNode(tabId, setId, DockLocation.Bottom, -1)), tabCount > 1);
-            menu.AddItem(MewUIDockString.MenuMoveToNextTabGroup.Value,
+            DockMenuCommands.Add(menu, commands, "moveToNextGroup", MewUIDockString.MenuMoveToNextTabGroup.Value,
                 () => MoveToAdjacentGroup(1), AdjacentDocumentTabSet(1) is not null);
-            menu.AddItem(MewUIDockString.MenuMoveToPreviousTabGroup.Value,
+            DockMenuCommands.Add(menu, commands, "moveToPreviousGroup", MewUIDockString.MenuMoveToPreviousTabGroup.Value,
                 () => MoveToAdjacentGroup(-1), AdjacentDocumentTabSet(-1) is not null);
             if (_tabSet.IsEnableMaximize)
             {
                 menu.AddSeparator();
                 var label = _tabSet.IsMaximized ? MewUIDockString.MenuRestore.Value : MewUIDockString.MenuMaximize.Value;
-                menu.AddItem(label, () => model.DoAction(DockAction.MaximizeToggle(setId)));
+                DockMenuCommands.Add(menu, commands, "toggleMaximize", label, () => model.DoAction(DockAction.MaximizeToggle(setId)));
             }
         }
         else
         {
-            menu.AddItem(MewUIDockString.MenuFloat.Value, () => model.DoAction(DockAction.PopoutTabset(setId)));
-            menu.AddItem(MewUIDockString.MenuAutoHide.Value, () => model.DoAction(DockAction.UnpinTool(setId)));
-            menu.AddItem(MewUIDockString.MenuClose.Value, OnCloseClick, _tab.IsEnableClose);
+            DockMenuCommands.Add(menu, commands, "floatGroup", MewUIDockString.MenuFloat.Value, () => model.DoAction(DockAction.PopoutTabset(setId)));
+            DockMenuCommands.Add(menu, commands, "autoHide", MewUIDockString.MenuAutoHide.Value, () => model.DoAction(DockAction.UnpinTool(setId)));
+            DockMenuCommands.Add(menu, commands, "close", MewUIDockString.MenuClose.Value, OnCloseClick, _tab.IsEnableClose);
         }
     }
 

@@ -1,8 +1,9 @@
 using Aprillz.MewUI.Rendering.CoreText;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Rendering.MewVG;
 
-internal sealed class MewVGMetalMeasurementContext : MeasureGraphicsContextBase
+internal sealed class MewVGMetalMeasurementContext : MeasureGraphicsContextBase, ITextAdvanceSource
 {
     private readonly uint _dpi;
 
@@ -13,22 +14,26 @@ internal sealed class MewVGMetalMeasurementContext : MeasureGraphicsContextBase
 
     public override double DpiScale => _dpi / 96.0;
 
-    public override TextLayout CreateTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, in TextLayoutConstraints constraints)
+    double[] ITextAdvanceSource.GetUtf16PrefixAdvances(ReadOnlySpan<char> text, IFont font)
     {
-        var bounds = constraints.Bounds;
-        double maxWidth = double.IsPositiveInfinity(bounds.Width) ? 0 : bounds.Width;
-        Size measured = format.Wrapping == TextWrapping.NoWrap
-            ? MeasureText(text, format.Font)
-            : MeasureText(text, format.Font, maxWidth > 0 ? maxWidth : MeasureText(text, format.Font).Width);
-        double effectiveMaxWidth = maxWidth > 0 ? maxWidth : measured.Width;
-        return new TextLayout
+        if (!text.IsEmpty && font is CoreTextFont ct &&
+            CoreTextText.GetUtf16PrefixAdvancesPx(ct, text, _dpi) is double[] advances)
         {
-            MeasuredSize = measured,
-            EffectiveBounds = bounds,
-            EffectiveMaxWidth = effectiveMaxWidth,
-            ContentHeight = measured.Height
-        };
+            double scale = DpiScale;
+            for (int index = 0; index < advances.Length; index++)
+            {
+                advances[index] /= scale;
+            }
+            return advances;
+        }
+
+        // Mirrors the MeasureText fallback for non-CoreText fonts.
+        var fallback = new double[text.Length];
+        for (int index = 0; index < fallback.Length; index++)
+        {
+            fallback[index] = (index + 1) * 8;
+        }
+        return fallback;
     }
 
     public override Size MeasureText(ReadOnlySpan<char> text, IFont font)

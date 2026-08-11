@@ -38,7 +38,24 @@ internal sealed class MewVGMetalTextCache : IDisposable
         public int TextureWidthPx;
         public int TextureHeightPx;
         public int ImageId;
+
+        // Inputs of the last rasterization. Same-input calls reuse the texture without
+        // re-rasterizing; same-frame calls with DIFFERENT inputs must not update the shared
+        // texture in place (queued NVG draws sample it at encode time) and fall back to the
+        // keyed cache instead.
+        public long LastFrame = -1;
+        public string? LastText;
+        public nint LastFontRef;
+        public uint LastArgb;
+        public int LastWidthPx;
+        public int LastHeightPx;
+        public TextAlignment LastHorizontalAlignment;
+        public TextAlignment LastVerticalAlignment;
+        public TextWrapping LastWrapping;
+        public TextTrimming LastTrimming;
     }
+
+    private long _frameGeneration;
 
     internal readonly record struct TextCacheKey(
         string Text,
@@ -192,6 +209,7 @@ internal sealed class MewVGMetalTextCache : IDisposable
     public void ReleasePendingDeletes()
     {
         if (_disposed) return;
+        _frameGeneration++;
         while (_pendingDeletes.Count > 0)
         {
             int imageId = _pendingDeletes.Dequeue();
@@ -252,6 +270,42 @@ internal sealed class MewVGMetalTextCache : IDisposable
 
         var entry = _ownerCache.GetValue(owner, static _ => new OwnerEntry());
 
+        uint ownedArgb = ((uint)color.A << 24) | ((uint)color.R << 16) | ((uint)color.G << 8) | color.B;
+        bool sameInputs = entry.ImageId != 0 &&
+            entry.LastText is string lastText &&
+            entry.LastFontRef == fontRef &&
+            entry.LastArgb == ownedArgb &&
+            entry.LastWidthPx == widthPx &&
+            entry.LastHeightPx == heightPx &&
+            entry.LastHorizontalAlignment == horizontalAlignment &&
+            entry.LastVerticalAlignment == verticalAlignment &&
+            entry.LastWrapping == wrapping &&
+            entry.LastTrimming == trimming &&
+            text.SequenceEqual(lastText);
+
+        if (sameInputs)
+        {
+            // Identical inputs: the texture already holds these pixels; no re-rasterization needed.
+            // The frame stamp must still advance, or a second owner draw this frame fails the
+            // same-frame check below and repaints the texture this quad already queued against.
+            entry.LastFrame = _frameGeneration;
+            imageId = entry.ImageId;
+            bitmapWidthPx = entry.TextureWidthPx;
+            bitmapHeightPx = entry.TextureHeightPx;
+            return true;
+        }
+
+        if (entry.ImageId != 0 && entry.LastFrame == _frameGeneration)
+        {
+            // A second draw of this owner within the same frame with different inputs (e.g. a
+            // classifier span recolor over the base run). Updating the owner texture in place
+            // would repaint every quad already queued this frame, so use the keyed cache.
+            return TryGetOrCreate(
+                font, text, widthPx, heightPx, dpi, color,
+                horizontalAlignment, verticalAlignment, wrapping, trimming,
+                out imageId, out bitmapWidthPx, out bitmapHeightPx);
+        }
+
         // Grow buffer if needed. No shrink - rare large rasterization shouldn't force
         // reallocation on every subsequent small one.
         if (entry.Buffer == null || entry.Buffer.Length < requiredBytes)
@@ -297,6 +351,17 @@ internal sealed class MewVGMetalTextCache : IDisposable
             entry.TextureWidthPx = actualW;
             entry.TextureHeightPx = actualH;
         }
+
+        entry.LastFrame = _frameGeneration;
+        entry.LastFontRef = fontRef;
+        entry.LastArgb = ownedArgb;
+        entry.LastWidthPx = widthPx;
+        entry.LastHeightPx = heightPx;
+        entry.LastHorizontalAlignment = horizontalAlignment;
+        entry.LastVerticalAlignment = verticalAlignment;
+        entry.LastWrapping = wrapping;
+        entry.LastTrimming = trimming;
+        entry.LastText = text.ToString();
 
         imageId = entry.ImageId;
         bitmapWidthPx = actualW;

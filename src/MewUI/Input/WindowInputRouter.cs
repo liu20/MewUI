@@ -137,7 +137,9 @@ internal static class WindowInputRouter
             // Close transient popups before routing the click.
             // This prevents a popup opened by the click (e.g. ContextMenu) from being immediately closed
             // by the post-bubbling close policy pass.
-            window.RequestClosePopups(PopupCloseRequest.PointerDown(actualHit));
+            // A press that closed a popup by hitting that popup's own trigger has already been spent on
+            // the close; routing it on would let the trigger reopen what the press just closed.
+            args.Handled = window.RequestClosePopups(PopupCloseRequest.PointerDown(actualHit));
 
             if (actualHit?.Focusable == true)
             {
@@ -251,6 +253,13 @@ internal static class WindowInputRouter
         for (var current = ResolveKeyRoutingStart(window); current != null && !args.Handled; current = GetInputBubbleParent(window, current))
         {
             current.RaiseKeyDown(args);
+        }
+
+        // Input-map dispatch runs after bubbling so a focused control's non-command key handling
+        // keeps priority. Semantic shortcuts have a single resolution path through InputMap.
+        if (!args.Handled)
+        {
+            InputMapResolver.TryDispatchKeyDown(window, args);
         }
     }
 

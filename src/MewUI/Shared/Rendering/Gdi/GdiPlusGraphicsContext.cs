@@ -1211,179 +1211,8 @@ internal sealed class GdiPlusGraphicsContext : GraphicsContextBase
 
     #region Text Rendering (GDI)
 
-    protected override unsafe void DrawTextCore(
-        ReadOnlySpan<char> text,
-        Rect bounds,
-        IFont font,
-        Color color,
-        TextAlignment horizontalAlignment = TextAlignment.Left,
-        TextAlignment verticalAlignment = TextAlignment.Top,
-        TextWrapping wrapping = TextWrapping.NoWrap,
-        TextTrimming trimming = TextTrimming.None)
-    {
-        if (font is not GdiFont gdiFont)
-        {
-            throw new ArgumentException("Font must be a GdiFont", nameof(font));
-        }
-
-        color = BlendGlobalAlpha(color);
-
-        if (text.IsEmpty || color.A == 0)
-        {
-            return;
-        }
-
-        // GDI text bypasses GDI+ WorldTransform - apply transform manually.
-        bool hasTextTransform = TryGetTextWorldTransform(out var textTransform);
-        var drawBounds = hasTextTransform ? bounds : TransformRect(bounds);
-        var cullBounds = hasTextTransform ? TransformRect(bounds) : drawBounds;
-
-        // Early cull: skip if the bounds rect is entirely outside the current clip region.
-        var cullR = ToDeviceRect(cullBounds);
-        if (Gdi32.RectVisible(Hdc, ref cullR) == 0)
-        {
-            return;
-        }
-
-        if (!hasTextTransform && (_pixelSurface != null || color.A < 255 || EnableAlphaTextHint))
-        {
-            var r = GetTextLayoutRect(drawBounds, wrapping);
-            uint format = BuildTextFormat(horizontalAlignment, verticalAlignment, wrapping, trimming);
-            int yOffsetPx = 0;
-            int textHeightPx = 0;
-            if (wrapping != TextWrapping.NoWrap)
-            {
-                ComputeWrappedTextOffsetsPx(
-                    text,
-                    gdiFont.GetHandle(GdiFontRenderMode.Coverage),
-                    r.Width,
-                    r.Height,
-                    verticalAlignment,
-                    out yOffsetPx,
-                    out textHeightPx);
-            }
-
-            // Windowed contexts have a per-HWND text cache (never set alongside _pixelSurface, which is
-            // only used by offscreen pixel-surface contexts); those keep re-rasterizing every call.
-            if (_textCache != null)
-            {
-                _textCache.DrawCached(
-                    Hdc, text, r, gdiFont, color, format, yOffsetPx, textHeightPx,
-                    wrapping, trimming, horizontalAlignment, verticalAlignment);
-            }
-            else
-            {
-                PerPixelAlphaTextRenderer.DrawText(
-                    Hdc,
-                    _pixelSurface,
-                    _surfacePool,
-                    text,
-                    r,
-                    gdiFont,
-                    color,
-                    format,
-                    yOffsetPx,
-                    textHeightPx,
-                    wrapping,
-                    trimming,
-                    horizontalAlignment,
-                    verticalAlignment);
-            }
-            return;
-        }
-
-        if (hasTextTransform && _pixelSurface != null)
-        {
-            // Transformed text on a per-pixel-alpha cache: the direct GDI path below writes no
-            // alpha, so glyphs end up transparent (reading as the background colour). Render the
-            // rotated text with correct premultiplied alpha instead.
-            var rt = GetTextLayoutRect(drawBounds, wrapping);
-            uint fmt = BuildTextFormat(horizontalAlignment, verticalAlignment, wrapping, trimming);
-            int yOff = 0;
-            int txtH = 0;
-            if (wrapping != TextWrapping.NoWrap)
-            {
-                ComputeWrappedTextOffsetsPx(
-                    text, gdiFont.GetHandle(GdiFontRenderMode.Coverage), rt.Width, rt.Height,
-                    verticalAlignment, out yOff, out txtH);
-            }
-
-            if (PerPixelAlphaTextRenderer.DrawTextTransformed(
-                    Hdc, _pixelSurface, _surfacePool, text, rt, cullR, textTransform, gdiFont, color, fmt,
-                    yOff, txtH, wrapping, trimming, horizontalAlignment, verticalAlignment))
-            {
-                return;
-            }
-            // Oversized bounding box: fall through to the direct GDI path below.
-        }
-
-        int textState = 0;
-        nint oldFont = 0;
-        uint oldColor = 0;
-
-        try
-        {
-            if (hasTextTransform)
-            {
-                textState = Gdi32.SaveDC(Hdc);
-                Gdi32.SetGraphicsMode(Hdc, GdiConstants.GM_ADVANCED);
-                Gdi32.SetWorldTransform(Hdc, ref textTransform);
-            }
-
-            oldFont = Gdi32.SelectObject(Hdc, gdiFont.GetHandle(GdiFontRenderMode.Default));
-            oldColor = Gdi32.SetTextColor(Hdc, color.ToCOLORREF());
-
-            var r = GetTextLayoutRect(drawBounds, wrapping);
-            uint format = BuildTextFormat(horizontalAlignment, verticalAlignment, wrapping, trimming);
-            int yOffsetPx = 0;
-            int textHeightPx = 0;
-            if (wrapping != TextWrapping.NoWrap)
-            {
-                ComputeWrappedTextOffsetsPx(
-                    text,
-                    gdiFont.GetHandle(GdiFontRenderMode.Default),
-                    r.Width,
-                    r.Height,
-                    verticalAlignment,
-                    out yOffsetPx,
-                    out textHeightPx);
-            }
-
-            int clipState = ApplyTextClip(r);
-
-            bool drawn = false;
-            if (trimming == TextTrimming.CharacterEllipsis && wrapping != TextWrapping.NoWrap)
-            {
-                drawn = GdiWrappedEllipsisHelper.TryDrawWrappedWithEllipsis(Hdc, text, r, r.Width, r.Height, horizontalAlignment, verticalAlignment);
-            }
-
-            if (!drawn)
-            {
-                fixed (char* pText = text)
-                {
-                    ApplyVerticalOffset(ref r, yOffsetPx, textHeightPx);
-                    Gdi32.DrawText(Hdc, pText, text.Length, ref r, format);
-                }
-            }
-
-            RestoreTextClip(clipState);
-        }
-        finally
-        {
-            if (textState != 0)
-            {
-                Gdi32.RestoreDC(Hdc, textState);
-            }
-            else
-            {
-                Gdi32.SetTextColor(Hdc, oldColor);
-                Gdi32.SelectObject(Hdc, oldFont);
-            }
-        }
-    }
-
-    public override TextLayout CreateTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, in TextLayoutConstraints constraints)
+    public override BackendTextLayout CreateBackendTextLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, in BackendTextLayoutConstraints constraints)
     {
         var bounds = constraints.Bounds;
         var safeBounds = new Rect(bounds.X, bounds.Y,
@@ -1401,7 +1230,7 @@ internal sealed class GdiPlusGraphicsContext : GraphicsContextBase
 
         double effectiveMaxWidth = safeBounds.Width > 0 ? safeBounds.Width : measured.Width;
 
-        return new TextLayout
+        return new BackendTextLayout
         {
             MeasuredSize = measured,
             EffectiveBounds = safeBounds,
@@ -1410,8 +1239,8 @@ internal sealed class GdiPlusGraphicsContext : GraphicsContextBase
         };
     }
 
-    public override unsafe void DrawTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, TextLayout layout, Color color)
+    public override unsafe void DrawBackendTextLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, BackendTextLayout layout, Color color)
     {
         if (format.Font is not GdiFont gdiFont)
         {
@@ -1768,7 +1597,7 @@ internal sealed class GdiPlusGraphicsContext : GraphicsContextBase
                 Gdi32.DrawText(Hdc, pText, text.Length, ref rect, format);
             }
 
-            return new Size(TextMeasurePolicy.ApplyWidthPadding(rect.Width) / DpiScale, rect.Height / DpiScale);
+            return new Size(rect.Width / DpiScale, rect.Height / DpiScale);
         }
         finally
         {
@@ -1800,7 +1629,7 @@ internal sealed class GdiPlusGraphicsContext : GraphicsContextBase
                     GdiConstants.DT_CALCRECT | GdiConstants.DT_WORDBREAK | GdiConstants.DT_NOPREFIX);
             }
 
-            return new Size(TextMeasurePolicy.ApplyWidthPadding(rect.Width) / DpiScale, rect.Height / DpiScale);
+            return new Size(rect.Width / DpiScale, rect.Height / DpiScale);
         }
         finally
         {
@@ -1870,6 +1699,16 @@ internal sealed class GdiPlusGraphicsContext : GraphicsContextBase
         if (destPx.Width <= 0 || destPx.Height <= 0)
         {
             return;
+        }
+
+        // Within a pixel of native size: snap to the source and take the 1:1 path below, or AlphaBlend
+        // stretches the bitmap and softens its pixel-snapped text.
+        int nativeSrcW = (int)sourceRect.Width;
+        int nativeSrcH = (int)sourceRect.Height;
+        if (m.M11 == 1f && m.M22 == 1f &&
+            Math.Abs(destPx.Width - nativeSrcW) <= 1 && Math.Abs(destPx.Height - nativeSrcH) <= 1)
+        {
+            destPx = RECT.FromLTRB(destPx.left, destPx.top, destPx.left + nativeSrcW, destPx.top + nativeSrcH);
         }
 
         // Resolve backend default:

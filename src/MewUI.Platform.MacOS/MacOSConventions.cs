@@ -14,6 +14,15 @@ internal sealed class MacOSConventions : PlatformConventions
 
     public override bool ReverseButtonOrder => true;
 
+    public override KeyGesture NavigateUpGesture => new(Key.Up, ModifierKeys.Meta);
+
+    public override KeyGesture NavigateBackGesture => new(Key.Left, ModifierKeys.Meta);
+
+    public override KeyGesture NavigateForwardGesture => new(Key.Right, ModifierKeys.Meta);
+
+    public override IReadOnlyList<KeyGesture> EditLocationGestures =>
+        [new(Key.G, ModifierKeys.Meta | ModifierKeys.Shift)];
+
     public override string FormatGesture(KeyGesture gesture)
     {
         var sb = new StringBuilder();

@@ -22,7 +22,7 @@ partial class GalleryView
                             {
                                 status.Value = await showFunc();
                             }),
-                        new TextBlock().BindText(status).FontSize(11)
+                        new TextBlock().BindText(status).FontSize(ThemeFontSize.Small)
                     )
             );
         }

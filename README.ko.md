@@ -102,8 +102,8 @@ curl -sL https://raw.githubusercontent.com/aprillz/MewUI/refs/heads/main/samples
                         .FontSize(18)
                         .Bold(),
                     new Button()
-                        .Content("Quit")
-                        .OnClick(() => Application.Quit())
+                        .Content("Exit")
+                        .OnClick(Application.Shutdown)
                 )
         );
 
@@ -329,16 +329,20 @@ MewUI는 크로스플랫폼 관리형 파일 및 폴더 대화상자를 제공�
 
 - [설치 및 패키지 구성](docs/Installation.ko.md)
 - [C# Markup](docs/CSharpMarkup.ko.md)
+- [Command System](docs/CommandSystem.ko.md)
 - [Binding](docs/Binding.ko.md)
 - [Items and Templates](docs/ItemsAndTemplates.ko.md)
 - [Theme](docs/Theme.ko.md)
 - [Application Lifecycle](docs/ApplicationLifecycle.ko.md)
 - [Layout](docs/Layout.ko.md)
+- [Window 시각 레이어](docs/WindowLayers.ko.md)
 - [RenderLoop](docs/RenderLoop.ko.md)
 - [Hot Reload](docs/HotReload.ko.md)
 - [에디터 프리뷰](docs/Preview.ko.md)
 - [Custom Controls](docs/CustomControls.ko.md)
 - [Control Template](docs/ControlTemplate.ko.md)
+- [텍스트 뷰 확장](docs/TextViewExtensions.ko.md)
+- [Localization](docs/Localization.ko.md)
 
 ---
 ## 🤝 커뮤니티

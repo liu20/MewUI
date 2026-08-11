@@ -35,4 +35,10 @@ public sealed class AppOptions
     /// Gets or sets theme metric overrides.
     /// </summary>
     public ThemeMetrics? Metrics { get; set; }
+
+    /// <summary>
+    /// Gets or sets when the run loop ends automatically as windows close. Applied to
+    /// <see cref="Application.ShutdownMode"/> at run start; leave null to keep the default.
+    /// </summary>
+    public ShutdownMode? ShutdownMode { get; set; }
 }

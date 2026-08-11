@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 
+using Aprillz.MewUI.Animation;
 using Aprillz.MewUI.Controls;
 using Aprillz.MewUI.HotReload;
 using Aprillz.MewUI.Input;
@@ -28,7 +29,7 @@ internal sealed class PreviewSession : IDisposable
     private bool _wrapperIsComponentHost;
     private Action? _requestWake;
     private List<PreviewTargetScanner.TargetDescriptor>? _targets;
-    private string _activeTargetId = PreviewTargetScanner.MAIN_WINDOW_ID;
+    private string _activeTargetId = string.Empty;
     private IRenderSurface? _surface;
     private int _surfaceWidthPx;
     private int _surfaceHeightPx;
@@ -39,12 +40,18 @@ internal sealed class PreviewSession : IDisposable
     private double _viewportWidth = DEFAULT_VIEWPORT_WIDTH;
     private double _viewportHeight = DEFAULT_VIEWPORT_HEIGHT;
     private double _clientDpi;
+    private bool _closingOwnedWindow;
 
-    public void Start(Application app, Window mainWindow, Action requestWake)
+    public void Start(Application app, Window? mainWindow, Action requestWake)
     {
         _app = app;
         _mainWindow = mainWindow;
         _activeWindow = mainWindow;
+        _activeTargetId = mainWindow != null ? PreviewTargetScanner.MAIN_WINDOW_ID : string.Empty;
+        if (mainWindow != null)
+        {
+            BlockUserClose(mainWindow);
+        }
         _requestWake = requestWake;
         MewUiHotReload.DeltaApplied += OnDeltaApplied;
         _channel = new PreviewChannel(OnChannelMessage, OnChannelConnected);
@@ -74,7 +81,7 @@ internal sealed class PreviewSession : IDisposable
         if (ReferenceEquals(_activeWindow, window))
         {
             _activeWindow = _mainWindow;
-            _activeTargetId = PreviewTargetScanner.MAIN_WINDOW_ID;
+            _activeTargetId = _mainWindow != null ? PreviewTargetScanner.MAIN_WINDOW_ID : string.Empty;
             if (_activeWindow != null)
             {
                 ApplyClientDpi(_activeWindow);
@@ -151,6 +158,7 @@ internal sealed class PreviewSession : IDisposable
         }
 
         long renderStart = Stopwatch.GetTimestamp();
+        using var pulse = AnimationManager.Instance.BeginPulse(_app!.RenderLoopSettings);
         window.PerformLayout();
         window.RenderFrameToSurface(_surface);
         long renderMs = (Stopwatch.GetTimestamp() - renderStart) * 1000 / Stopwatch.Frequency;
@@ -191,7 +199,7 @@ internal sealed class PreviewSession : IDisposable
         {
             _pendingAckSeq = 0;
             SendTargets();
-            SendStatus($"Previewing {_activeTargetId}");
+            SendStatus(_activeWindow != null ? $"Previewing {_activeTargetId}" : "No active preview target");
             if (_activeWindow != null)
             {
                 MarkDirty(_activeWindow);
@@ -381,9 +389,9 @@ internal sealed class PreviewSession : IDisposable
     }
 
     /// <summary>
-    /// Adopts the IDE panel's size and DPI. Per plan.md 4.5, the viewport is a constraint for
-    /// auto-sized component wrappers only; Window targets keep their own size logic and IDE
-    /// zoom is purely a client-side display scale.
+    /// Adopts the IDE panel's size and DPI. The viewport is a constraint for auto-sized
+    /// component wrappers only; Window targets keep their own size logic. IDE zoom rides the
+    /// requested DPI, so zoomed previews are vector re-renders, not scaled bitmaps.
     /// </summary>
     private void ApplyClientMetrics(double width, double height, double dpi)
     {
@@ -494,7 +502,7 @@ internal sealed class PreviewSession : IDisposable
         if (_targets == null)
         {
             long start = Stopwatch.GetTimestamp();
-            _targets = PreviewTargetScanner.Scan();
+            _targets = PreviewTargetScanner.Scan(mainWindowAvailable: _mainWindow != null);
             long elapsedMs = (Stopwatch.GetTimestamp() - start) * 1000 / Stopwatch.Frequency;
             PreviewTrace.Log($"target scan {elapsedMs}ms ({_targets.Count} targets)");
         }
@@ -529,7 +537,7 @@ internal sealed class PreviewSession : IDisposable
             return;
         }
 
-        _targets ??= PreviewTargetScanner.Scan();
+        _targets ??= PreviewTargetScanner.Scan(mainWindowAvailable: _mainWindow != null);
         var descriptor = _targets.Find(target => string.Equals(target.Id, id, StringComparison.Ordinal));
         if (descriptor == null)
         {
@@ -573,12 +581,50 @@ internal sealed class PreviewSession : IDisposable
         catch (Exception ex)
         {
             _activeWindow = _mainWindow;
-            _activeTargetId = PreviewTargetScanner.MAIN_WINDOW_ID;
+            _activeTargetId = _mainWindow != null ? PreviewTargetScanner.MAIN_WINDOW_ID : string.Empty;
             SendStatus($"Failed to open target {id}: {ex.Message}", hasError: true, exceptionDetail: ex.ToString());
         }
         finally
         {
-            previousWrapper?.Close();
+            CloseOwnedWindow(previousWrapper);
+        }
+    }
+
+    /// <summary>
+    /// Cancels close requests coming from the previewed UI itself (a Close button, Escape
+    /// handlers): closing a preview window would tear the target down mid-session. The session's
+    /// own teardown goes through <see cref="CloseOwnedWindow"/>, which bypasses the block.
+    /// </summary>
+    private void BlockUserClose(Window window)
+    {
+        window.Closing += args =>
+        {
+            if (!_closingOwnedWindow)
+            {
+                args.Cancel = true;
+                SendStatus("Close is disabled in preview sessions");
+            }
+        };
+    }
+
+    /// <summary>Reports a window command the headless backend refused (minimize, maximize).</summary>
+    internal void NotifyBlockedWindowCommand(string command) =>
+        SendStatus($"{command} is disabled in preview sessions");
+
+    private void CloseOwnedWindow(Window? window)
+    {
+        if (window == null)
+        {
+            return;
+        }
+        _closingOwnedWindow = true;
+        try
+        {
+            window.Close();
+        }
+        finally
+        {
+            _closingOwnedWindow = false;
         }
     }
 
@@ -592,6 +638,7 @@ internal sealed class PreviewSession : IDisposable
             // A real Window keeps its own size logic; a DesignSize hint overrides per axis.
             window = targetWindow;
             _wrapperIsComponentHost = false;
+            BlockUserClose(window);
             window.Show();
             Design.TryGetDesignSize(window, out double designWidth, out double designHeight);
             if (designWidth > 0 || designHeight > 0)
@@ -606,6 +653,7 @@ internal sealed class PreviewSession : IDisposable
         {
             window = new Window { Content = (Element)instance };
             _wrapperIsComponentHost = true;
+            BlockUserClose(window);
             ApplyWrapperWindowSize(window, instance as FrameworkElement);
             window.Show();
         }
@@ -654,7 +702,7 @@ internal sealed class PreviewSession : IDisposable
             {
                 // Component wrappers recreate the instance so helper-method edits are reflected
                 // even when the OnBuild override itself did not change.
-                _targets ??= PreviewTargetScanner.Scan();
+                _targets ??= PreviewTargetScanner.Scan(mainWindowAvailable: _mainWindow != null);
                 var descriptor = _targets.Find(target => string.Equals(target.Id, _activeTargetId, StringComparison.Ordinal));
                 if (descriptor is { Type: not null, Available: true } && !typeof(Window).IsAssignableFrom(descriptor.Type))
                 {

@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using Aprillz.MewUI.Platform;
 using Aprillz.MewUI.Rendering.Filters;
 using Aprillz.MewUI.Resources;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Rendering.MewVG;
 
@@ -15,9 +16,11 @@ public sealed partial class MewVGX11GraphicsFactory
 #else
 public sealed partial class MewVGWin32GraphicsFactory 
 #endif
-    : IGraphicsFactory, IRenderDevice, IGpuInteropInvalidationSource, IWindowResourceReleaser, IWindowSurfacePresenter
+    : IGraphicsFactory, ITextBackendFactory, IRenderDevice, IGpuInteropInvalidationSource, IWindowResourceReleaser, IWindowSurfacePresenter
 {
     public event EventHandler<GpuInteropInvalidatedEventArgs>? GpuInteropInvalidated;
+
+    public ITextEngine TextEngine => TextServices.GetEngine(this);
 
     internal void RaiseGpuInteropInvalidated(GpuInteropInvalidatedEventArgs e)
         => GpuInteropInvalidated?.Invoke(this, e);
@@ -178,7 +181,7 @@ public sealed partial class MewVGWin32GraphicsFactory
         return CreateContextCore(target, resources);
     }
 
-    public IGraphicsContext CreateMeasurementContext(uint dpi)
+    ITextBackendMeasurementContext ITextBackendFactory.CreateTextMeasurementContext(uint dpi)
         => CreateMeasurementContextCore(dpi);
 
     private IRenderSurface CreatePixelSurface(int pixelWidth, int pixelHeight, double dpiScale, bool hasAlpha)
@@ -230,6 +233,7 @@ public sealed partial class MewVGWin32GraphicsFactory
 
     public void Dispose()
     {
+        TextServices.ReleaseEngine(this);
         _renderResourceCache.Dispose();
 
         foreach (var (_, resources) in _windows)
@@ -257,7 +261,7 @@ public sealed partial class MewVGWin32GraphicsFactory
 
     private partial IGraphicsContext CreateContextCore(WindowRenderTarget target, IDisposable resources);
 
-    private partial IGraphicsContext CreateMeasurementContextCore(uint dpi);
+    private partial ITextBackendMeasurementContext CreateMeasurementContextCore(uint dpi);
 
     partial void TryReleaseWindowResources(nint hwnd);
 

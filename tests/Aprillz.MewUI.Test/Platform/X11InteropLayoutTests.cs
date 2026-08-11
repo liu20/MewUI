@@ -7,6 +7,23 @@ namespace MewUI.Test.Platform;
 public sealed class X11InteropLayoutTests
 {
     [TestMethod]
+    public void XI2ButtonMask_UsesOneBasedButtonNumbers()
+    {
+        byte[] mask = [
+            (1 << 1) | (1 << 3), // buttons 1 and 3
+            (1 << 0),            // button 8
+        ];
+
+        Assert.IsFalse(XI2.IsButtonDown(mask, 0));
+        Assert.IsTrue(XI2.IsButtonDown(mask, 1));
+        Assert.IsFalse(XI2.IsButtonDown(mask, 2));
+        Assert.IsTrue(XI2.IsButtonDown(mask, 3));
+        Assert.IsTrue(XI2.IsButtonDown(mask, 8));
+        Assert.IsFalse(XI2.IsButtonDown(mask, 9));
+        Assert.IsFalse(XI2.IsButtonDown(mask, 16));
+    }
+
+    [TestMethod]
     public void XlibStructs_MatchLp64HeaderLayout()
     {
         if (IntPtr.Size != 8)

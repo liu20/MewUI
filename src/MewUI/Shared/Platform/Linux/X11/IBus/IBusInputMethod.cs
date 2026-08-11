@@ -167,7 +167,6 @@ internal sealed class IBusInputMethod : IX11InputMethod
 
         try
         {
-            Console.Error.WriteLine($"[IBus.CommitText] sig='{msg.Signature}' bodyLen={msg.Body.Length}");
             var r = new DBusReader(msg.Body, 0);
             string? text = r.ReadIBusText();
             if (!string.IsNullOrEmpty(text))
@@ -196,7 +195,6 @@ internal sealed class IBusInputMethod : IX11InputMethod
 
         try
         {
-            Console.Error.WriteLine($"[IBus.UpdatePreedit] sig='{msg.Signature}' bodyLen={msg.Body.Length}");
             var r = new DBusReader(msg.Body, 0);
             string? text = r.ReadIBusText();
             uint cursorPos = r.ReadUInt32();

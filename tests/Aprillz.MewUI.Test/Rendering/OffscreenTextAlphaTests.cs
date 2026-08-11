@@ -1,6 +1,7 @@
 using Aprillz.MewUI;
 using Aprillz.MewUI.Rendering;
 using Aprillz.MewUI.Rendering.Gdi;
+using MewUI.Test.Infrastructure;
 
 namespace MewUI.Test.Rendering;
 
@@ -42,7 +43,7 @@ public sealed class OffscreenTextAlphaTests
             context.DrawEllipse(new Rect(66, 4, 24, 24), color, 6);
             context.DrawLine(new Point(100, 7), new Point(124, 25), color, 6);
             using var font = factory.CreateFont("Segoe UI", 24, 96);
-            context.DrawText("M", new Rect(134, 2, 40, 34), font, color);
+            TextTestHarness.Draw(context, factory, "M", new Rect(134, 2, 40, 34), font, color);
             context.EndFrame();
         }
 
@@ -137,7 +138,7 @@ public sealed class OffscreenTextAlphaTests
             {
                 context.BeginFrame(source);
                 IFont font = factory.CreateFont("Segoe UI", 16, 96);
-                context.DrawText("Hello", new Rect(2, 2, Width - 4, Height - 4), font, Color.FromArgb(255, 220, 40, 40));
+                TextTestHarness.Draw(context, factory, "Hello", new Rect(2, 2, Width - 4, Height - 4), font, Color.FromArgb(255, 220, 40, 40));
                 context.EndFrame();
             }
 
@@ -617,7 +618,7 @@ public sealed class OffscreenTextAlphaTests
                 }
 
                 IFont font = factory.CreateFont("Segoe UI", 16, 96);
-                context.DrawText("Hello", new Rect(2, 2, Width - 4, Height - 4), font, Color.FromArgb(255, 220, 40, 40));
+                TextTestHarness.Draw(context, factory, "Hello", new Rect(2, 2, Width - 4, Height - 4), font, Color.FromArgb(255, 220, 40, 40));
                 context.EndFrame();
             }
 

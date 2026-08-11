@@ -32,7 +32,7 @@ partial class GalleryView
                     new TextBlock()
                         .DockBottom()
                         .BindText(gridHitText)
-                        .FontSize(11),
+                        .FontSize(ThemeFontSize.Small),
 
                     new GridView()
                         .Ref(out simple)
@@ -246,7 +246,7 @@ partial class GalleryView
                                 .Content("Errors only")
                                 .BindIsChecked(onlyErrors),
 
-                            new TextBlock().Text("Min amount").CenterVertical().FontSize(11),
+                            new TextBlock().Text("Min amount").CenterVertical().FontSize(ThemeFontSize.Small),
                             new NumericUpDown()
                                 .Width(90)
                                 .Minimum(0)
@@ -258,7 +258,7 @@ partial class GalleryView
                             new TextBlock()
                                 .Text("Click a column header to sort")
                                 .CenterVertical()
-                                .FontSize(11)
+                                .FontSize(ThemeFontSize.Small)
                         ),
 
                     new StackPanel()
@@ -266,10 +266,10 @@ partial class GalleryView
                         .Vertical()
                         .Spacing(2)
                         .Children(
-                            new TextBlock().BindText(summaryText).FontSize(11),
+                            new TextBlock().BindText(summaryText).FontSize(ThemeFontSize.Small),
                             new StackPanel().Horizontal().Children( 
-                                new TextBlock().BindText(selectedText).FontSize(11),
-                                new TextBlock().BindText(sortText).FontSize(11))
+                                new TextBlock().BindText(selectedText).FontSize(ThemeFontSize.Small),
+                                new TextBlock().BindText(sortText).FontSize(ThemeFontSize.Small))
                         ),
 
                     grid
@@ -335,13 +335,13 @@ partial class GalleryView
                                     .Children(
                                         new TextBlock()
                                             .Register(ctx, "Role")
-                                            .FontSize(11),
+                                            .FontSize(ThemeFontSize.Small),
                                         new TextBlock()
                                             .Register(ctx, "Online")
-                                            .FontSize(11),
+                                            .FontSize(ThemeFontSize.Small),
                                         new TextBlock()
                                             .Register(ctx, "Score")
-                                            .FontSize(11)
+                                            .FontSize(ThemeFontSize.Small)
                                     )
                             ),
                         bind: (_, item, _, ctx) =>
@@ -368,7 +368,6 @@ partial class GalleryView
                         build: _ => new ProgressBar()
                             .Minimum(0)
                             .Maximum(100)
-                            .Height(10)
                             .Margin(6, 0)
                             .CenterVertical(),
                         bind: (view, item) => ((ProgressBar)view).BindValue(item.Progress)),
@@ -414,7 +413,7 @@ partial class GalleryView
                         .DockTop()
                         .Text("Each row sizes to the tallest cell. Scroll into the list, then 'Prepend 20' to verify the viewport stays anchored on the same content.")
                         .TextWrapping(TextWrapping.Wrap)
-                        .FontSize(11),
+                        .FontSize(ThemeFontSize.Small),
 
                     new StackPanel()
                         .DockTop()

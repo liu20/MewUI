@@ -12,7 +12,8 @@ public static class MacOSPlatform
 
     public static void Register()
     {
-        Application.RegisterPlatformHost(CreateHost, Platform.PlatformSurfaceKind.MacOS, "MacOS");
+        Application.RegisterPlatformHost(CreateHost, Platform.PlatformSurfaceKind.MacOS, "MacOS",
+            MacOSPlatformHost.SystemFontFamily);
         PlatformConventions.Current = new MacOSConventions();
     }
 

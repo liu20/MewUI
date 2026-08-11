@@ -1,5 +1,6 @@
 using System.Numerics;
 using Aprillz.MewUI.Diagnostics;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Rendering;
 
@@ -8,8 +9,11 @@ namespace Aprillz.MewUI.Rendering;
 /// Provides viewport-based early culling, pixel-snap and geometric-transform logic
 /// so that all backends share the same canonical behaviour.
 /// </summary>
-public abstract class GraphicsContextBase : IGraphicsContext
+internal abstract class GraphicsContextBase : IGraphicsContext, ITextBackendRenderContext
 {
+    /// <summary>Frame-bound text drawing surface; one shared implementation, not a backend specialization point.</summary>
+    public ITextRenderContext Text => TextServices.GetRenderContext(this);
+
     private static readonly EnvDebugLogger _stateLogger = new("MEWUI_GRAPHICS_DEBUG", "[GraphicsContextBase]");
     
     #region Viewport Culling
@@ -115,6 +119,31 @@ public abstract class GraphicsContextBase : IGraphicsContext
     }
 
     #endregion
+
+    /// <summary>
+    /// Declares that the scope starts by filling its box opaquely; the default ignores it.
+    /// </summary>
+    public virtual void BeginOpaqueBackdrop() { }
+
+    /// <summary>
+    /// Ends the innermost <see cref="BeginOpaqueBackdrop"/> scope; the default ignores it.
+    /// </summary>
+    public virtual void EndOpaqueBackdrop() { }
+
+    /// <summary>
+    /// Multiplies the opacity of the scope. The default folds it into <see cref="GlobalAlpha"/>,
+    /// which every backend honours; override to composite the scope as one group instead.
+    /// </summary>
+    public virtual void BeginOpacity(double opacity)
+    {
+        Save();
+        GlobalAlpha *= (float)Math.Clamp(opacity, 0.0, 1.0);
+    }
+
+    /// <summary>
+    /// Ends the innermost <see cref="BeginOpacity"/> scope.
+    /// </summary>
+    public virtual void EndOpacity() => Restore();
 
     #region State Management (template methods - cull rect tracking)
 
@@ -354,13 +383,13 @@ public abstract class GraphicsContextBase : IGraphicsContext
 
     // --- Core text API: layout + draw separation ---
 
-    public TextResourceTracker? TextTracker { get; set; }
+    public BackendTextResourceTracker? TextTracker { get; set; }
 
-    public abstract TextLayout? CreateTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, in TextLayoutConstraints constraints);
+    public abstract BackendTextLayout? CreateBackendTextLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, in BackendTextLayoutConstraints constraints);
 
-    public abstract void DrawTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, TextLayout layout, Color color);
+    public abstract void DrawBackendTextLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, BackendTextLayout layout, Color color);
 
     /// <summary>
     /// Owner-aware overload. <paramref name="owner"/> is an opaque identity (typically the
@@ -370,43 +399,62 @@ public abstract class GraphicsContextBase : IGraphicsContext
     /// benefit from owner-keying inherit this default which discards <paramref name="owner"/>
     /// and forwards to the parameterless overload.
     /// </summary>
-    public virtual void DrawTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, TextLayout layout, Color color, object? owner)
-        => DrawTextLayout(text, format, layout, color);
+    public virtual void DrawBackendTextLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, BackendTextLayout layout, Color color, object? owner)
+        => DrawBackendTextLayout(text, format, layout, color);
 
-    public void DrawText(ReadOnlySpan<char> text, Rect bounds, IFont font, Color color,
-        TextAlignment horizontalAlignment = TextAlignment.Left,
-        TextAlignment verticalAlignment = TextAlignment.Top,
-        TextWrapping wrapping = TextWrapping.NoWrap,
-        TextTrimming trimming = TextTrimming.None)
+    ITextBackendRun? ITextBackendRenderContext.CreateRun(
+        ReadOnlySpan<char> text,
+        IFont font,
+        double width,
+        double height)
     {
-        _drawTextCount++;
-        if (IsCulled(bounds)) return;
-
-        // Cap-height centering: shift text so the cap-height midpoint aligns with
-        // bounds center instead of the line-height midpoint.
-        if (verticalAlignment == TextAlignment.Center)
+        var format = new BackendTextFormat
         {
-            double lineHeight = font.Size + font.InternalLeading;
-            double leadingTrim = Math.Max(0, lineHeight / 2.0 - font.Descent - font.CapHeight / 2.0);
-            if (leadingTrim > 0)
-            {
-                bounds = new Rect(bounds.X, bounds.Y - leadingTrim, bounds.Width, bounds.Height);
-            }
-        }
-
-        DrawTextCore(text, bounds, font, color, horizontalAlignment, verticalAlignment, wrapping, trimming);
+            Font = font,
+            HorizontalAlignment = TextAlignment.Left,
+            VerticalAlignment = TextAlignment.Top,
+            Wrapping = TextWrapping.NoWrap,
+            Trimming = TextTrimming.None
+        };
+        var constraints = new BackendTextLayoutConstraints(
+            new Rect(0, 0, Math.Max(1, width), Math.Max(1, height)));
+        var layout = CreateBackendTextLayout(text, format, in constraints);
+        return layout is null ? null : new GraphicsBackendTextRun(text.ToString(), format, layout, width, height);
     }
 
-    protected abstract void DrawTextCore(ReadOnlySpan<char> text, Rect bounds, IFont font, Color color,
-        TextAlignment horizontalAlignment = TextAlignment.Left,
-        TextAlignment verticalAlignment = TextAlignment.Top,
-        TextWrapping wrapping = TextWrapping.NoWrap,
-        TextTrimming trimming = TextTrimming.None);
+    void ITextBackendRenderContext.DrawRun(ITextBackendRun run, Point origin, Color color, object? owner)
+    {
+        if (run is not GraphicsBackendTextRun realized)
+        {
+            throw new ArgumentException("The text run was created by a different graphics backend.", nameof(run));
+        }
+
+        _drawTextCount++;
+        realized.Layout.EffectiveBounds = new Rect(origin.X, origin.Y, realized.Width, realized.Height);
+        DrawBackendTextLayout(realized.Text, realized.Format, realized.Layout, color, owner);
+    }
 
     public abstract Size MeasureText(ReadOnlySpan<char> text, IFont font);
 
     public abstract Size MeasureText(ReadOnlySpan<char> text, IFont font, double maxWidth);
+
+    private sealed class GraphicsBackendTextRun(
+        string text,
+        BackendTextFormat format,
+        BackendTextLayout layout,
+        double width,
+        double height) : ITextBackendRun
+    {
+        public string Text { get; } = text;
+        public BackendTextFormat Format { get; } = format;
+        public BackendTextLayout Layout { get; } = layout;
+        public double Width { get; } = Math.Max(1, width);
+        public double Height { get; } = Math.Max(1, height);
+        public nint NativeHandle => Layout.BackendHandle;
+
+        public void Dispose() => Layout.ReleaseBackendHandle();
+    }
 
     public abstract ImageScaleQuality ImageScaleQuality { get; set; }
 
@@ -457,6 +505,7 @@ public abstract class GraphicsContextBase : IGraphicsContext
         if (_disposed) return;
         _disposed = true;
         if (IsActive) EndFrame();
+        TextServices.ReleaseRenderContext(this);
         OnDispose();
         _boxShadowStopsCache.Clear();
         CollectionPool.Return(_cullStack);

@@ -15,8 +15,8 @@ internal static class ExtendedDock
         ExtendedDockModel model,
         Func<TabNode, UIElement?> content,
         Func<TabNode, UIElement?>? header = null,
-        Action<TabNode, ContextMenu>? configureTabMenu = null,
-        Action<TabSetNode, ContextMenu>? configureGroupMenu = null)
+        Action<TabNode, ContextMenu, CommandScope>? configureTabMenu = null,
+        Action<TabSetNode, ContextMenu, CommandScope>? configureGroupMenu = null)
     {
         // No flags anywhere: the model behavior comes from the ExtendedDockModel type, the view behavior from the
         // Extended view types this factory wires (ExtendedLayoutView / ExtendedBorderBar / ExtendedBorderButton).

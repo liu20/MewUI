@@ -3,6 +3,7 @@
   "displayName": "MewUI Preview",
   "description": "Live preview for Aprillz.MewUI components and windows",
   "version": "0.1.0",
+  "icon": "images/icon.png",
   "publisher": "aprillz",
   "license": "MIT",
   "repository": {
@@ -25,6 +26,15 @@
     }
   },
   "contributes": {
+    "menus": {
+      "editor/context": [
+        {
+          "command": "mewui.preview.start",
+          "when": "resourceLangId == csharp",
+          "group": "navigation@9"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "mewui.preview.start",
@@ -67,6 +77,11 @@
           "type": "number",
           "default": 60,
           "description": "Seconds to wait for the preview handshake before retrying with a shim session that skips the app entry point (low fidelity). 0 disables the fallback."
+        },
+        "mewui.preview.openSourceOnSelect": {
+          "type": "boolean",
+          "default": true,
+          "description": "Jump to the declaration when the preview target changes (the Go to code checkbox in the panel)."
         },
         "mewui.preview.autoSelectTarget": {
           "type": "boolean",

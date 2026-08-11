@@ -53,6 +53,9 @@ public sealed class Palette
 
     public Color Focus { get; }
 
+    /// <summary>Semantic color used for validation and binding error feedback.</summary>
+    public Color Error { get; }
+
     public Color ScrollBarThumb { get; }
 
     public Color ScrollBarThumbHover { get; }
@@ -90,6 +93,7 @@ public sealed class Palette
         AccentText = accentText ?? GetDefaultAccentText(accent);
 
         var isDark = IsDarkBackground(windowBackground);
+        Error = baseColors.Error ?? Color.FromRgb(220, 20, 60);
         var hoverT = isDark ? 0.22 : 0.14;
         var pressedT = isDark ? 0.32 : 0.24;
 

@@ -1,23 +1,29 @@
+using System.Runtime.InteropServices;
 using Aprillz.MewUI.Native.Com;
 using Aprillz.MewUI.Native.DirectWrite;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Rendering.Direct2D;
 
-internal sealed unsafe class Direct2DMeasurementContext : MeasureGraphicsContextBase
+internal sealed unsafe class Direct2DMeasurementContext : MeasureGraphicsContextBase, ITextAdvanceSource
 {
     private readonly nint _dwriteFactory;
     private readonly DWriteTextFormatCache? _textFormatCache;
 
+    // Layout grid for the GDI-compatible metrics; sizes still come back in DIPs.
+    private readonly float _pixelsPerDip;
+
     public override double DpiScale => 1.0;
 
-    public Direct2DMeasurementContext(nint dwriteFactory, DWriteTextFormatCache? textFormatCache = null)
+    public Direct2DMeasurementContext(nint dwriteFactory, uint dpi = 96, DWriteTextFormatCache? textFormatCache = null)
     {
         _dwriteFactory = dwriteFactory;
+        _pixelsPerDip = dpi > 0 ? dpi / 96f : 1f;
         _textFormatCache = textFormatCache;
     }
 
-    public override TextLayout? CreateTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, in TextLayoutConstraints constraints)
+    private BackendTextLayout? CreateMeasurementLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, in BackendTextLayoutConstraints constraints)
     {
         if (text.IsEmpty) return null;
 
@@ -51,7 +57,8 @@ internal sealed unsafe class Direct2DMeasurementContext : MeasureGraphicsContext
             if (textFormat == 0) return null;
 
             float w = maxWidth >= float.MaxValue ? float.MaxValue : (float)maxWidth;
-            int hr = DWriteVTable.CreateTextLayout((IDWriteFactory*)_dwriteFactory, text, textFormat, w, float.MaxValue, out textLayout);
+            int hr = DWriteVTable.CreateGdiCompatibleTextLayout(
+                (IDWriteFactory*)_dwriteFactory, text, textFormat, w, float.MaxValue, _pixelsPerDip, useGdiNatural: false, out textLayout);
             if (hr < 0 || textLayout == 0) return null;
 
             ApplyCustomFontFallback(textLayout);
@@ -62,7 +69,7 @@ internal sealed unsafe class Direct2DMeasurementContext : MeasureGraphicsContext
             var height = metrics.height;
             if (metrics.top < 0) height += -metrics.top;
 
-            var measured = new Size(TextMeasurePolicy.ApplyWidthPadding(metrics.widthIncludingTrailingWhitespace), height);
+            var measured = new Size(metrics.widthIncludingTrailingWhitespace, height);
             double effectiveMaxWidth = bounds.Width > 0 && !double.IsPositiveInfinity(bounds.Width) ? bounds.Width : measured.Width;
 
             if (format.Trimming == TextTrimming.CharacterEllipsis)
@@ -74,7 +81,7 @@ internal sealed unsafe class Direct2DMeasurementContext : MeasureGraphicsContext
             }
 
             // Measurement only - native layout released immediately. No BackendHandle.
-            return new TextLayout
+            return new BackendTextLayout
             {
                 MeasuredSize = measured,
                 EffectiveBounds = bounds,
@@ -102,7 +109,7 @@ internal sealed unsafe class Direct2DMeasurementContext : MeasureGraphicsContext
 
     public override Size MeasureText(ReadOnlySpan<char> text, IFont font, double maxWidth)
     {
-        var format = new TextFormat
+        var format = new BackendTextFormat
         {
             Font = font,
             HorizontalAlignment = TextAlignment.Left,
@@ -110,8 +117,128 @@ internal sealed unsafe class Direct2DMeasurementContext : MeasureGraphicsContext
             Wrapping = TextWrapping.NoWrap,
             Trimming = TextTrimming.None
         };
-        var constraints = new TextLayoutConstraints(new Rect(0, 0, double.PositiveInfinity, 0));
-        var layout = CreateTextLayout(text, format, in constraints);
+        var constraints = new BackendTextLayoutConstraints(new Rect(0, 0, double.PositiveInfinity, 0));
+        var layout = CreateMeasurementLayout(text, format, in constraints);
         return layout?.MeasuredSize ?? Size.Empty;
+    }
+
+    double[] ITextAdvanceSource.GetUtf16PrefixAdvances(ReadOnlySpan<char> text, IFont font)
+    {
+        if (text.IsEmpty)
+        {
+            return [];
+        }
+        if (font is not DirectWriteFont dwFont)
+        {
+            throw new ArgumentException("Font must be a DirectWriteFont.", nameof(font));
+        }
+
+        nint textFormat = 0;
+        nint textLayout = 0;
+        bool ownFormat = false;
+        try
+        {
+            if (_textFormatCache is not null)
+            {
+                textFormat = _textFormatCache.GetOrCreate(
+                    _dwriteFactory,
+                    dwFont,
+                    TextAlignment.Left,
+                    TextAlignment.Top,
+                    TextWrapping.NoWrap);
+            }
+            else
+            {
+                int formatHr = DWriteVTable.CreateTextFormat(
+                    (IDWriteFactory*)_dwriteFactory,
+                    dwFont.Family,
+                    dwFont.PrivateFontCollection,
+                    (DWRITE_FONT_WEIGHT)(int)dwFont.Weight,
+                    dwFont.IsItalic ? DWRITE_FONT_STYLE.ITALIC : DWRITE_FONT_STYLE.NORMAL,
+                    (float)dwFont.Size,
+                    out textFormat);
+                if (formatHr < 0 || textFormat == 0)
+                {
+                    Marshal.ThrowExceptionForHR(formatHr);
+                }
+                DWriteVTable.SetWordWrapping(textFormat, DWRITE_WORD_WRAPPING.NO_WRAP);
+                ownFormat = true;
+            }
+
+            int hr = DWriteVTable.CreateGdiCompatibleTextLayout(
+                (IDWriteFactory*)_dwriteFactory,
+                text,
+                textFormat,
+                float.MaxValue,
+                float.MaxValue,
+                _pixelsPerDip,
+                useGdiNatural: false,
+                out textLayout);
+            if (hr < 0 || textLayout == 0)
+            {
+                Marshal.ThrowExceptionForHR(hr);
+            }
+
+            ApplyCustomFontFallback(textLayout);
+            var runs = DWriteGlyphRunExtractor.Capture(textLayout);
+            var result = new double[text.Length];
+            foreach (var run in runs)
+            {
+                var glyphPrefix = new double[run.Advances.Length + 1];
+                for (int i = 0; i < run.Advances.Length; i++)
+                {
+                    glyphPrefix[i + 1] = glyphPrefix[i] + run.Advances[i];
+                }
+
+                int local = 0;
+                while (local < run.ClusterMap.Length)
+                {
+                    ushort glyphStart = run.ClusterMap[local];
+                    int nextLocal = local + 1;
+                    while (nextLocal < run.ClusterMap.Length && run.ClusterMap[nextLocal] == glyphStart)
+                    {
+                        nextLocal++;
+                    }
+
+                    // A run whose glyphs were all deleted still maps every character to a glyph
+                    // slot, so the map runs past the glyph array. Those slots carry no width.
+                    int clusterStart = Math.Min(glyphStart, run.GlyphIndices.Length);
+                    int nextGlyph = nextLocal < run.ClusterMap.Length
+                        ? run.ClusterMap[nextLocal]
+                        : run.GlyphIndices.Length;
+                    nextGlyph = Math.Clamp(nextGlyph, clusterStart, run.GlyphIndices.Length);
+                    double clusterEnd = run.BaselineOriginX + glyphPrefix[nextGlyph];
+                    for (int textIndex = local; textIndex < nextLocal; textIndex++)
+                    {
+                        int destination = checked((int)run.TextPosition + textIndex);
+                        if ((uint)destination < (uint)result.Length)
+                        {
+                            result[destination] = clusterEnd;
+                        }
+                    }
+                    local = nextLocal;
+                }
+            }
+
+            double previous = 0;
+            for (int i = 0; i < result.Length; i++)
+            {
+                if (result[i] <= 0)
+                {
+                    result[i] = previous;
+                }
+                previous = Math.Max(previous, result[i]);
+                result[i] = previous;
+            }
+            return result;
+        }
+        finally
+        {
+            ComHelpers.Release(textLayout);
+            if (ownFormat)
+            {
+                ComHelpers.Release(textFormat);
+            }
+        }
     }
 }

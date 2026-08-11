@@ -1,6 +1,7 @@
 using System.Globalization;
 
 using Aprillz.MewUI.Rendering;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Controls;
 
@@ -60,10 +61,6 @@ public sealed class Calendar : Control, IVisualTreeHost
     // Small font for cell text
     private const double CellFontSize = 11;
     private static readonly double DowFontSize = Math.Round(CellFontSize * 0.85);
-    private IFont? _cellFont;
-    private IFont? _dowFont;
-    private uint _cellFontDpi;
-
     public static readonly MewProperty<DateTime?> SelectedDateProperty =
         MewProperty<DateTime?>.Register<Calendar>(nameof(SelectedDate), null,
             MewPropertyOptions.AffectsRender,
@@ -260,27 +257,6 @@ public sealed class Calendar : Control, IVisualTreeHost
         }
     }
 
-    private IFont GetCellFont()
-    {
-        var dpi = GetDpi();
-        if (_cellFont != null && _cellFontDpi == dpi)
-            return _cellFont;
-
-        var factory = GetGraphicsFactory();
-        _cellFont?.Dispose();
-        _cellFont = factory.CreateFont(FontFamily, CellFontSize, dpi, FontWeight);
-        _dowFont?.Dispose();
-        _dowFont = factory.CreateFont(FontFamily, DowFontSize, dpi, FontWeight);
-        _cellFontDpi = dpi;
-        return _cellFont;
-    }
-
-    private IFont GetDowFont()
-    {
-        GetCellFont(); // ensure both fonts are created
-        return _dowFont!;
-    }
-
     #endregion
 
     #region Rendering
@@ -409,7 +385,6 @@ public sealed class Calendar : Control, IVisualTreeHost
     {
         var theme = Theme;
         var palette = theme.Palette;
-        var font = GetCellFont();
         var today = DateTime.Today;
         double dpiScale = GetDpi() / 96.0;
         double snappedRadius = LayoutRounding.RoundToPixel(CellCornerRadius, dpiScale);
@@ -436,8 +411,7 @@ public sealed class Calendar : Control, IVisualTreeHost
                 cellW,
                 DayOfWeekHeaderHeight);
 
-            context.DrawText(dayName, rect, GetDowFont(), palette.PlaceholderText,
-                TextAlignment.Center, TextAlignment.Center);
+            DrawCalendarText(context, dayName, rect, DowFontSize, palette.PlaceholderText, culture);
         }
 
         // Day cells
@@ -481,8 +455,7 @@ public sealed class Calendar : Control, IVisualTreeHost
                     ? palette.WindowText
                     : palette.DisabledText;
 
-            context.DrawText(dayNumbers[date.Day - 1], cellRect, font, textColor,
-                TextAlignment.Center, TextAlignment.Center);
+            DrawCalendarText(context, dayNumbers[date.Day - 1], cellRect, CellFontSize, textColor, culture);
         }
     }
 
@@ -490,13 +463,13 @@ public sealed class Calendar : Control, IVisualTreeHost
     {
         var theme = Theme;
         var palette = theme.Palette;
-        var font = GetCellFont();
         var display = DisplayDate;
         var selected = SelectedDate;
         double dpiScale = GetDpi() / 96.0;
         double snappedRadius = LayoutRounding.RoundToPixel(CellCornerRadius, dpiScale);
         double snappedStroke = LayoutRounding.SnapThicknessToPixels(TodayStrokeThickness, dpiScale, 1);
-        var monthNames = GetMonthNames(CultureInfo.CurrentCulture);
+        var culture = CultureInfo.CurrentCulture;
+        var monthNames = GetMonthNames(culture);
 
         for (int i = 0; i < YearDecadeCells; i++)
         {
@@ -530,8 +503,7 @@ public sealed class Calendar : Control, IVisualTreeHost
             var textColor = isSelected ? palette.AccentText : palette.WindowText;
             string label = monthNames[month - 1];
 
-            context.DrawText(label, cellRect, font, textColor,
-                TextAlignment.Center, TextAlignment.Center);
+            DrawCalendarText(context, label, cellRect, CellFontSize, textColor, culture);
         }
     }
 
@@ -539,14 +511,14 @@ public sealed class Calendar : Control, IVisualTreeHost
     {
         var theme = Theme;
         var palette = theme.Palette;
-        var font = GetCellFont();
         var display = DisplayDate;
         var selected = SelectedDate;
         int decadeStart = display.Year / 10 * 10;
         double dpiScale = GetDpi() / 96.0;
         double snappedRadius = LayoutRounding.RoundToPixel(CellCornerRadius, dpiScale);
         double snappedStroke = LayoutRounding.SnapThicknessToPixels(TodayStrokeThickness, dpiScale, 1);
-        var yearNumbers = GetDecadeYearNumbers(decadeStart, CultureInfo.CurrentCulture);
+        var culture = CultureInfo.CurrentCulture;
+        var yearNumbers = GetDecadeYearNumbers(decadeStart, culture);
 
         for (int i = 0; i < YearDecadeCells; i++)
         {
@@ -582,8 +554,50 @@ public sealed class Calendar : Control, IVisualTreeHost
                     ? palette.WindowText
                     : palette.DisabledText;
 
-            context.DrawText(yearNumbers[i], cellRect, font, textColor,
-                TextAlignment.Center, TextAlignment.Center);
+            DrawCalendarText(context, yearNumbers[i], cellRect, CellFontSize, textColor, culture);
+        }
+    }
+
+    private void DrawCalendarText(
+        IGraphicsContext context,
+        string text,
+        Rect bounds,
+        double fontSize,
+        Color color,
+        CultureInfo culture)
+    {
+        var request = new TextLayoutRequest
+        {
+            Text = text.AsMemory(),
+            Dpi = GetDpi(),
+            Paragraph = new TextParagraphStyle
+            {
+                MaxWidth = bounds.Width,
+                Wrapping = TextWrapping.NoWrap,
+                Alignment = TextAlignment.Center,
+                Culture = culture
+            },
+            DefaultStyle = new TextRunStyle(
+                FontFamily,
+                fontSize,
+                FontWeight,
+                Culture: culture)
+        };
+        var layout = GetGraphicsFactory().TextEngine.GetOrCreateLayout(
+            request,
+            TextLayoutCachePolicy.Content);
+        var origin = new Point(bounds.X, bounds.Y + Math.Max(0, (bounds.Height - layout.MeasuredSize.Height) * 0.5));
+        var options = new TextDrawOptions(color, Owner: this);
+
+        context.Save();
+        try
+        {
+            context.IntersectClip(bounds);
+            context.Text.Draw(layout, origin, in options);
+        }
+        finally
+        {
+            context.Restore();
         }
     }
 
@@ -853,16 +867,6 @@ public sealed class Calendar : Control, IVisualTreeHost
     }
 
     #endregion
-
-    protected override void OnDispose()
-    {
-        base.OnDispose();
-
-        _cellFont?.Dispose();
-        _cellFont = null;
-        _dowFont?.Dispose();
-        _dowFont = null;
-    }
 
     bool IVisualTreeHost.VisitChildren(Func<Element, bool> visitor)
         => visitor(_prevButton) && visitor(_nextButton) && visitor(_headerButton);

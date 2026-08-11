@@ -10,8 +10,18 @@ internal enum ValueSource : byte
     Default = 0,
     Inherited = 1,
     Style = 2,
-    Trigger = 3,
-    Local = 4,
+    Binding = 3,
+    ElementTrigger = 4,
+    Local = 5,
+}
+
+internal readonly record struct ValueMutationResult(
+    object? OldValue,
+    object? NewValue,
+    ValueSource OldSource,
+    ValueSource NewSource)
+{
+    public bool IsEffectiveChange => !Equals(OldValue, NewValue);
 }
 
 /// <summary>
@@ -21,16 +31,18 @@ internal enum ValueSource : byte
 internal sealed class AnimatedEntry
 {
     public required object BaseValue;
+    public object? BaseRawValue;
     public required object AnimatedValue;
     public ValueSource BaseSource;
 }
 
 /// <summary>
 /// Per-instance storage for <see cref="MewProperty{T}"/> values.
-/// Every source (Local, Trigger, Style, Inherited) is preserved simultaneously, so clearing a
+/// Every source (Local, ElementTrigger, Binding, Style, Inherited) is preserved simultaneously, so clearing a
 /// higher-priority source reveals the preserved lower one without the caller re-deriving it.
-/// The common single-source case stays inline: <c>Value</c>/<c>Source</c> hold the effective base
-/// value and a <see cref="SlotSet"/> is allocated only when two or more sources coexist.
+/// The common single-source case stays inline: <c>RawValue</c>/<c>Value</c>/<c>Source</c> hold the
+/// selected raw candidate, effective base, and source. A <see cref="SlotSet"/> is allocated only
+/// when two or more sources coexist.
 /// Animation is handled via an <see cref="AnimatedEntry"/> wrapper (allocated only when animating).
 /// </summary>
 internal sealed class PropertyValueStore
@@ -39,7 +51,7 @@ internal sealed class PropertyValueStore
     private const int MAX_JUSTIFIED_DENSE_ID = 256;
 
     // Small ints and the two most common doubles (Opacity/scale endpoints) are cached to avoid
-    // a fresh box on every SetLocal/SetTarget/SetInherited call in the hot style/trigger path.
+    // a fresh box on every SetLocal/SetInherited call in the hot property path.
     private const int CACHED_INT_MIN = -1;
     private const int CACHED_INT_MAX = 8;
 
@@ -69,6 +81,11 @@ internal sealed class PropertyValueStore
     internal Action<int>? StopAnimationCallback;
     internal Action? StopAllAnimationsCallback;
 
+    // Owner hook for element transitions: an external write to a property with a registered
+    // transition is diverted to the animator, which owns the base-write itself. Returns true
+    // when the write was taken over. Null (the overwhelmingly common case) costs one check.
+    internal Func<MewProperty, object, ValueSource, bool>? AnimateSetCallback;
+
     public PropertyValueStore(IPropertyOwner owner)
     {
         _ownerRef = new WeakReference<IPropertyOwner>(owner);
@@ -77,7 +94,7 @@ internal sealed class PropertyValueStore
 
     /// <summary>
     /// Gets the current effective value of a property.
-    /// Resolution: Animated over the highest set source (Local > Trigger > Style > Inherited > Default).
+    /// Resolution: Animated over the highest set source (Local > ElementTrigger > Binding > Style > Inherited > Default).
     /// </summary>
     public T GetValue<T>(MewProperty<T> property)
     {
@@ -117,10 +134,14 @@ internal sealed class PropertyValueStore
         // (they are unaffected). entry.Value is not a bool while animating, so that path is not
         // short-circuited here.
         var entry = GetEntry(property.Id);
-        if (entry.Source == ValueSource.Local && entry.Value is bool existing && existing == value)
+        if (entry.Source == ValueSource.Local && entry.RawValue is bool existing && existing == value)
             return;
 
-        SetValue(property, Box(value), ValueSource.Local);
+        object boxed = Box(value);
+        if (AnimateSetCallback?.Invoke(property, boxed, ValueSource.Local) == true)
+            return;
+
+        SetValue(property, boxed, ValueSource.Local);
     }
 
     /// <summary>
@@ -132,11 +153,15 @@ internal sealed class PropertyValueStore
         // lower slots are unaffected, so this holds whether or not a shadow exists.
         var entry = GetEntry(property.Id);
         if (entry.Source == ValueSource.Local &&
-            entry.Value is T existing &&
+            entry.RawValue is T existing &&
             EqualityComparer<T>.Default.Equals(existing, value))
             return;
 
-        SetValue(property, BoxCached(value), ValueSource.Local);
+        object? boxed = BoxCached(value);
+        if (boxed != null && AnimateSetCallback?.Invoke(property, boxed, ValueSource.Local) == true)
+            return;
+
+        SetValue(property, boxed, ValueSource.Local);
     }
 
     /// <summary>
@@ -148,11 +173,34 @@ internal sealed class PropertyValueStore
     }
 
     /// <summary>
-    /// Sets a trigger setter value. Overrides style values.
+    /// Sets an element-trigger value. Overrides binding and style values.
     /// </summary>
-    public void SetTrigger(MewProperty property, object value)
+    internal void SetElementTrigger(MewProperty property, object value)
     {
-        SetValue(property, value, ValueSource.Trigger);
+        SetValue(property, value, ValueSource.ElementTrigger);
+    }
+
+    /// <summary>
+    /// Sets a value supplied by a binding. The slot remains below element triggers and above style.
+    /// </summary>
+    internal void SetBinding<T>(MewProperty<T> property, T value)
+    {
+        object? boxed = BoxCached(value);
+        if (boxed != null && AnimateSetCallback?.Invoke(property, boxed, ValueSource.Binding) == true)
+            return;
+
+        SetValue(property, boxed, ValueSource.Binding);
+    }
+
+    /// <summary>
+    /// Boxed binding-slot write used by direct MewProperty forwards.
+    /// </summary>
+    internal void SetBinding(MewProperty property, object? value)
+    {
+        if (value != null && AnimateSetCallback?.Invoke(property, value, ValueSource.Binding) == true)
+            return;
+
+        SetValue(property, value, ValueSource.Binding);
     }
 
     /// <summary>
@@ -160,88 +208,73 @@ internal sealed class PropertyValueStore
     /// lower-priority slots are preserved so a later clear reveals them.
     /// Stops any running animation on this property.
     /// </summary>
-    public void SetValue(MewProperty property, object? value, ValueSource source)
+    public ValueMutationResult SetValue(MewProperty property, object? value, ValueSource source)
+        => SetValueCore(property, value, source, validateCandidate: true);
+
+    private ValueMutationResult SetValueCore(
+        MewProperty property,
+        object? value,
+        ValueSource source,
+        bool validateCandidate)
     {
+        object? oldEffective = ResolveEffectiveValue(property);
+        ValueSource oldSource = GetSource(property.Id);
         ref var entry = ref EnsureEntry(property.Id);
-
-        // Apply coerce callback (skipped for null: coercion callbacks assume a non-null value)
-        if (value != null && property.CoerceCallback != null && _ownerRef.TryGetTarget(out var coerceOwner))
-        {
-            value = property.CoerceCallback(coerceOwner, value);
-        }
-
-        object? oldEffective = CaptureEffective(ref entry, property);
 
         // No change - skip to avoid infinite invalidation loops (only when the effective source and
         // value already match and nothing is animating).
         if (entry.Value is not AnimatedEntry && entry.Shadow == null &&
-            entry.Source == source && Equals(entry.Value, value))
-            return;
+            entry.Source == source && Equals(entry.RawValue, value))
+            return new ValueMutationResult(oldEffective, oldEffective, oldSource, oldSource);
 
-        // Pre-commit veto: rejecting before the entry is written keeps the store and the
-        // side effects of changed callbacks consistent. Unlike coerce this also runs for null.
-        if (property.ValidateCallback != null && _ownerRef.TryGetTarget(out var validateOwner))
+        // Reject the raw candidate before changing any source slot.
+        if (validateCandidate)
         {
-            property.ValidateCallback(validateOwner, value);
+            ValidateCandidate(property, value);
         }
 
-        // A direct set stops any running animation and drops the animation overlay.
-        if (entry.Value is AnimatedEntry)
-        {
-            StopAnimationCallback?.Invoke(property.Id);
-            UnwrapAnimation(ref entry);
-        }
+        SetSlotValuePreservingShadowedAnimation(ref entry, property, source, value);
 
-        SetSlotValue(ref entry, source, value);
-
-        object? newEffective = ComputeEffective(ref entry, property);
+        object? newEffective = ResolveEffectiveValue(property);
+        ValueSource newSource = GetSource(property.Id);
         if (!Equals(oldEffective, newEffective))
         {
             NotifyChanged(property, oldEffective, newEffective);
         }
+
+        return new ValueMutationResult(oldEffective, newEffective, oldSource, newSource);
     }
 
     /// <summary>
     /// Clears the value in the given source's slot, letting the next-highest preserved slot
     /// (or the default) take effect. Called when a trigger no longer matches.
     /// </summary>
-    public void ClearSource(int propertyId, ValueSource source)
+    public ValueMutationResult ClearSource(int propertyId, ValueSource source)
     {
         var snapshot = GetEntry(propertyId);
+        var property = MewPropertyRegistry.GetProperty(propertyId);
+        object? oldEffective = property != null ? ResolveEffectiveValue(property) : null;
+        ValueSource oldSource = GetSource(propertyId);
+
         if (!HasSlot(snapshot, source))
-            return;
+            return new ValueMutationResult(oldEffective, oldEffective, oldSource, oldSource);
 
         ref var entry = ref EnsureEntry(propertyId);
-        var property = MewPropertyRegistry.GetProperty(propertyId);
-
-        // Clearing a source also stops an animation whose base is being altered, matching the
-        // legacy behavior where clearing dropped the effective value.
-        if (entry.Value is AnimatedEntry)
-        {
-            StopAnimationCallback?.Invoke(propertyId);
-            UnwrapAnimation(ref entry);
-        }
-
-        object? oldEffective = property != null ? CaptureEffective(ref entry, property) : null;
-
-        ClearSlotValue(ref entry, source);
+        ClearSlotValuePreservingShadowedAnimation(ref entry, propertyId, property, source);
 
         if (property != null)
         {
-            object? newEffective = ComputeEffective(ref entry, property);
+            object? newEffective = ResolveEffectiveValue(property);
+            ValueSource newSource = GetSource(propertyId);
             if (!Equals(oldEffective, newEffective))
             {
                 NotifyChanged(property, oldEffective, newEffective);
             }
-        }
-    }
 
-    /// <summary>
-    /// Backward-compatible SetTarget - maps to Trigger source.
-    /// </summary>
-    public void SetTarget(MewProperty property, object? value)
-    {
-        SetValue(property, value, ValueSource.Trigger);
+            return new ValueMutationResult(oldEffective, newEffective, oldSource, newSource);
+        }
+
+        return new ValueMutationResult(oldEffective, null, oldSource, GetSource(propertyId));
     }
 
     /// <summary>
@@ -250,15 +283,21 @@ internal sealed class PropertyValueStore
     /// </summary>
     public void SetLocal(MewProperty property, object? value)
     {
+        if (value != null && AnimateSetCallback?.Invoke(property, value, ValueSource.Local) == true)
+            return;
+
         SetValue(property, value, ValueSource.Local);
     }
 
-    /// <summary>
-    /// Typed SetTarget convenience.
-    /// </summary>
-    public void SetTarget<T>(MewProperty<T> property, T value)
+    internal void ValidateValueCandidate(MewProperty property, object? value)
+        => ValidateCandidate(property, value);
+
+    internal void SetLocalPrevalidated(MewProperty property, object? value)
     {
-        SetTarget(property, BoxCached(value));
+        if (value != null && AnimateSetCallback?.Invoke(property, value, ValueSource.Local) == true)
+            return;
+
+        SetValueCore(property, value, ValueSource.Local, validateCandidate: false);
     }
 
     /// <summary>
@@ -274,7 +313,11 @@ internal sealed class PropertyValueStore
         // inheritance from the parent chain anyway.
         if (BaseSource(entry) > ValueSource.Inherited)
             return;
-        SetSlotValue(ref entry, ValueSource.Inherited, BoxCached(value));
+        SetSlotValuePreservingShadowedAnimation(
+            ref entry,
+            property,
+            ValueSource.Inherited,
+            BoxCached(value));
     }
 
     /// <summary>
@@ -286,7 +329,7 @@ internal sealed class PropertyValueStore
         ref var entry = ref EnsureEntry(property.Id);
         if (BaseSource(entry) > ValueSource.Inherited)
             return;
-        SetSlotValue(ref entry, ValueSource.Inherited, value);
+        SetSlotValuePreservingShadowedAnimation(ref entry, property, ValueSource.Inherited, value);
     }
 
     /// <summary>
@@ -300,7 +343,11 @@ internal sealed class PropertyValueStore
             return;
 
         ref var entry = ref EnsureEntry(propertyId);
-        ClearSlotValue(ref entry, ValueSource.Inherited);
+        ClearSlotValuePreservingShadowedAnimation(
+            ref entry,
+            propertyId,
+            MewPropertyRegistry.GetProperty(propertyId),
+            ValueSource.Inherited);
     }
 
     /// <summary>
@@ -314,7 +361,11 @@ internal sealed class PropertyValueStore
             for (int i = 0; i < _entries.Length; i++)
             {
                 if (HasSlot(_entries[i], ValueSource.Inherited))
-                    ClearSlotValue(ref _entries[i], ValueSource.Inherited);
+                    ClearSlotValuePreservingShadowedAnimation(
+                        ref _entries[i],
+                        i,
+                        MewPropertyRegistry.GetProperty(i),
+                        ValueSource.Inherited);
             }
             return;
         }
@@ -323,7 +374,11 @@ internal sealed class PropertyValueStore
         for (int i = 0; i < _sparseCount; i++)
         {
             if (HasSlot(_sparseEntries[i].Entry, ValueSource.Inherited))
-                ClearSlotValue(ref _sparseEntries[i].Entry, ValueSource.Inherited);
+                ClearSlotValuePreservingShadowedAnimation(
+                    ref _sparseEntries[i].Entry,
+                    _sparseEntries[i].PropertyId,
+                    MewPropertyRegistry.GetProperty(_sparseEntries[i].PropertyId),
+                    ValueSource.Inherited);
         }
     }
 
@@ -368,13 +423,22 @@ internal sealed class PropertyValueStore
         return GetEntry(propertyId).Source;
     }
 
-    /// <summary>
-    /// Returns true if any value (style, trigger, or local) has been set.
-    /// </summary>
-    internal bool HasTargetValue(int propertyId)
+    internal bool HasValue(int propertyId, ValueSource source)
+        => HasSlot(GetEntry(propertyId), source);
+
+    internal object? GetSourceValue(MewProperty property, ValueSource source)
     {
-        var entry = GetEntry(propertyId);
-        return entry.Value is AnimatedEntry || entry.Source != ValueSource.Default;
+        var entry = GetEntry(property.Id);
+        if (!HasSlot(entry, source))
+        {
+            throw new InvalidOperationException(
+                $"Property '{property.Name}' has no {source} value.");
+        }
+
+        object? rawValue = entry.Shadow != null
+            ? entry.Shadow.Get(source)
+            : entry.RawValue;
+        return rawValue == null ? null : CoerceCandidate(property, rawValue);
     }
 
     /// <summary>
@@ -389,29 +453,61 @@ internal sealed class PropertyValueStore
         return entry.Value;
     }
 
-    /// <summary>
-    /// Sets the underlying base value without stopping animations or notifying.
-    /// Used by <see cref="Animation.PropertyAnimator"/> when starting a new animation.
-    /// </summary>
-    internal void SetTargetDirect(MewProperty property, object value, ValueSource? source = null)
+    internal PropertyValueTrace GetValueTrace(MewProperty property, BindingStateSnapshot? bindingState)
     {
-        ref var entry = ref EnsureEntry(property.Id);
-        if (entry.Value is AnimatedEntry animated)
+        var entry = GetEntry(property.Id);
+        bool isAnimated = entry.Value is AnimatedEntry;
+        object? baseValue = entry.Value is AnimatedEntry animated
+            ? animated.BaseValue
+            : entry.Value;
+        object? visualValue = entry.Value is AnimatedEntry currentAnimation
+            ? currentAnimation.AnimatedValue
+            : entry.Value;
+        if (entry.Source == ValueSource.Default)
         {
-            animated.BaseValue = value;
-            if (source.HasValue)
+            baseValue = property.GetBoxedDefaultForType(_ownerType);
+            if (!isAnimated)
             {
-                // Update the base slot while the animation overlay is temporarily lifted, then
-                // restore the overlay over the recomputed base.
-                UnwrapAnimation(ref entry);
-                SetSlotValue(ref entry, source.Value, value);
-                RewrapAnimation(ref entry, animated);
+                visualValue = baseValue;
             }
         }
-        else
-        {
-            SetSlotValue(ref entry, source ?? entry.Source, value);
-        }
+
+        var defaultCandidate = new PropertyValueCandidateTrace(
+            ValueSource.Default,
+            true,
+            entry.Source == ValueSource.Default,
+            property.GetBoxedDefaultForType(_ownerType));
+
+        return new PropertyValueTrace(
+            property,
+            baseValue,
+            visualValue,
+            entry.Source,
+            isAnimated,
+            CreateCandidateTrace(entry, ValueSource.Local),
+            CreateCandidateTrace(entry, ValueSource.ElementTrigger),
+            CreateCandidateTrace(entry, ValueSource.Binding),
+            CreateCandidateTrace(entry, ValueSource.Style),
+            CreateCandidateTrace(entry, ValueSource.Inherited),
+            defaultCandidate,
+            bindingState);
+    }
+
+    private static PropertyValueCandidateTrace CreateCandidateTrace(
+        in Entry entry,
+        ValueSource source)
+    {
+        bool isSet = HasSlot(entry, source);
+        object? rawValue = !isSet
+            ? null
+            : entry.Shadow != null
+                ? entry.Shadow.Get(source)
+                : entry.RawValue;
+        return new PropertyValueCandidateTrace(
+            source,
+            isSet,
+            isSet && entry.Source == source,
+            rawValue);
     }
 
     /// <summary>
@@ -423,6 +519,10 @@ internal sealed class PropertyValueStore
         ref var entry = ref EnsureEntry(propertyId);
         var property = MewPropertyRegistry.GetProperty(propertyId);
         var oldValue = property != null ? CaptureEffective(ref entry, property) : null;
+        if (property != null)
+        {
+            value = CoerceCandidate(property, value);
+        }
 
         if (entry.Value is AnimatedEntry animated)
         {
@@ -433,6 +533,7 @@ internal sealed class PropertyValueStore
             entry.Value = new AnimatedEntry
             {
                 BaseValue = entry.Value!,
+                BaseRawValue = entry.RawValue,
                 AnimatedValue = value,
                 BaseSource = entry.Source,
             };
@@ -458,6 +559,7 @@ internal sealed class PropertyValueStore
         var oldValue = property != null ? (object?)animated.AnimatedValue : null;
 
         entry.Value = animated.BaseValue;
+        entry.RawValue = animated.BaseRawValue;
         entry.Source = animated.BaseSource;
 
         if (property != null)
@@ -467,7 +569,7 @@ internal sealed class PropertyValueStore
     /// <summary>
     /// Clears the local value for a property, allowing style/trigger/inherited to take effect.
     /// </summary>
-    public void ClearLocal(MewProperty property)
+    internal void ClearLocalValue(MewProperty property)
     {
         ClearSource(property.Id, ValueSource.Local);
     }
@@ -493,6 +595,77 @@ internal sealed class PropertyValueStore
     {
         if (_ownerRef.TryGetTarget(out var owner))
             owner.OnPropertyChanged(property, oldValue, newValue);
+    }
+
+    internal ValueMutationResult CoerceValue(MewProperty property)
+    {
+        object? oldEffective = ResolveEffectiveValue(property);
+        ValueSource oldSource = GetSource(property.Id);
+        ref var entry = ref EnsureEntry(property.Id);
+
+        if (entry.Value is AnimatedEntry animated)
+        {
+            UnwrapAnimation(ref entry);
+            ApplyCoercion(ref entry, property);
+            RewrapAnimation(ref entry, animated);
+        }
+        else
+        {
+            ApplyCoercion(ref entry, property);
+        }
+
+        object? newEffective = ResolveEffectiveValue(property);
+        ValueSource newSource = GetSource(property.Id);
+        if (!Equals(oldEffective, newEffective))
+        {
+            NotifyChanged(property, oldEffective, newEffective);
+        }
+
+        return new ValueMutationResult(oldEffective, newEffective, oldSource, newSource);
+    }
+
+    private void ApplyCoercion(ref Entry entry, MewProperty property)
+    {
+        if (entry.Source == ValueSource.Default)
+        {
+            entry.RawValue = null;
+            entry.Value = null;
+            return;
+        }
+
+        entry.Value = entry.RawValue == null
+            ? null
+            : CoerceCandidate(property, entry.RawValue);
+    }
+
+    private object CoerceCandidate(MewProperty property, object value)
+    {
+        if (property.CoerceCallback != null && _ownerRef.TryGetTarget(out var owner))
+        {
+            return property.CoerceCallback(owner, value);
+        }
+
+        return value;
+    }
+
+    internal object CoerceValueCandidate(MewProperty property, object value)
+        => CoerceCandidate(property, value);
+
+    private void ValidateCandidate(MewProperty property, object? value)
+    {
+        if (property.ValidateCallback != null && _ownerRef.TryGetTarget(out var owner))
+        {
+            property.ValidateCallback(owner, value);
+        }
+    }
+
+    private object? ResolveEffectiveValue(MewProperty property)
+    {
+        if (_ownerRef.TryGetTarget(out var owner) && owner is Controls.MewObject mewObject)
+            return mewObject.GetBindingValue(property);
+
+        var entry = GetEntry(property.Id);
+        return ComputeEffective(ref entry, property);
     }
 
     private static object Box(bool value) => value ? _boxedTrue : _boxedFalse;
@@ -579,6 +752,7 @@ internal sealed class PropertyValueStore
         {
             if (entry.Source == ValueSource.Default || entry.Source == source)
             {
+                entry.RawValue = value;
                 entry.Value = value;
                 entry.Source = source;
                 return;
@@ -588,6 +762,7 @@ internal sealed class PropertyValueStore
             // replace it inline instead of allocating a shadow to preserve it.
             if (entry.Source == ValueSource.Inherited && source > ValueSource.Inherited)
             {
+                entry.RawValue = value;
                 entry.Value = value;
                 entry.Source = source;
                 return;
@@ -595,7 +770,7 @@ internal sealed class PropertyValueStore
 
             // A second, distinct slot appears: promote to a shadow set holding both.
             var shadow = new SlotSet();
-            shadow.Set(entry.Source, entry.Value);
+            shadow.Set(entry.Source, entry.RawValue);
             shadow.Set(source, value);
             entry.Shadow = shadow;
             RecomputeFromShadow(ref entry);
@@ -606,6 +781,34 @@ internal sealed class PropertyValueStore
         RecomputeFromShadow(ref entry);
     }
 
+    private void SetSlotValuePreservingShadowedAnimation(
+        ref Entry entry,
+        MewProperty property,
+        ValueSource source,
+        object? value)
+    {
+        if (entry.Value is not AnimatedEntry animated)
+        {
+            SetSlotValue(ref entry, source, value);
+            ApplyCoercion(ref entry, property);
+            return;
+        }
+
+        object? oldBaseValue = animated.BaseValue;
+        ValueSource oldBaseSource = animated.BaseSource;
+        UnwrapAnimation(ref entry);
+        SetSlotValue(ref entry, source, value);
+        ApplyCoercion(ref entry, property);
+
+        if (entry.Source == oldBaseSource && Equals(entry.Value, oldBaseValue))
+        {
+            RewrapAnimation(ref entry, animated);
+            return;
+        }
+
+        StopAnimationCallback?.Invoke(property.Id);
+    }
+
     // Unsets a source slot, revealing the next-highest set slot (or the default).
     private static void ClearSlotValue(ref Entry entry, ValueSource source)
     {
@@ -613,6 +816,7 @@ internal sealed class PropertyValueStore
         {
             if (entry.Source == source)
             {
+                entry.RawValue = null;
                 entry.Value = null;
                 entry.Source = ValueSource.Default;
             }
@@ -621,6 +825,36 @@ internal sealed class PropertyValueStore
 
         entry.Shadow.Unset(source);
         RecomputeFromShadow(ref entry);
+    }
+
+    private void ClearSlotValuePreservingShadowedAnimation(
+        ref Entry entry,
+        int propertyId,
+        MewProperty? property,
+        ValueSource source)
+    {
+        if (entry.Value is not AnimatedEntry animated)
+        {
+            ClearSlotValue(ref entry, source);
+            if (property != null)
+                ApplyCoercion(ref entry, property);
+            return;
+        }
+
+        object? oldBaseValue = animated.BaseValue;
+        ValueSource oldBaseSource = animated.BaseSource;
+        UnwrapAnimation(ref entry);
+        ClearSlotValue(ref entry, source);
+        if (property != null)
+            ApplyCoercion(ref entry, property);
+
+        if (entry.Source == oldBaseSource && Equals(entry.Value, oldBaseValue))
+        {
+            RewrapAnimation(ref entry, animated);
+            return;
+        }
+
+        StopAnimationCallback?.Invoke(propertyId);
     }
 
     // Recomputes Value/Source from the shadow set and folds back to the inline form when at most one
@@ -648,11 +882,13 @@ internal sealed class PropertyValueStore
         if (setCount <= 1)
         {
             entry.Shadow = null;
+            entry.RawValue = highestValue;
             entry.Value = highestValue;
             entry.Source = highest;
             return;
         }
 
+        entry.RawValue = highestValue;
         entry.Value = highestValue;
         entry.Source = highest;
     }
@@ -662,6 +898,7 @@ internal sealed class PropertyValueStore
         if (entry.Value is AnimatedEntry animated)
         {
             entry.Value = animated.BaseValue;
+            entry.RawValue = animated.BaseRawValue;
             entry.Source = animated.BaseSource;
         }
     }
@@ -670,6 +907,7 @@ internal sealed class PropertyValueStore
     {
         // After WriteSlot updated the base cache in Value/Source, restore the animation overlay.
         animated.BaseValue = entry.Value!;
+        animated.BaseRawValue = entry.RawValue;
         animated.BaseSource = entry.Source;
         entry.Value = animated;
     }
@@ -747,6 +985,7 @@ internal sealed class PropertyValueStore
     private struct Entry
     {
         public object? Value;       // effective base value, or AnimatedEntry when animating
+        public object? RawValue;    // selected source's uncoerced candidate
         public ValueSource Source;  // effective base source
         public SlotSet? Shadow;     // non-null only when two or more base sources are set at once
     }
@@ -765,7 +1004,8 @@ internal sealed class PropertyValueStore
     {
         private object? _inherited;
         private object? _style;
-        private object? _trigger;
+        private object? _binding;
+        private object? _elementTrigger;
         private object? _local;
         private int _setMask;
 
@@ -777,7 +1017,8 @@ internal sealed class PropertyValueStore
         {
             ValueSource.Inherited => _inherited,
             ValueSource.Style => _style,
-            ValueSource.Trigger => _trigger,
+            ValueSource.Binding => _binding,
+            ValueSource.ElementTrigger => _elementTrigger,
             ValueSource.Local => _local,
             _ => null,
         };
@@ -788,7 +1029,8 @@ internal sealed class PropertyValueStore
             {
                 case ValueSource.Inherited: _inherited = value; break;
                 case ValueSource.Style: _style = value; break;
-                case ValueSource.Trigger: _trigger = value; break;
+                case ValueSource.Binding: _binding = value; break;
+                case ValueSource.ElementTrigger: _elementTrigger = value; break;
                 case ValueSource.Local: _local = value; break;
                 default: return;
             }
@@ -801,7 +1043,8 @@ internal sealed class PropertyValueStore
             {
                 case ValueSource.Inherited: _inherited = null; break;
                 case ValueSource.Style: _style = null; break;
-                case ValueSource.Trigger: _trigger = null; break;
+                case ValueSource.Binding: _binding = null; break;
+                case ValueSource.ElementTrigger: _elementTrigger = null; break;
                 case ValueSource.Local: _local = null; break;
                 default: return;
             }

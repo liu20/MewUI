@@ -1,4 +1,5 @@
 using Aprillz.MewUI.Rendering;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Controls;
 
@@ -44,7 +45,6 @@ public sealed partial class WebView2 : FrameworkElement
     private Color? _defaultBackgroundColor;
     private readonly Dictionary<string, (string FolderPath, CoreWebView2HostResourceAccessKind AccessKind)> _virtualHostNameToFolderMappings = new(StringComparer.OrdinalIgnoreCase);
 
-    private Rendering.IFont? _font;
     private WebViewEnvironmentOptions? _options;
 
     private static readonly ConcurrentDictionary<nint, WebView2> _hostMap = new();
@@ -497,17 +497,29 @@ public sealed partial class WebView2 : FrameworkElement
 
         if (!IsInitialized)
         {
-            _font ??= GetGraphicsFactory().CreateFont(Theme.Metrics.FontFamily, Theme.Metrics.FontSize);
-
             var message = _webViewInfo?.ErrorMessage;
-            context.DrawText(
-                string.IsNullOrWhiteSpace(message) ? "WebView2 (Win32)" : message,
-                Bounds,
-                _font,
-                Theme.Palette.DisabledText,
-                TextAlignment.Center,
-                TextAlignment.Center,
-                string.IsNullOrWhiteSpace(message) ? TextWrapping.NoWrap : TextWrapping.Wrap);
+            string text = string.IsNullOrWhiteSpace(message) ? "WebView2 (Win32)" : message;
+            var bounds = Bounds;
+            var layout = GetGraphicsFactory().TextEngine.GetOrCreateLayout(
+                new TextLayoutRequest
+                {
+                    Text = text.AsMemory(),
+                    Dpi = GetDpi(),
+                    DefaultStyle = new TextRunStyle(Theme.Metrics.FontFamily, Theme.Metrics.FontSize),
+                    Paragraph = new TextParagraphStyle
+                    {
+                        MaxWidth = bounds.Width,
+                        MaxHeight = bounds.Height,
+                        Alignment = TextAlignment.Center,
+                        Wrapping = string.IsNullOrWhiteSpace(message) ? TextWrapping.NoWrap : TextWrapping.Wrap
+                    }
+                },
+                TextLayoutCachePolicy.Content);
+            double y = bounds.Y + Math.Max(0, (bounds.Height - layout.ContentHeight) * 0.5);
+            context.Text.Draw(
+                layout,
+                new Point(bounds.X, y),
+                new TextDrawOptions(Theme.Palette.DisabledText));
         }
     }
 
@@ -524,8 +536,6 @@ public sealed partial class WebView2 : FrameworkElement
 
         try
         {
-            _font?.Dispose();
-            _font = null;
 
             if (_navigationStarting.value != 0)
             {

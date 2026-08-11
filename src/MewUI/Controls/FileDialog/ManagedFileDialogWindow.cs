@@ -22,6 +22,11 @@ internal sealed class ManagedFileDialogWindow : Window
     private SegmentButton _backButton = null!;
 
     private SegmentButton _forwardButton = null!;
+    private Button _acceptButton = null!;
+
+    private const string NAV_BACK = "back";
+    private const string NAV_FORWARD = "forward";
+    private const string NAV_UP = "up";
 
     // Descriptor for a nav-cluster segment (glyph + tooltip + click action).
     private sealed record NavAction(string Id, GlyphKind Glyph, string Tip, Action Run);
@@ -47,11 +52,11 @@ internal sealed class ManagedFileDialogWindow : Window
             _browser.ShowHidden = extras.ShowHiddenFiles;
         }
 
-        Title = ModeTitle(mode);
         ShowInTaskbar = false;
+        this.Bind(TitleProperty, ModeTitle(mode));
         this.Resizable(780, 560);
 
-        _breadcrumb = new FileDialogBreadcrumb(EnterPathEdit);
+        _breadcrumb = new FileDialogBreadcrumb(EnterPathEdit, _browser.ListSubdirectories);
         _grid = BuildGrid();
         _iconView = BuildIconView();
         _viewHost = new Border { Child = _grid };
@@ -91,31 +96,31 @@ internal sealed class ManagedFileDialogWindow : Window
             bottom.IsVisible(false);
         }
 
-        var acceptButton = new Button().Content(AcceptText(mode)).Width(80).OnClick(OnAccept);
-        var cancelButton = new Button().Content(MewUIStrings.CommonCancel.Value).Width(80).OnClick(OnCancel);
+        _acceptButton = new Button().BindContent(AcceptText(mode)).Width(80).OnClick(OnAccept);
+        var cancelButton = new Button().BindContent(MewUIStrings.CommonCancel).Width(80).OnClick(OnCancel);
 
         var buttons = new StackPanel().Horizontal().Spacing(8).Right();
         if (PlatformConventions.Current.ReverseButtonOrder)
         {
             // Trailing-primary platforms place the accept action last, with tab order following the layout.
             cancelButton.TabIndex(8);
-            acceptButton.TabIndex(9);
-            buttons.Children(cancelButton, acceptButton);
+            _acceptButton.TabIndex(9);
+            buttons.Children(cancelButton, _acceptButton);
         }
         else
         {
-            acceptButton.TabIndex(8);
+            _acceptButton.TabIndex(8);
             cancelButton.TabIndex(9);
-            buttons.Children(acceptButton, cancelButton);
+            buttons.Children(_acceptButton, cancelButton);
         }
 
         // Joined nav cluster (back / forward / up): independent command segments wired via
         // PrepareContainer. Back/forward segments are captured so their enabled state can track history.
         var navItems = new[]
         {
-            new NavAction("back", GlyphKind.ChevronLeft, MewUIStrings.FileDialogNavBack.Value, () => _browser.GoBack()),
-            new NavAction("forward", GlyphKind.ChevronRight, MewUIStrings.FileDialogNavForward.Value, () => _browser.GoForward()),
-            new NavAction("up", GlyphKind.ChevronUp, MewUIStrings.FileDialogNavUp.Value, () => _browser.GoParent()),
+            new NavAction(NAV_BACK, GlyphKind.ChevronLeft, MewUIStrings.FileDialogNavBack.Value, () => _browser.GoBack()),
+            new NavAction(NAV_FORWARD, GlyphKind.ChevronRight, MewUIStrings.FileDialogNavForward.Value, () => _browser.GoForward()),
+            new NavAction(NAV_UP, GlyphKind.ChevronUp, MewUIStrings.FileDialogNavUp.Value, () => _browser.GoParent()),
         };
 
         var navGroup = new ButtonGroup()
@@ -135,11 +140,10 @@ internal sealed class ManagedFileDialogWindow : Window
                 seg.TabIndex(1).ToolTip(item.Tip);
                 seg.Click += item.Run;
                 seg.WithTheme((t, c) => c.Width(t.Metrics.BaseControlHeight));
-                if (item.Id == "back") _backButton = seg;
-                else if (item.Id == "forward") _forwardButton = seg;
+                if (item.Id == NAV_BACK) _backButton = seg;
+                else if (item.Id == NAV_FORWARD) _forwardButton = seg;
             });
 
-        FileDialogStyles.Ensure();
         _pathBox = new TextBox().TabIndex(2).StyleName(FileDialogStyles.NullTextBox).Padding(6, 0);
         _pathBox.OnKeyDown(e =>
         {
@@ -233,6 +237,8 @@ internal sealed class ManagedFileDialogWindow : Window
 
         _browser.Changed += OnBrowserChanged;
         _browser.Navigating += OnBrowserNavigating;
+        // Save mode enables the accept action from the name box; other modes track the list selection.
+        _fileName.TextChanged += _ => UpdateAcceptEnabled();
         // Cancel any in-flight background enumeration on close so stale results aren't applied to a torn-down UI.
         Closed += () => _browser.Cancel();
         _browser.Navigate(initialDirectory ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
@@ -255,20 +261,20 @@ internal sealed class ManagedFileDialogWindow : Window
         return string.Equals(Normalize(a), Normalize(b), StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string ModeTitle(FileDialogMode mode) => mode switch
+    private static ObservableValue<string> ModeTitle(FileDialogMode mode) => mode switch
     {
-        FileDialogMode.OpenSingle => MewUIStrings.FileDialogTitleOpenSingle.Value,
-        FileDialogMode.OpenMultiple => MewUIStrings.FileDialogTitleOpenMultiple.Value,
-        FileDialogMode.Save => MewUIStrings.FileDialogTitleSave.Value,
-        FileDialogMode.SelectFolder => MewUIStrings.FileDialogTitleSelectFolder.Value,
-        _ => MewUIStrings.FileDialogTitleFallback.Value,
+        FileDialogMode.OpenSingle => MewUIStrings.FileDialogTitleOpenSingle,
+        FileDialogMode.OpenMultiple => MewUIStrings.FileDialogTitleOpenMultiple,
+        FileDialogMode.Save => MewUIStrings.FileDialogTitleSave,
+        FileDialogMode.SelectFolder => MewUIStrings.FileDialogTitleSelectFolder,
+        _ => MewUIStrings.FileDialogTitleFallback,
     };
 
-    private static string AcceptText(FileDialogMode mode) => mode switch
+    private static ObservableValue<string> AcceptText(FileDialogMode mode) => mode switch
     {
-        FileDialogMode.Save => MewUIStrings.FileDialogAcceptSave.Value,
-        FileDialogMode.SelectFolder => MewUIStrings.FileDialogAcceptSelect.Value,
-        _ => MewUIStrings.FileDialogAcceptOpen.Value,
+        FileDialogMode.Save => MewUIStrings.FileDialogAcceptSave,
+        FileDialogMode.SelectFolder => MewUIStrings.FileDialogAcceptSelect,
+        _ => MewUIStrings.FileDialogAcceptOpen,
     };
 
     private GridView BuildGrid()
@@ -470,6 +476,7 @@ internal sealed class ManagedFileDialogWindow : Window
         RefreshActiveView(); // entries were just cleared -> shows empty until the load completes
         _grid.SelectedIndex = -1;
         _iconView.SelectedIndex = -1;
+        UpdateAcceptEnabled();
     }
 
     private void OnBrowserChanged()
@@ -479,6 +486,7 @@ internal sealed class ManagedFileDialogWindow : Window
         _forwardButton.IsEnabled = _browser.CanGoForward;
         RebuildBreadcrumb();
         SyncPlacesSelection();
+        UpdateAcceptEnabled();
     }
 
     // Right -> left: highlight the place whose path matches the current directory (or clear if none),
@@ -527,22 +535,52 @@ internal sealed class ManagedFileDialogWindow : Window
 
     private void OnViewSelectionChanged()
     {
-        if (_mode is FileDialogMode.Save)
+        if (_mode is not FileDialogMode.Save)
         {
-            return;
+            int index = ActiveSelectedIndex;
+            if (index >= 0 && index < _browser.Entries.Count)
+            {
+                var entry = _browser.Entries[index];
+                if (!entry.IsDirectory && _mode is FileDialogMode.OpenSingle or FileDialogMode.OpenMultiple)
+                {
+                    _fileName.Text = entry.Name;
+                }
+            }
         }
 
+        UpdateAcceptEnabled();
+    }
+
+    // Mirror the accept action's own preconditions so it is only clickable (and only reachable by its
+    // access key) when it would do something: pick a file, navigate into a folder, or save a named file.
+    private void UpdateAcceptEnabled()
+    {
+        _acceptButton.IsEnabled = _mode switch
+        {
+            FileDialogMode.SelectFolder => true,
+            FileDialogMode.Save => (_fileName.Text?.Trim().Length ?? 0) > 0,
+            FileDialogMode.OpenMultiple => HasSelectedFile(),
+            _ => HasActiveSelection(),
+        };
+    }
+
+    private bool HasActiveSelection()
+    {
         int index = ActiveSelectedIndex;
-        if (index < 0 || index >= _browser.Entries.Count)
+        return index >= 0 && index < _browser.Entries.Count;
+    }
+
+    private bool HasSelectedFile()
+    {
+        foreach (int index in ActiveSelectedIndices)
         {
-            return;
+            if (index >= 0 && index < _browser.Entries.Count && !_browser.Entries[index].IsDirectory)
+            {
+                return true;
+            }
         }
 
-        var entry = _browser.Entries[index];
-        if (!entry.IsDirectory && _mode is FileDialogMode.OpenSingle or FileDialogMode.OpenMultiple)
-        {
-            _fileName.Text = entry.Name;
-        }
+        return false;
     }
 
     private void OnViewDoubleClick()
@@ -609,9 +647,18 @@ internal sealed class ManagedFileDialogWindow : Window
             default: // OpenSingle
             {
                 int index = ActiveSelectedIndex;
-                if (index >= 0 && index < _browser.Entries.Count && !_browser.Entries[index].IsDirectory)
+                if (index >= 0 && index < _browser.Entries.Count)
                 {
-                    Accept([_browser.Entries[index].FullPath]);
+                    var entry = _browser.Entries[index];
+                    if (entry.IsDirectory)
+                    {
+                        // A selected folder opens into it, matching the double-click convention.
+                        _browser.Navigate(entry.FullPath);
+                    }
+                    else
+                    {
+                        Accept([entry.FullPath]);
+                    }
                 }
                 break;
             }
@@ -620,38 +667,53 @@ internal sealed class ManagedFileDialogWindow : Window
 
     protected override void OnKeyDown(KeyEventArgs e)
     {
-        // A focused child consumes Escape first (path edit, open dropdown); an unhandled one cancels.
+        // A focused child consumes keys first (path edit, open dropdown); unhandled ones drive navigation.
         base.OnKeyDown(e);
-
-        if (!e.Handled && !_editingPath && IsEditPathShortcut(e))
+        if (e.Handled)
         {
-            EnterPathEdit();
-            e.Handled = true;
             return;
         }
 
-        if (!e.Handled && e.Key == Key.Escape)
+        var conventions = PlatformConventions.Current;
+
+        if (!_editingPath && MatchesAny(conventions.EditLocationGestures, e))
+        {
+            EnterPathEdit();
+            e.Handled = true;
+        }
+        else if (conventions.NavigateUpGesture.Matches(e))
+        {
+            _browser.GoParent();
+            e.Handled = true;
+        }
+        else if (conventions.NavigateBackGesture.Matches(e))
+        {
+            _browser.GoBack();
+            e.Handled = true;
+        }
+        else if (conventions.NavigateForwardGesture.Matches(e))
+        {
+            _browser.GoForward();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape)
         {
             e.Handled = true;
             OnCancel();
         }
     }
 
-    // Switch the address bar to text entry, using each platform's convention.
-    private static bool IsEditPathShortcut(KeyEventArgs e)
+    private static bool MatchesAny(IReadOnlyList<KeyGesture> gestures, KeyEventArgs e)
     {
-        if (OperatingSystem.IsMacOS())
+        for (int i = 0; i < gestures.Count; i++)
         {
-            // Finder "Go to Folder".
-            return e.MetaKey && e.ShiftKey && e.Key == Key.G;
+            if (gestures[i].Matches(e))
+            {
+                return true;
+            }
         }
 
-        // Windows + Linux/GTK location bar: Ctrl+L. Windows also allows Explorer's Alt+D.
-        if (e.ControlKey && e.Key == Key.L)
-        {
-            return true;
-        }
-        return OperatingSystem.IsWindows() && e.AltKey && e.Key == Key.D;
+        return false;
     }
 
     private void OnCancel()
@@ -770,27 +832,16 @@ internal static class FileDialogStyles
     public const string NullTextBox = "null-textbox";
     public const string AddressBar = "address-bar";
 
-    private static bool _registered;
-
-    public static void Ensure()
+    internal static void Register(StyleSheet sheet)
     {
-        if (_registered)
-        {
-            return;
-        }
-        _registered = true;
-
-        Application.Current.StyleSheet.Define(NullTextBox, () => new Style(typeof(TextBox))
-        {
-            BasedOn = Style.ForType<TextBox>(),
-            Setters =
+        sheet.Define(NullTextBox, () => Style.DeriveFromDefault<TextBox>(
+            setters:
             [
                 Setter.Create(Control.BorderThicknessProperty, 0.0),
                 Setter.Create(Control.BackgroundProperty,  Color.Transparent),
-            ],
-        });
+            ]));
 
-        Application.Current.StyleSheet.Define(AddressBar, () => new Style(typeof(ContentControl))
+        sheet.Define(AddressBar, () => new Style(typeof(ContentControl))
         {
             Transitions = [Transition.Create(Control.BorderBrushProperty)],
             Setters =

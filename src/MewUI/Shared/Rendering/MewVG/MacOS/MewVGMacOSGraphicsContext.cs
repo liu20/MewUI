@@ -456,168 +456,6 @@ internal sealed partial class MewVGMacOSGraphicsContext
 
     #region Text Rendering
 
-    protected override void DrawTextCore(ReadOnlySpan<char> text, Rect bounds, IFont font, Color color,
-        TextAlignment horizontalAlignment = TextAlignment.Left,
-        TextAlignment verticalAlignment = TextAlignment.Top,
-        TextWrapping wrapping = TextWrapping.NoWrap,
-        TextTrimming trimming = TextTrimming.None)
-    {
-        if (text.IsEmpty)
-        {
-            return;
-        }
-
-        if (font is not CoreTextFont ct)
-        {
-            return;
-        }
-
-        // Compute raster extent.
-        Size measured;
-        if (wrapping == TextWrapping.NoWrap)
-        {
-            measured = MeasureText(text, font);
-        }
-        else
-        {
-            double maxWidth = bounds.Width > 0 ? bounds.Width : MeasureText(text, font).Width;
-            measured = MeasureText(text, font, maxWidth);
-        }
-
-        double targetWidthDip = measured.Width;
-        if (bounds.Width > 0 && !double.IsInfinity(bounds.Width) && !double.IsNaN(bounds.Width))
-        {
-            if (wrapping != TextWrapping.NoWrap)
-            {
-                // For wrapped text, use bounds width so Rasterize wraps at the same width
-                // as Measure. Using the narrower measured.Width would cause different line breaks.
-                targetWidthDip = bounds.Width;
-            }
-            else if (trimming != TextTrimming.None)
-            {
-                targetWidthDip = Math.Min(targetWidthDip, bounds.Width);
-            }
-        }
-
-        int widthPx = Math.Max(1, LayoutRounding.CeilToPixelInt(targetWidthDip, DpiScale));
-
-        double targetHeightDip = measured.Height;
-        if (bounds.Height > 0 && !double.IsInfinity(bounds.Height) && !double.IsNaN(bounds.Height))
-        {
-            targetHeightDip = Math.Min(targetHeightDip, bounds.Height);
-        }
-        int heightPx = Math.Max(1, LayoutRounding.CeilToPixelInt(targetHeightDip, DpiScale));
-
-        // Early clip cull: skip text entirely outside the current scissor region. Use the FULL transform (4-corner
-        // AABB) so rotated text is not wrongly culled - a translation-only box left rotated text blank.
-        if (_clipBoundsWorld.HasValue)
-        {
-            var c = _clipBoundsWorld.Value;
-            var textWorld = TransformRectToWorldAABB(new Rect(bounds.X, bounds.Y, widthPx / DpiScale, heightPx / DpiScale));
-            if (textWorld.Right <= c.X || textWorld.X >= c.Right || textWorld.Bottom <= c.Y || textWorld.Y >= c.Bottom)
-            {
-                return;
-            }
-        }
-
-        double drawX = bounds.X;
-        double drawY = bounds.Y;
-        double widthDip = widthPx / DpiScale;
-        double heightDip = heightPx / DpiScale;
-
-        if (bounds.Width > 0)
-        {
-            drawX = horizontalAlignment switch
-            {
-                TextAlignment.Center => bounds.X + (bounds.Width - widthDip) / 2.0,
-                TextAlignment.Right => bounds.X + (bounds.Width - widthDip),
-                _ => bounds.X
-            };
-        }
-
-        if (bounds.Height > 0)
-        {
-            drawY = verticalAlignment switch
-            {
-                TextAlignment.Center => bounds.Y + (bounds.Height - heightDip) / 2.0,
-                TextAlignment.Bottom => bounds.Y + (bounds.Height - heightDip),
-                _ => bounds.Y
-            };
-        }
-
-        // Text is rasterized into a bitmap texture; snap placement to device pixels to avoid sampling blur
-        // when bounds introduce fractional DIP coordinates (common during layout and live resize).
-        // Skip snapping during transitions to avoid visible jumping.
-        if (_textPixelSnap)
-        {
-            drawX = LayoutRounding.RoundToPixel(drawX, DpiScale);
-            drawY = LayoutRounding.RoundToPixel(drawY, DpiScale);
-        }
-
-        if (!_textCache.TryGetOrCreate(
-                ct,
-                text,
-                widthPx,
-                heightPx,
-                (uint)Math.Round(DpiScale * 96.0),
-                color,
-                horizontalAlignment,
-                TextAlignment.Top,
-                wrapping,
-                trimming,
-                out int imageId,
-                out int bitmapWidthPx,
-                out int bitmapHeightPx))
-        {
-            return;
-        }
-
-        // The bitmap may be wider than widthPx (Rasterize adds AA margin for right/center alignment).
-        // Use the actual bitmap dimensions for the image pattern so texels map 1:1 to device pixels.
-        double bitmapWidthDip = bitmapWidthPx / DpiScale;
-        double bitmapHeightDip = bitmapHeightPx / DpiScale;
-        var paint = _vg.ImagePattern((float)drawX, (float)drawY, (float)bitmapWidthDip, (float)bitmapHeightDip, 0, imageId, 1.0f);
-
-        // Clip the drawn rect to bounds so text doesn't visually overflow.
-        // The ImagePattern is anchored at (drawX, drawY) in absolute coords, so we can
-        // clip the fill rect on any side without shifting the texture.
-        double rectX = drawX;
-        double rectY = drawY;
-        double rectW = Math.Max(widthDip, Math.Min(bitmapWidthDip, widthDip + (bitmapWidthDip - widthDip)));
-        double rectH = heightDip;
-        double snapTolerance = 2.0 / DpiScale;
-        if (bounds.Width > 0 && !double.IsInfinity(bounds.Width))
-        {
-            // Left clip: text extends left of bounds (e.g. right-aligned overflow).
-            if (rectX < bounds.X)
-            {
-                double leftClip = bounds.X - rectX;
-                rectW -= leftClip;
-                rectX = bounds.X;
-            }
-
-            // Right clip: text extends right of bounds.
-            double maxRight = bounds.X + bounds.Width;
-            if (rectX + rectW > maxRight + snapTolerance)
-            {
-                rectW = maxRight - rectX;
-            }
-        }
-        if (bounds.Height > 0 && !double.IsInfinity(bounds.Height))
-        {
-            double maxBottom = bounds.Y + bounds.Height;
-            if (rectY + rectH > maxBottom)
-            {
-                rectH = maxBottom - rectY;
-            }
-        }
-
-        _vg.BeginPath();
-        _vg.Rect((float)rectX, (float)rectY, (float)rectW, (float)rectH);
-        _vg.FillPaint(paint);
-        _vg.Fill();
-    }
-
     private Size MeasureTextCore(ReadOnlySpan<char> text, IFont font)
     {
         if (text.IsEmpty) return Size.Empty;
@@ -642,8 +480,8 @@ internal sealed partial class MewVGMacOSGraphicsContext
     public override Size MeasureText(ReadOnlySpan<char> text, IFont font, double maxWidth)
         => MeasureTextCore(text, font, maxWidth);
 
-    public override TextLayout CreateTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, in TextLayoutConstraints constraints)
+    public override BackendTextLayout CreateBackendTextLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, in BackendTextLayoutConstraints constraints)
     {
         var bounds = constraints.Bounds;
         var safeBounds = new Rect(bounds.X, bounds.Y,
@@ -663,7 +501,7 @@ internal sealed partial class MewVGMacOSGraphicsContext
 
         double effectiveMaxWidth = safeBounds.Width > 0 ? safeBounds.Width : measured.Width;
 
-        return new TextLayout
+        return new BackendTextLayout
         {
             MeasuredSize = measured,
             EffectiveBounds = safeBounds,
@@ -672,16 +510,16 @@ internal sealed partial class MewVGMacOSGraphicsContext
         };
     }
 
-    public override void DrawTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, TextLayout layout, Color color)
+    public override void DrawBackendTextLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, BackendTextLayout layout, Color color)
         => DrawTextLayoutCore(text, format, layout, color, owner: null);
 
-    public override void DrawTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, TextLayout layout, Color color, object? owner)
+    public override void DrawBackendTextLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, BackendTextLayout layout, Color color, object? owner)
         => DrawTextLayoutCore(text, format, layout, color, owner);
 
     private void DrawTextLayoutCore(ReadOnlySpan<char> text,
-        TextFormat format, TextLayout layout, Color color, object? owner)
+        BackendTextFormat format, BackendTextLayout layout, Color color, object? owner)
     {
         if (text.IsEmpty) return;
         if (format.Font is not CoreTextFont ct) return;

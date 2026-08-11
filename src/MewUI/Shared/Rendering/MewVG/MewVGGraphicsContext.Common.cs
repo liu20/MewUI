@@ -729,10 +729,27 @@ internal sealed partial class MewVGWin32GraphicsContext : GraphicsContextBase
         }
 
         NVGpaint paint;
+        var fillRect = destRect;
 
         if (sourceRect is null)
         {
-            paint = _vg.ImagePattern((float)destRect.X, (float)destRect.Y, (float)destRect.Width, (float)destRect.Height, 0f, imageId, alpha);
+            // Within a pixel of native size: snap the quad so GL sampling is identity, or the
+            // fractional-DPI resample softens the bitmap's pixel-snapped text.
+            if (_transform.M12 == 0f && _transform.M21 == 0f && _transform.M11 == 1f && _transform.M22 == 1f)
+            {
+                double tx = _transform.M31;
+                double ty = _transform.M32;
+                var world = new Rect(destRect.X + tx, destRect.Y + ty, destRect.Width, destRect.Height);
+                var snapped = LayoutRounding.SnapRectEdgesToPixels(world, DpiScale);
+                if (Math.Abs(snapped.Width * DpiScale - imageWidthPx) <= 1.0 &&
+                    Math.Abs(snapped.Height * DpiScale - imageHeightPx) <= 1.0)
+                {
+                    snapped = new Rect(snapped.X, snapped.Y, imageWidthPx / DpiScale, imageHeightPx / DpiScale);
+                }
+                fillRect = new Rect(snapped.X - tx, snapped.Y - ty, snapped.Width, snapped.Height);
+            }
+
+            paint = _vg.ImagePattern((float)fillRect.X, (float)fillRect.Y, (float)fillRect.Width, (float)fillRect.Height, 0f, imageId, alpha);
         }
         else
         {
@@ -768,7 +785,7 @@ internal sealed partial class MewVGWin32GraphicsContext : GraphicsContextBase
         bool isAxisAligned = _transform.M12 == 0f && _transform.M21 == 0f;
         if (isAxisAligned) _vg.ShapeAntiAlias(false);
         _vg.BeginPath();
-        _vg.Rect((float)destRect.X, (float)destRect.Y, (float)destRect.Width, (float)destRect.Height);
+        _vg.Rect((float)fillRect.X, (float)fillRect.Y, (float)fillRect.Width, (float)fillRect.Height);
         _vg.FillPaint(paint);
         _vg.Fill();
         if (isAxisAligned) _vg.ShapeAntiAlias(true);

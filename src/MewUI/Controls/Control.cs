@@ -1,4 +1,5 @@
 using Aprillz.MewUI.Rendering;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Controls;
 
@@ -53,10 +54,32 @@ public abstract class Control : TextElement
     /// </summary>
     public static readonly MewProperty<bool> IsPressedProperty = IsPressedPropertyKey.Property;
 
+    private static readonly IReadOnlyList<ValidationError> EMPTY_VALIDATION_ERRORS =
+        Array.Empty<ValidationError>();
+
+    private static readonly MewPropertyKey<bool> HasValidationErrorPropertyKey =
+        MewProperty<bool>.RegisterReadOnly<Control>(nameof(HasValidationError), false,
+            MewPropertyOptions.AffectsVisualState);
+
+    /// <summary>
+    /// Gets whether any binding on this control currently has a validation error.
+    /// </summary>
+    public static readonly MewProperty<bool> HasValidationErrorProperty =
+        HasValidationErrorPropertyKey.Property;
+
+    private static readonly MewPropertyKey<IReadOnlyList<ValidationError>> ValidationErrorsPropertyKey =
+        MewProperty<IReadOnlyList<ValidationError>>.RegisterReadOnly<Control>(
+            nameof(ValidationErrors),
+            EMPTY_VALIDATION_ERRORS);
+
+    /// <summary>
+    /// Gets an immutable snapshot of the current per-property binding validation errors on this control.
+    /// </summary>
+    public static readonly MewProperty<IReadOnlyList<ValidationError>> ValidationErrorsProperty =
+        ValidationErrorsPropertyKey.Property;
+
     #endregion
 
-    private IFont? _font;
-    private uint _fontDpi;
     private Point _lastMousePositionInWindow;
 
     // VisualState system fields
@@ -71,7 +94,7 @@ public abstract class Control : TextElement
 
     private Style? _style;
     private string? _styleName;
-    private Dictionary<string, UIElement>? _parts;
+    private Dictionary<int, ValidationError>? _validationErrors;
 
     private PathGeometry? _sharedOuterPath;
     private PathGeometry? _sharedInnerPath;
@@ -158,6 +181,16 @@ public abstract class Control : TextElement
     public bool IsPressed => GetValue(IsPressedProperty);
 
     /// <summary>
+    /// Gets whether any binding on this control currently has an error.
+    /// </summary>
+    public bool HasValidationError => GetValue(HasValidationErrorProperty);
+
+    /// <summary>
+    /// Gets an immutable snapshot of the current per-property binding errors on this control.
+    /// </summary>
+    public IReadOnlyList<ValidationError> ValidationErrors => GetValue(ValidationErrorsProperty);
+
+    /// <summary>
     /// Named style key. Resolved from the nearest StyleSheet up the tree.
     /// Higher priority than StyleSheet type rules and Theme style.
     /// </summary>
@@ -187,36 +220,78 @@ public abstract class Control : TextElement
     protected void SetPressed(bool pressed) => SetValue(IsPressedPropertyKey, pressed);
 
     /// <summary>
-    /// Registers a child element as a named part for TargetSetter resolution.
-    /// </summary>
-    protected void RegisterPart(string name, UIElement element)
-    {
-        _parts ??= new();
-        _parts[name] = element;
-    }
-
-    /// <summary>
-    /// Gets a registered named part. Returns null if not found.
-    /// </summary>
-    internal UIElement? GetPart(string name)
-        => _parts?.GetValueOrDefault(name);
-
-    /// <summary>
     /// Computes the current visual state. Override to include control-specific state.
     /// Called once per render frame before OnRender.
     /// </summary>
     protected virtual VisualState ComputeVisualState()
     {
         var f = VisualStateFlags.None;
+        if (HasValidationError)
+        {
+            f |= VisualStateFlags.Invalid;
+        }
+
         var enabled = IsEffectivelyEnabled;
         if (enabled)
         {
             f |= VisualStateFlags.Enabled;
             if (IsMouseOver || IsMouseCaptured) f |= VisualStateFlags.Hot;
-            if (IsFocused || IsFocusWithin) f |= VisualStateFlags.Focused;
+            if ((IsFocused || IsFocusWithin) &&
+                (FindVisualRoot() is not Window window || window.IsActive))
+            {
+                f |= VisualStateFlags.Focused;
+            }
             if (IsPressed) f |= VisualStateFlags.Pressed;
         }
         return new VisualState { Flags = f };
+    }
+
+    internal override void OnBindingErrorChanged(int propertyId, BindingError? error)
+    {
+        bool changed;
+        if (error?.Status != BindingStatus.ValidationError)
+        {
+            changed = _validationErrors?.Remove(propertyId) == true;
+        }
+        else
+        {
+            var property = MewPropertyRegistry.GetProperty(propertyId);
+            if (property == null)
+            {
+                return;
+            }
+
+            var validationError = new ValidationError(property, error.Message);
+            _validationErrors ??= new Dictionary<int, ValidationError>(capacity: 2);
+            changed = !_validationErrors.TryGetValue(propertyId, out var previous) ||
+                previous != validationError;
+            _validationErrors[propertyId] = validationError;
+        }
+
+        if (!changed)
+        {
+            return;
+        }
+
+        IReadOnlyList<ValidationError> snapshot;
+        if (_validationErrors == null || _validationErrors.Count == 0)
+        {
+            snapshot = EMPTY_VALIDATION_ERRORS;
+        }
+        else
+        {
+            var entries = _validationErrors.ToArray();
+            Array.Sort(entries, static (left, right) => left.Key.CompareTo(right.Key));
+            var errors = new ValidationError[entries.Length];
+            for (int i = 0; i < entries.Length; i++)
+            {
+                errors[i] = entries[i].Value;
+            }
+            snapshot = Array.AsReadOnly(errors);
+        }
+
+        SetValue(ValidationErrorsPropertyKey, snapshot);
+        SetValue(HasValidationErrorPropertyKey, snapshot.Count != 0);
     }
 
     /// <summary>
@@ -247,7 +322,7 @@ public abstract class Control : TextElement
     }
 
     private ControlTemplateInstance? _templateInstance;
-    private bool _templateThemeStale;
+    private bool _templateStale;
 
     /// <summary>
     /// Gets or sets the template that provides this control's visual tree.
@@ -265,9 +340,9 @@ public abstract class Control : TextElement
     /// </summary>
     protected bool ApplyTemplate()
     {
-        if (_templateThemeStale)
+        if (_templateStale)
         {
-            _templateThemeStale = false;
+            _templateStale = false;
             DetachTemplateInstance();
         }
 
@@ -440,23 +515,14 @@ public abstract class Control : TextElement
 
     internal void SetStyle(Style? style, bool snap = true)
     {
-        var oldStyle = _style;
+        style?.Freeze();
         _style = style;
         _styleContextVersion = ContextVersion;
 
-        // Values the old style set but the new one does not would otherwise linger
-        // with Source=Style after the swap.
-        if (oldStyle != null && !ReferenceEquals(oldStyle, style))
-        {
-            ClearStaleStyleValues(oldStyle, style);
-        }
-
         // Apply the full style chain (base setters + matching triggers) immediately so
         // layout-affecting properties and current-state visuals are correct before the
-        // next Measure/Arrange/Render. Using ApplyStyleValues (not a lightweight pre-apply)
-        // is required so _activeTriggerPropertyIds and _visualState stay in sync -
-        // otherwise a later state transition while offscreen (render culled) fails to
-        // restore trigger-stamped values because bookkeeping was skipped here.
+        // next Measure/Arrange/Render. ApplyStyleValues also replaces the previous final
+        // winner map, so properties absent from the new style are cleared in the same pass.
         var flags = ComputeVisualState().Flags;
         _visualState = new VisualState { Flags = flags };
         ApplyStyleValues(flags, snap || _forceApplyStyle);
@@ -474,35 +540,40 @@ public abstract class Control : TextElement
     /// <param name="animate">When true, a runtime style swap applies with the new style's transitions.</param>
     internal void ResolveAndApplyStyle(bool animate = false)
     {
-        Style? resolved = null;
+        StyleSheet? applicationStyleSheet = Application.IsRunning
+            ? Application.Current.StyleSheet
+            : null;
+        Style? resolved;
 
         // 1. StyleName → walk StyleSheet chain
         if (_styleName != null)
         {
-            resolved = FindNamedStyle(_styleName);
-            if (resolved == null && !Application.IsRunning)
+            resolved = StyleScopeResolver.Resolve(this, _styleName, applicationStyleSheet);
+            if (resolved == null)
             {
-                // StyleSheet not available yet (Application not running) - retry later
-                _styleNameResolved = false;
-                return;
+                bool isAttached = FindVisualRoot() is Window;
+                if (!isAttached || applicationStyleSheet == null)
+                {
+                    // A detached control or a headless tree without an Application does not yet
+                    // have the complete scope chain. Retry on attach or the next layout pass.
+                    _styleNameResolved = false;
+                    return;
+                }
+
+                string scopes = StyleScopeResolver.DescribeScopes(this, includesApplication: true);
+                throw new InvalidOperationException(
+                    $"StyleName '{_styleName}' was not found for control type '{GetType().FullName}'. " +
+                    $"Searched scopes: {scopes}.");
             }
+        }
+
+        // 2. StyleSheet type rule → nearest container type-matched rule
+        else
+        {
+            resolved = StyleScopeResolver.Resolve(this, styleName: null, applicationStyleSheet);
         }
 
         _styleNameResolved = true;
-
-        // 2. StyleSheet type rule → nearest container type-matched rule
-        if (resolved == null)
-        {
-            var controlType = GetType();
-            for (Element? current = ContextParent; current != null; current = current.ContextParent)
-            {
-                if (current is FrameworkElement fe)
-                {
-                    resolved = fe.StyleSheet?.GetByType(controlType);
-                    if (resolved != null) break;
-                }
-            }
-        }
 
         // 3. Theme default style (walk type hierarchy)
         if (resolved == null)
@@ -516,23 +587,17 @@ public abstract class Control : TextElement
             }
         }
 
+        if (resolved != null && !resolved.TargetType.IsAssignableFrom(GetType()))
+        {
+            throw new InvalidOperationException(
+                $"Style targeting '{resolved.TargetType.FullName}' cannot be applied to " +
+                $"control type '{GetType().FullName}'.");
+        }
+
         // Transitions only make sense for a runtime swap on an attached, already-styled
         // control; initial attach, theme change, and detached resolution snap.
         bool snap = !animate || _style == null || FindVisualRoot() is not Window;
         SetStyle(resolved, snap);
-    }
-
-    private Style? FindNamedStyle(string name)
-    {
-        for (Element? current = this; current != null; current = current.ContextParent)
-        {
-            if (current is FrameworkElement fe && fe.StyleSheet != null)
-            {
-                var style = fe.StyleSheet.Get(name);
-                if (style != null) return style;
-            }
-        }
-        return Application.IsRunning ? Application.Current.StyleSheet?.Get(name) : null;
     }
 
     protected override sealed void ResolveVisualState(bool snap)
@@ -577,98 +642,187 @@ public abstract class Control : TextElement
     }
 
     /// <summary>
-    /// Resolves and applies property values from Style + StateTrigger based on current flags.
-    /// Trigger tracking is done at the top level (not per recursion) to avoid
-    /// BasedOn recursion clobbering the active trigger set.
+    /// Resolves the final Style candidate for each property and applies the difference from the
+    /// previous map. StateTrigger values are provenance within the Style tier, not a separate
+    /// property-system source.
     /// </summary>
     private void ApplyStyleValues(VisualStateFlags flags, bool snap = false)
     {
-        // 1. Collect ALL trigger property IDs from the entire style chain
-        _newTriggerPropertyIds ??= new HashSet<int>();
-        _newTriggerPropertyIds.Clear();
-        CollectTriggerProperties(_style, flags, _newTriggerPropertyIds);
+        _nextStyleValues ??= new();
+        _nextStyleValues.Clear();
+        CollectResolvedValues(_style, flags, Theme, _nextStyleValues);
 
-        // 2. Restore properties that were triggered before but not now
-        if (_activeTriggerPropertyIds != null && _style != null)
+        if (_appliedStyleValues != null)
         {
-            foreach (var id in _activeTriggerPropertyIds)
+            foreach (var pair in _appliedStyleValues)
             {
-                if (!_newTriggerPropertyIds.Contains(id))
-                    RestoreFromStyle(_style, id, snap);
+                if (!_nextStyleValues.ContainsKey(pair.Key))
+                {
+                    ApplyStyleCandidate(pair.Value.Property, value: null, hasValue: false, snap);
+                }
             }
         }
 
-        // 3. Apply base setters + matching triggers through the chain
-        ApplyStyleChain(_style, flags, snap);
+        foreach (var pair in _nextStyleValues)
+        {
+            ApplyStyleCandidate(pair.Value.Property, pair.Value.Value, hasValue: true, snap);
+        }
 
-        // 4. Swap active sets
-        (_activeTriggerPropertyIds, _newTriggerPropertyIds) =
-            (_newTriggerPropertyIds, _activeTriggerPropertyIds);
+        (_appliedStyleValues, _nextStyleValues) = (_nextStyleValues, _appliedStyleValues);
     }
 
-    // Tracks which property IDs were set by triggers in the previous state.
-    // Reused across calls to avoid allocation.
-    private HashSet<int>? _activeTriggerPropertyIds;
+    private Dictionary<int, ResolvedStyleValue>? _appliedStyleValues;
+    private Dictionary<int, ResolvedStyleValue>? _nextStyleValues;
 
-    private HashSet<int>? _newTriggerPropertyIds;
+    private readonly record struct ResolvedStyleValue(
+        MewProperty Property,
+        object Value,
+        Style DeclaringStyle,
+        StateTrigger? Trigger);
 
-    private static void CollectTriggerProperties(Style? style, VisualStateFlags flags, HashSet<int> result)
+#if DEBUG
+    internal StyleCascadeTrace GetStyleCascadeTrace(MewProperty property)
     {
-        if (style == null) return;
-        CollectTriggerProperties(style.BasedOn, flags, result);
+        ArgumentNullException.ThrowIfNull(property);
+
+        var entries = new List<StyleCascadeEntryTrace>();
+        int finalEntryIndex = -1;
+        CollectStyleCascadeTrace(
+            _style,
+            property,
+            _visualState.Flags,
+            Theme,
+            entries,
+            ref finalEntryIndex);
+
+        ResolvedStyleValue applied = default;
+        bool hasStyleCandidate = _appliedStyleValues?.TryGetValue(property.Id, out applied) == true;
+        object? styleValue = hasStyleCandidate ? applied.Value : null;
+
+        if (finalEntryIndex >= 0)
+        {
+            var finalEntry = entries[finalEntryIndex];
+            entries[finalEntryIndex] = finalEntry with
+            {
+                IsFinal = true,
+                IsWinner = hasStyleCandidate && !finalEntry.IsUnset,
+            };
+        }
+
+        var valueTrace = GetPropertyValueTrace(property);
+        return new StyleCascadeTrace(
+            property,
+            entries.ToArray(),
+            hasStyleCandidate,
+            styleValue,
+            valueTrace.EffectiveSource,
+            valueTrace.IsAnimated);
+    }
+
+    private static void CollectStyleCascadeTrace(
+        Style? style,
+        MewProperty property,
+        VisualStateFlags flags,
+        Theme theme,
+        List<StyleCascadeEntryTrace> entries,
+        ref int finalEntryIndex)
+    {
+        if (style == null)
+        {
+            return;
+        }
+
+        CollectStyleCascadeTrace(
+            style.BasedOn,
+            property,
+            flags,
+            theme,
+            entries,
+            ref finalEntryIndex);
+
+        CollectStyleCascadeSetters(
+            style,
+            trigger: null,
+            style.Setters,
+            property,
+            isActive: true,
+            theme,
+            entries,
+            ref finalEntryIndex);
 
         for (int i = 0; i < style.Triggers.Count; i++)
         {
             var trigger = style.Triggers[i];
-            if (trigger.Matches(flags))
-            {
-                for (int j = 0; j < trigger.Setters.Count; j++)
-                {
-                    if (trigger.Setters[j] is Setter s)
-                        result.Add(s.Property.Id);
-                }
-            }
+            CollectStyleCascadeSetters(
+                style,
+                trigger,
+                trigger.Setters,
+                property,
+                trigger.Matches(flags),
+                theme,
+                entries,
+                ref finalEntryIndex);
         }
     }
 
-    /// <summary>
-    /// Collects final (winning) values from the entire style chain, then applies once.
-    /// BasedOn values are overridden by derived style values for the same property.
-    /// This avoids intermediate animations when BasedOn and derived styles both set the same property.
-    /// </summary>
-    private void ApplyStyleChain(Style? style, VisualStateFlags flags, bool snap)
+    private static void CollectStyleCascadeSetters(
+        Style style,
+        StateTrigger? trigger,
+        IReadOnlyList<SetterBase> setters,
+        MewProperty property,
+        bool isActive,
+        Theme theme,
+        List<StyleCascadeEntryTrace> entries,
+        ref int finalEntryIndex)
     {
-        if (style == null) return;
-
-        // Collect final values: later styles override earlier (BasedOn) ones
-        _resolvedSetters ??= new();
-        _resolvedSetters.Clear();
-        CollectResolvedValues(style, flags, _resolvedSetters);
-
-        // Apply all collected values once
-        var theme = Theme;
-        foreach (var kv in _resolvedSetters)
+        for (int i = 0; i < setters.Count; i++)
         {
-            var (setter, source) = kv.Value;
-            ApplySetter(setter, source, snap);
+            var setter = setters[i];
+            if (!ReferenceEquals(setter.Property, property))
+            {
+                continue;
+            }
+
+            bool isUnset = setter is UnsetSetter;
+            bool hasResolvedValue = setter is Setter valueSetter &&
+                (isActive || valueSetter.ThemeResolver == null);
+            object? resolvedValue = hasResolvedValue
+                ? ((Setter)setter).ResolveValue(theme)
+                : null;
+            int entryIndex = entries.Count;
+            entries.Add(new StyleCascadeEntryTrace(
+                style,
+                trigger,
+                isActive,
+                isUnset,
+                hasResolvedValue,
+                resolvedValue,
+                IsFinal: false,
+                IsWinner: false));
+
+            if (!isActive)
+            {
+                continue;
+            }
+
+            finalEntryIndex = entryIndex;
         }
     }
-
-    private Dictionary<int, (SetterBase Setter, ValueSource Source)>? _resolvedSetters;
+#endif
 
     private static void CollectResolvedValues(Style? style, VisualStateFlags flags,
-        Dictionary<int, (SetterBase Setter, ValueSource Source)> result)
+        Theme theme, Dictionary<int, ResolvedStyleValue> result)
     {
         if (style == null) return;
 
         // BasedOn first (lower priority - will be overwritten by derived)
-        CollectResolvedValues(style.BasedOn, flags, result);
+        CollectResolvedValues(style.BasedOn, flags, theme, result);
 
         // Base setters
         for (int i = 0; i < style.Setters.Count; i++)
         {
             if (style.Setters[i] is Setter s)
-                result[s.Property.Id] = (s, ValueSource.Style);
+                result[s.Property.Id] = new(s.Property, s.ResolveValue(theme), style, Trigger: null);
             else if (style.Setters[i] is UnsetSetter u)
                 result.Remove(u.Property.Id);
         }
@@ -682,99 +836,36 @@ public abstract class Control : TextElement
                 for (int j = 0; j < trigger.Setters.Count; j++)
                 {
                     if (trigger.Setters[j] is Setter s)
-                        result[s.Property.Id] = (s, ValueSource.Trigger);
+                        result[s.Property.Id] = new(s.Property, s.ResolveValue(theme), style, trigger);
+                    else if (trigger.Setters[j] is UnsetSetter u)
+                        result.Remove(u.Property.Id);
                 }
             }
         }
     }
 
-    private void RestoreFromStyle(Style style, int propertyId, bool snap)
+    private void ApplyStyleCandidate(MewProperty property, object? value, bool hasValue, bool snap)
     {
-        // If a higher-priority source (Local) owns this property, don't touch it.
-        if (PropertyStore.GetSource(propertyId) >= ValueSource.Local)
-            return;
+        object? from = PropertyStore.GetCurrentVisualValue(property.Id)
+            ?? GetBindingValue(property);
+        var mutation = hasValue
+            ? PropertyStore.SetValue(property, value, ValueSource.Style)
+            : PropertyStore.ClearSource(property.Id, ValueSource.Style);
 
-        var property = MewPropertyRegistry.GetProperty(propertyId);
-
-        if (!snap && property != null && _style?.FindTransition(propertyId) is Transition transition)
+        if (!snap && mutation.IsEffectiveChange && from != null && mutation.NewValue != null &&
+            _style?.FindTransition(property.Id) is Transition transition)
         {
-            // The store preserves the lower slots under the trigger, so clearing the trigger reveals
-            // the preserved style/inherited/default base directly - no style-chain re-derivation.
-            // Animate the overlay from the old trigger visual to that revealed base.
-            object from = PropertyStore.GetCurrentVisualValue(propertyId) ?? PropertyStore.GetBoxedValue(property);
-            PropertyStore.ClearSource(propertyId, ValueSource.Trigger);
-            object to = PropertyStore.GetBoxedValue(property);
-            Animator.AnimateFromTo(property, from, to, transition.Duration, transition.Easing);
-            return;
-        }
-
-        // Snap: clearing the trigger reveals the preserved lower slot automatically.
-        PropertyStore.ClearSource(propertyId, ValueSource.Trigger);
-    }
-
-    /// <summary>
-    /// Clears Style-sourced values that the old style chain set but the new chain no longer
-    /// sets, so they fall back to default/inherited instead of lingering after a style swap.
-    /// </summary>
-    private void ClearStaleStyleValues(Style oldStyle, Style? newStyle)
-    {
-        for (Style? current = oldStyle; current != null; current = current.BasedOn)
-        {
-            for (int i = 0; i < current.Setters.Count; i++)
-            {
-                if (current.Setters[i] is Setter setter && !StyleChainSetsProperty(newStyle, setter.Property.Id))
-                {
-                    PropertyStore.ClearSource(setter.Property.Id, ValueSource.Style);
-                }
-            }
-        }
-    }
-
-    private static bool StyleChainSetsProperty(Style? style, int propertyId)
-    {
-        while (style != null)
-        {
-            for (int i = 0; i < style.Setters.Count; i++)
-            {
-                if (style.Setters[i] is Setter s && s.Property.Id == propertyId)
-                    return true;
-                if (style.Setters[i] is UnsetSetter u && u.Property.Id == propertyId)
-                    return false;
-            }
-            style = style.BasedOn;
-        }
-        return false;
-    }
-
-    private void ApplySetter(SetterBase setter, ValueSource source, bool snap)
-    {
-        switch (setter)
-        {
-            case Setter s:
-                // Don't override higher-priority sources (e.g. Local beats Trigger/Style)
-                var currentSource = PropertyStore.GetSource(s.Property.Id);
-                if (currentSource > source)
-                    break;
-
-                var value = s.ResolveValue(Theme);
-                if (!snap && _style?.FindTransition(s.Property.Id) is Transition transition)
-                    Animator.Animate(s.Property, value, transition.Duration, transition.Easing, source);
-                else if (source == ValueSource.Style)
-                    PropertyStore.SetStyle(s.Property, value);
-                else
-                    PropertyStore.SetTrigger(s.Property, value);
-                break;
-
-            case TargetSetter ts:
-                GetPart(ts.TargetName)?.SetTargetInternal(ts.Property, ts.ResolveValue(Theme));
-                break;
+            Animator.AnimateFromTo(
+                property,
+                from,
+                mutation.NewValue,
+                transition.Duration,
+                transition.Easing);
         }
     }
 
     protected override void OnThemeChanged(Theme oldTheme, Theme newTheme)
     {
-        _font?.Dispose();
-        _font = null;
         base.OnThemeChanged(oldTheme, newTheme);
 
         // Re-resolve style with new theme's palette colors.
@@ -783,11 +874,19 @@ public abstract class Control : TextElement
         // A template instance is an artifact of the theme it was built under (builds may bake
         // metrics/colors), so it is rebuilt lazily; deferring the detach keeps the theme
         // broadcast walk from mutating the tree it is traversing.
-        if (_templateInstance != null)
+        InvalidateTemplateInstance();
+    }
+
+    /// <summary>Marks the applied template instance for a lazy rebuild.</summary>
+    private void InvalidateTemplateInstance()
+    {
+        if (_templateInstance == null)
         {
-            _templateThemeStale = true;
-            InvalidateMeasure();
+            return;
         }
+
+        _templateStale = true;
+        InvalidateMeasure();
     }
 
     protected override void OnVisualRootChanged(Element? oldRoot, Element? newRoot)
@@ -796,9 +895,8 @@ public abstract class Control : TextElement
 
         if (newRoot == null)
         {
-            // Detached from visual tree - release style and parts references.
+            // Detached from visual tree - release the resolved style reference.
             _style = null;
-            _parts?.Clear();
         }
         else
         {
@@ -810,23 +908,7 @@ public abstract class Control : TextElement
     #endregion
 
     /// <summary>
-    /// Handles font cache invalidation when font MewProperty values change.
-    /// </summary>
-    protected override void OnMewPropertyChanged(MewProperty property)
-    {
-        if (property.Id == FontFamilyProperty.Id ||
-            property.Id == FontSizeProperty.Id ||
-            property.Id == FontWeightProperty.Id)
-        {
-            _font?.Dispose();
-            _font = null;
-        }
-
-        base.OnMewPropertyChanged(property);
-    }
-
-    /// <summary>
-    /// Invalidates the cached font when an inherited font property changes on an ancestor.
+    /// Notifies controls when an inherited font property changes on an ancestor.
     /// Called by the inheritance propagation system.
     /// </summary>
     internal void InvalidateFontCache(MewProperty property)
@@ -835,8 +917,6 @@ public abstract class Control : TextElement
             property.Id == FontSizeProperty.Id ||
             property.Id == FontWeightProperty.Id)
         {
-            _font?.Dispose();
-            _font = null;
             OnFontCacheInvalidated(property);
         }
     }
@@ -845,43 +925,62 @@ public abstract class Control : TextElement
     {
     }
 
-    protected TextMeasurementScope BeginTextMeasurement()
-    {
-        var factory = GetGraphicsFactory();
-        var context = factory.CreateMeasurementContext(GetDpi());
-        var font = GetFont(factory);
-        return new TextMeasurementScope(factory, context, font);
-    }
+    /// <summary>Returns this control's inherited font properties in text-engine form.</summary>
+    protected TextRunStyle GetTextRunStyle()
+        => new(FontFamily, FontSize, FontWeight);
 
-    /// <summary>
-    /// Gets or creates the font for this control. Validates the cached font against
-    /// current property values (which may be inherited from ancestors).
-    /// </summary>
-    protected IFont GetFont(IGraphicsFactory factory)
+    protected Size MeasureEngineText(
+        ReadOnlySpan<char> text,
+        double maxWidth = double.PositiveInfinity,
+        TextWrapping wrapping = TextWrapping.NoWrap)
     {
-        var family = FontFamily;
-        var size = FontSize;
-        var weight = FontWeight;
-        var dpi = GetDpi();
-
-        if (_font != null && _fontDpi == dpi &&
-            _font.Family == family && _font.Size.Equals(size) && _font.Weight == weight)
+        if (text.IsEmpty)
         {
-            return _font;
+            return Size.Empty;
         }
 
-        _font?.Dispose();
-        _font = factory.CreateFont(family, size, dpi, weight);
-        _fontDpi = dpi;
-        return _font;
+        var style = GetTextRunStyle();
+        return TextLayoutOperations.Measure(
+            GetGraphicsFactory(), text.ToString(), GetDpi(), in style, maxWidth, wrapping);
+    }
+
+    protected void DrawEngineText(
+        IGraphicsContext context,
+        ReadOnlySpan<char> text,
+        Rect bounds,
+        Color color,
+        TextAlignment horizontalAlignment = TextAlignment.Left,
+        TextAlignment verticalAlignment = TextAlignment.Top,
+        TextWrapping wrapping = TextWrapping.NoWrap,
+        TextTrimming trimming = TextTrimming.None,
+        object? owner = null)
+    {
+        if (text.IsEmpty || bounds.Width <= 0 || bounds.Height <= 0)
+        {
+            return;
+        }
+
+        var style = GetTextRunStyle();
+        var layout = TextLayoutOperations.GetOrCreate(
+            GetGraphicsFactory(),
+            text.ToString(),
+            GetDpi(),
+            in style,
+            bounds.Width,
+            bounds.Height,
+            wrapping,
+            trimming,
+            horizontalAlignment);
+        TextLayoutOperations.DrawInBounds(
+            context, layout, bounds, color, verticalAlignment, owner ?? this);
     }
 
     protected override void OnDpiChanged(uint oldDpi, uint newDpi)
     {
         base.OnDpiChanged(oldDpi, newDpi);
 
-        _font?.Dispose();
-        _font = null;
+        // Builds may bake device-pixel-snapped metrics, which the new scale invalidates.
+        InvalidateTemplateInstance();
     }
 
     protected Color PickAccentBorder(Theme theme, Color baseBorder, in VisualState state, double hoverMix = 0.6)
@@ -946,11 +1045,6 @@ public abstract class Control : TextElement
     {
         return state.IsEnabled ? normalBackground : Theme.Palette.DisabledControlBackground;
     }
-
-    /// <summary>
-    /// Gets the font using the control's graphics factory.
-    /// </summary>
-    protected IFont GetFont() => GetFont(GetGraphicsFactory());
 
     protected double GetBorderVisualInset()
     {
@@ -1173,10 +1267,6 @@ public abstract class Control : TextElement
     {
         base.OnDispose();
 
-        // Release cached font resources.
-        _font?.Dispose();
-        _font = null;
-
         HideToolTip();
     }
 
@@ -1245,24 +1335,6 @@ public abstract class Control : TextElement
         }
 
         window.CloseToolTip(this);
-    }
-
-    protected readonly struct TextMeasurementScope : IDisposable
-    {
-        public TextMeasurementScope(IGraphicsFactory factory, IGraphicsContext context, IFont font)
-        {
-            Factory = factory;
-            Context = context;
-            Font = font;
-        }
-
-        public IGraphicsFactory Factory { get; }
-
-        public IGraphicsContext Context { get; }
-
-        public IFont Font { get; }
-
-        public void Dispose() => Context.Dispose();
     }
 
     /// <summary>

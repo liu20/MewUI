@@ -57,6 +57,8 @@ internal sealed class BindingPathObserver<TRoot, TValue> : BindingPathObserver
 
     internal bool IsAvailable { get; private set; }
 
+    internal Exception? Error { get; private set; }
+
     internal TValue CurrentValue { get; private set; } = default!;
 
     internal bool CanWrite => _segments.Count > 0 && _segments[^1].CanWrite;
@@ -72,6 +74,20 @@ internal sealed class BindingPathObserver<TRoot, TValue> : BindingPathObserver
         if (endpoint != null)
         {
             _segments[^1].Write(endpoint, value);
+        }
+    }
+
+    internal void ValidateWrite(TValue value)
+    {
+        if (_disposed || !IsAvailable || !CanWrite)
+        {
+            return;
+        }
+
+        var endpoint = _endpoints[^1];
+        if (endpoint != null)
+        {
+            _segments[^1].ValidateWrite(endpoint, value);
         }
     }
 
@@ -104,13 +120,16 @@ internal sealed class BindingPathObserver<TRoot, TValue> : BindingPathObserver
                 AttachFrom(segmentIndex + 1, value);
             }
         }
-        catch
+        catch (Exception ex)
         {
             DetachFrom(segmentIndex + 1);
             SetUnavailable(notify: false);
-            throw;
+            Error = ex;
+            Changed?.Invoke();
+            return;
         }
 
+        Error = null;
         Changed?.Invoke();
     }
 
@@ -190,5 +209,6 @@ internal sealed class BindingPathObserver<TRoot, TValue> : BindingPathObserver
         _root = null;
         CurrentValue = default!;
         IsAvailable = false;
+        Error = null;
     }
 }

@@ -8,6 +8,7 @@ partial class GalleryView
         CardGrid(
             ObservableValueBindingCard(),
             ConvertedBindingCard(),
+            BindingValidationCard(),
             MewPropertyBindingCard(),
             BindingPathCard(),
             BindingLifetimeCard());
@@ -70,6 +71,55 @@ partial class GalleryView
                     new TextBlock()
                         .BindText(source, static value => $"Converted text: {value:0.0}%")),
             minWidth: 380);
+    }
+
+    private FrameworkElement BindingValidationCard()
+    {
+        static int ParseWholeNumber(string text) =>
+            int.TryParse(text, out var value)
+                ? value
+                : throw new FormatException("Enter a whole number.");
+
+        var source = new ObservableValue<int>(42);
+        var nextValidValue = 43;
+        var target = new TextBox()
+            .Width(280)
+            .BindText(
+                source,
+                static value => value.ToString(),
+                ParseWholeNumber);
+        var status = new TextBlock()
+            .Bind(
+                TextBlock.TextProperty,
+                target,
+                Control.ValidationErrorsProperty,
+                static errors => errors.Count == 0
+                    ? "Valid: no binding errors"
+                    : $"Invalid: {errors[0].Message}",
+                mode: BindingMode.OneWay)
+            .TextWrapping(TextWrapping.Wrap);
+
+        return Card(
+            "Validation / Invalid state",
+            new StackPanel()
+                .Vertical()
+                .Spacing(8)
+                .Children(
+                    BindingDescription(
+                        "Source: ObservableValue<int>; Target: TextBox.Text; Mode: TwoWay"),
+                    new TextBlock()
+                        .Text("Type a non-numeric value. ConvertBack fails, the source stays unchanged, and the TextBox uses the Error border until the binding recovers.")
+                        .TextWrapping(TextWrapping.Wrap),
+                    BindingDescription("TwoWay target (try letters):"),
+                    target,
+                    new TextBlock()
+                        .BindText(source, static value => $"source.Value = {value}"),
+                    status,
+                    new Button()
+                        .Content("Restore from source")
+                        .HorizontalAlignment(HorizontalAlignment.Left)
+                        .OnClick(() => source.Value = nextValidValue++)),
+            minWidth: 420);
     }
 
     private FrameworkElement MewPropertyBindingCard()
@@ -185,7 +235,7 @@ partial class GalleryView
                             fallbackValue: fallbackText),
                     new TextBlock()
                         .Text("Try Select B, then edit Profile A: the target must stay on B. Select null to see the fallback; null-state target edits are not buffered.")
-                        .FontSize(11)
+                        .FontSize(ThemeFontSize.Small)
                         .TextWrapping(TextWrapping.Wrap)),
             minWidth: 440);
     }
@@ -249,7 +299,7 @@ partial class GalleryView
     private static TextBlock BindingDescription(string text) =>
         new TextBlock()
             .Text(text)
-            .FontSize(11)
+            .FontSize(ThemeFontSize.Small)
             .TextWrapping(TextWrapping.Wrap);
 
     private sealed class BindingPathDemoRoot(BindingPathDemoProfile initialProfile)

@@ -5,17 +5,21 @@ internal sealed class FileDialogBreadcrumb : StackPanel
 {
     private readonly List<Entry> _entries = [];
     private readonly Action _enterPathEdit;
+    private readonly Func<string, IReadOnlyList<string>> _listSubdirs;
+    private Action<string>? _navigate;
     private double _lastAvailableWidth = double.NaN;
 
-    public FileDialogBreadcrumb(Action enterPathEdit)
+    public FileDialogBreadcrumb(Action enterPathEdit, Func<string, IReadOnlyList<string>> listSubdirs)
     {
         _enterPathEdit = enterPathEdit;
+        _listSubdirs = listSubdirs;
         Orientation = Orientation.Horizontal;
-        Spacing = 2;
+        Spacing = 0;
     }
 
     public void SetEntries(IEnumerable<(string Label, string Path)> entries, Action<string> navigate)
     {
+        _navigate = navigate;
         _entries.Clear();
         _entries.AddRange(entries.Select(entry => new Entry(entry.Label, entry.Path, () => navigate(entry.Path))));
         _lastAvailableWidth = double.NaN;
@@ -80,11 +84,15 @@ internal sealed class FileDialogBreadcrumb : StackPanel
         AddCrumb(_entries[0]);
         if (hidden.Length > 0)
         {
-            Add(CreateSeparatorElement());
+            Add(CreateSeparatorElement(_entries[0].Path));
             var menu = new ContextMenu();
+            var commandScope = new CommandScope();
+            menu.SetCommandTarget(CommandTarget.From(commandScope));
             foreach (Entry entry in hidden)
             {
-                menu.Item(entry.Label, entry.Navigate);
+                var command = new Command($"fileDialog.navigate.{entry.Path}", entry.Label);
+                commandScope.Register(command, entry.Navigate);
+                menu.Item(command);
             }
 
             Button overflow = CreateCrumbButton("…", static () => { });
@@ -94,7 +102,7 @@ internal sealed class FileDialogBreadcrumb : StackPanel
 
         for (int index = 1; index < visible.Count; index++)
         {
-            Add(CreateSeparatorElement());
+            Add(CreateSeparatorElement(_entries[visible[index] - 1].Path));
             AddCrumb(_entries[visible[index]]);
         }
 
@@ -126,9 +134,10 @@ internal sealed class FileDialogBreadcrumb : StackPanel
         return total + (elementCount - 1) * Spacing;
     }
 
-    private GlyphElement CreateSeparatorElement()
-        => new GlyphElement().Kind(GlyphKind.ChevronRight).GlyphSize(4).CenterVertical()
-            .WithTheme((theme, glyph) => glyph.Foreground(theme.Palette.DisabledText));
+    // The chevron after a crumb opens that folder's subfolders (siblings of the next crumb) as a dropdown;
+    // picking one navigates there. An empty path is a measurement-only probe.
+    private BreadcrumbDropDown CreateSeparatorElement(string leftPath = "")
+        => new(leftPath, _listSubdirs, _navigate ?? (static _ => { }));
 
     private void AddCrumb(Entry entry)
         => Add(CreateCrumbButton(entry.Label, entry.Navigate));

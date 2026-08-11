@@ -1,4 +1,4 @@
-﻿#if DEBUG
+#if DEBUG
 using Aprillz.MewUI.Controls;
 using Aprillz.MewUI.Diagnostics;
 using Aprillz.MewUI.Rendering;
@@ -8,10 +8,22 @@ namespace Aprillz.MewUI;
 public partial class Window
 {
     private Adorner? _debugInspectorAdorner;
-    private DebugInspectorOverlay? _debugInspectorOverlay;
     private DebugVisualTreeWindow? _debugVisualTreeWindow;
     private UIElement? _lastInspectorHover;
     private bool _lastInspectorInfoPanelAvoidsMouse;
+
+    /// <summary>The adorner-hosted inspector overlay, or null when the inspector is off.</summary>
+    internal DebugInspectorOverlay? DebugInspectorOverlay { get; private set; }
+
+    // Relays for the DevTools windows, which live outside Window and cannot see these private
+    // members. Kept as index accessors so PopupManager/AdornerEntry stay unexposed.
+    internal int DebugPopupCount => _popupManager.Count;
+
+    internal Element DebugPopupAt(int index) => _popupManager.ElementAt(index);
+
+    internal int DebugAdornerCount => _adorners.Count;
+
+    internal Element DebugAdornerElementAt(int index) => _adorners[index].Element;
 
     /// <summary>
     /// Called from <see cref="UpdateLastMousePosition"/>. Triggers an overlay redraw only
@@ -20,7 +32,7 @@ public partial class Window
     /// </summary>
     private void InvalidateInspectorOverlayIfHoverChanged()
     {
-        if (_debugInspectorOverlay == null)
+        if (DebugInspectorOverlay == null)
         {
             _lastInspectorHover = null;
             return;
@@ -32,7 +44,7 @@ public partial class Window
             hovered = null;
         }
 
-        bool infoPanelAvoidsMouse = _debugInspectorOverlay.ShouldAvoidMouse(_lastMousePositionDip);
+        bool infoPanelAvoidsMouse = DebugInspectorOverlay.ShouldAvoidMouse(_lastMousePositionDip);
         if (ReferenceEquals(hovered, _lastInspectorHover) &&
             infoPanelAvoidsMouse == _lastInspectorInfoPanelAvoidsMouse)
         {
@@ -41,7 +53,7 @@ public partial class Window
 
         _lastInspectorHover = hovered;
         _lastInspectorInfoPanelAvoidsMouse = infoPanelAvoidsMouse;
-        _debugInspectorOverlay.InvalidateVisual();
+        DebugInspectorOverlay.InvalidateVisual();
     }
 
 #if DEBUG
@@ -60,8 +72,8 @@ public partial class Window
 
     private void InitializeDebugDevTools()
     {
-        KeyBindings.Add(new KeyBinding(new KeyGesture(Key.I, ModifierKeys.Primary | ModifierKeys.Shift), ToggleDebugInspector));
-        KeyBindings.Add(new KeyBinding(new KeyGesture(Key.T, ModifierKeys.Primary | ModifierKeys.Shift), ToggleDebugVisualTree));
+        InputMap.Map(new KeyGesture(Key.I, ModifierKeys.Primary | ModifierKeys.Shift), ToggleDebugInspector);
+        InputMap.Map(new KeyGesture(Key.T, ModifierKeys.Primary | ModifierKeys.Shift), ToggleDebugVisualTree);
         InitializeDebugPerformanceProfiler();
     }
 
@@ -71,7 +83,7 @@ public partial class Window
         {
             AdornerLayer.Remove(_debugInspectorAdorner);
             _debugInspectorAdorner = null;
-            _debugInspectorOverlay = null;
+            DebugInspectorOverlay = null;
             RequestUpdatePass();
             RequestRender();
 #if DEBUG
@@ -80,13 +92,13 @@ public partial class Window
             return;
         }
 
-        _debugInspectorOverlay = new DebugInspectorOverlay(this)
+        DebugInspectorOverlay = new DebugInspectorOverlay(this)
         {
             IsHitTestVisible = false,
             IsVisible = true,
         };
 
-        _debugInspectorAdorner = new Adorner(this, _debugInspectorOverlay)
+        _debugInspectorAdorner = new Adorner(this, DebugInspectorOverlay)
         {
             IsHitTestVisible = false,
             IsVisible = true,
@@ -116,7 +128,7 @@ public partial class Window
 
         // The tree window is much more useful with the overlay on (selection highlighting),
         // so ensure it's enabled.
-        if (_debugInspectorOverlay == null)
+        if (DebugInspectorOverlay == null)
         {
             ToggleDebugInspector();
         }
@@ -134,9 +146,9 @@ public partial class Window
 #endif
             }
 
-            if (_debugInspectorOverlay != null)
+            if (DebugInspectorOverlay != null)
             {
-                _debugInspectorOverlay.HighlightedElement = null;
+                DebugInspectorOverlay.HighlightedElement = null;
                 RequestRender();
             }
         };
@@ -161,732 +173,6 @@ public partial class Window
     partial void DebugOnAfterMouseDownHitTest(Point positionInWindow, MouseButton button, UIElement? element)
     {
         _debugVisualTreeWindow?.OnTargetMouseDown(positionInWindow, button, element);
-    }
-
-    private sealed class DebugInspectorOverlay : Control
-    {
-        private const byte OverlayAlpha = 160;
-        private const double PanelMargin = 8.0;
-        private const double PanelPadding = 8.0;
-        private const double PanelMaxTextWidth = 420.0;
-        private const double PanelCornerRadius = 6.0;
-        private const double PanelAvoidSlop = 24.0;
-        private const double PanelEstimatedHeight = 120.0;
-        private static readonly Color HoverBoundsColor = Color.FromRgb(80, 160, 255).WithAlpha(OverlayAlpha);
-        private static readonly Color FocusBoundsColor = Color.FromRgb(255, 120, 80).WithAlpha(OverlayAlpha);
-        private static readonly Color SelectedBoundsColor = Color.FromRgb(255, 120, 80).WithAlpha(OverlayAlpha);
-        private static readonly Color PanelBackgroundColor = Color.FromRgb(20, 20, 20).WithAlpha(OverlayAlpha);
-        private static readonly Color PanelBorderColor = Color.FromRgb(80, 160, 255).WithAlpha(OverlayAlpha);
-        private static readonly Color PanelTextColor = Color.FromRgb(255, 255, 255).WithAlpha(OverlayAlpha);
-
-        private readonly Window _window;
-        private string? _cachedText;
-        private UIElement? _cachedHovered;
-        private UIElement? _cachedFocused;
-        private UIElement? _cachedPinned;
-
-        public UIElement? HighlightedElement { get; set; }
-
-        public DebugInspectorOverlay(Window window)
-        {
-            _window = window;
-            Background = Color.Transparent;
-        }
-
-        public bool ShouldAvoidMouse(Point mousePosition)
-            => IsPointNearTopLeftInfoPanel(mousePosition);
-
-        protected override void OnRender(IGraphicsContext context)
-        {
-            base.OnRender(context);
-
-            var mousePos = _window.LastMousePositionDip;
-            var hovered = _window.HitTest(mousePos);
-
-            // Don't highlight the inspector itself (it should not be hit-testable, but keep this defensive).
-            if (hovered is Adorner)
-            {
-                hovered = null;
-            }
-
-            var focused = _window.FocusManager.FocusedElement;
-            var pinned = HighlightedElement;
-
-            if (hovered != null &&
-                !ReferenceEquals(hovered, focused) &&
-                !ReferenceEquals(hovered, pinned))
-            {
-                DrawElementBounds(context, hovered, HoverBoundsColor);
-            }
-
-            if (focused != null &&
-                !ReferenceEquals(focused, pinned))
-            {
-                DrawElementBounds(context, focused, FocusBoundsColor);
-            }
-
-            if (pinned != null)
-            {
-                DrawElementBounds(context, pinned, SelectedBoundsColor);
-            }
-
-            DrawInfoPanel(context, hovered, focused, pinned);
-        }
-
-        private void DrawElementBounds(IGraphicsContext context, UIElement element, Color color)
-        {
-            var rect = GetElementRectInWindow(element);
-            if (rect.Width <= 0 || rect.Height <= 0)
-            {
-                return;
-            }
-
-            rect = LayoutRounding.SnapBoundsRectToPixels(rect, context.DpiScale);
-            context.DrawRectangle(rect, color, thickness: 2, strokeInset: true);
-        }
-
-        private void DrawInfoPanel(IGraphicsContext context, UIElement? hovered, UIElement? focused, UIElement? pinned)
-        {
-            var font = GetFont();
-            string text = GetOrBuildInspectorText(hovered, focused, pinned);
-
-            var size = context.MeasureText(text, font, maxWidth: PanelMaxTextWidth);
-            var panelRect = GetInfoPanelRect(size, _window.LastMousePositionDip);
-            panelRect = LayoutRounding.SnapBoundsRectToPixels(panelRect, context.DpiScale);
-            context.FillRoundedRectangle(panelRect, PanelCornerRadius, PanelCornerRadius, PanelBackgroundColor);
-            context.DrawRoundedRectangle(panelRect, PanelCornerRadius, PanelCornerRadius, PanelBorderColor, 1, strokeInset: true);
-            context.DrawText(text, panelRect.Deflate(new Thickness(PanelPadding)), font, PanelTextColor, TextAlignment.Left, TextAlignment.Top, TextWrapping.Wrap);
-        }
-
-        private Rect GetInfoPanelRect(Size contentSize, Point mousePosition)
-        {
-            double width = contentSize.Width + PanelPadding * 2;
-            double height = contentSize.Height + PanelPadding * 2;
-
-            if (IsPointNearTopLeftInfoPanel(mousePosition))
-            {
-                return new Rect(
-                    Math.Max(Bounds.X + PanelMargin, Bounds.Right - width - PanelMargin),
-                    Math.Max(Bounds.Y + PanelMargin, Bounds.Bottom - height - PanelMargin),
-                    width,
-                    height);
-            }
-
-            return new Rect(Bounds.X + PanelMargin, Bounds.Y + PanelMargin, width, height);
-        }
-
-        private bool IsPointNearTopLeftInfoPanel(Point point)
-        {
-            double width = PanelMaxTextWidth + PanelPadding * 2;
-            double height = PanelEstimatedHeight + PanelPadding * 2;
-            var topLeftPanelZone = new Rect(Bounds.X + PanelMargin, Bounds.Y + PanelMargin, width, height)
-                .Inflate(new Thickness(PanelAvoidSlop));
-            return topLeftPanelZone.Contains(point);
-        }
-
-        private string GetOrBuildInspectorText(UIElement? hovered, UIElement? focused, UIElement? pinned)
-        {
-            if (ReferenceEquals(_cachedHovered, hovered) &&
-                ReferenceEquals(_cachedFocused, focused) &&
-                ReferenceEquals(_cachedPinned, pinned) &&
-                _cachedText != null)
-            {
-                return _cachedText;
-            }
-
-            _cachedHovered = hovered;
-            _cachedFocused = focused;
-            _cachedPinned = pinned;
-
-            string hoverText = hovered != null ? $"{hovered.GetType().Name} {FormatRect(GetElementRectInWindow(hovered))}" : "(none)";
-            string focusText = focused != null ? $"{focused.GetType().Name} {FormatRect(GetElementRectInWindow(focused))}" : "(none)";
-            string pinText = pinned != null ? $"{pinned.GetType().Name} {FormatRect(GetElementRectInWindow(pinned))}" : "(none)";
-
-            var sb = new System.Text.StringBuilder(512);
-            sb.Append("Inspector: Ctrl/Cmd+Shift+I\n");
-            sb.Append("VisualTree: Ctrl/Cmd+Shift+T\n");
-            sb.Append("Hover: ").Append(hoverText).Append('\n');
-            sb.Append("Focus: ").Append(focusText).Append('\n');
-            sb.Append("Selected: ").Append(pinText);
-
-            _cachedText = sb.ToString();
-            return _cachedText;
-        }
-
-        private static Rect GetElementRectInWindow(UIElement element)
-        {
-            var size = element.RenderSize;
-            var local = new Rect(0, 0, size.Width, size.Height);
-
-            // Translate into Window coordinate space (what the overlay draws in).
-            if (element.FindVisualRoot() is Window window)
-            {
-                return element.TranslateRect(local, window);
-            }
-
-            // Fallback to whatever we have (debug-only).
-            return element.Bounds;
-        }
-
-        private static string FormatRect(Rect r)
-            => $"[{r.X:0.#},{r.Y:0.#} {r.Width:0.#}x{r.Height:0.#}]";
-    }
-
-
-    private sealed class DebugVisualTreeWindow : Window
-    {
-        private readonly Window _target;
-        private readonly TreeView _tree;
-        private readonly TextBlock _selectedLabel;
-        private readonly TextBlock _modeLabel;
-        private readonly CheckBox _followFocus;
-        private readonly CheckBox _autoExpandFocus;
-        private readonly CheckBox _logicalMode;
-        private Button? _goFocusButton;
-
-        private readonly Dictionary<object, object?> _parentByKey = new();
-        private TreeItemsView<VisualTreeNodeModel>? _items;
-
-        private UIElement? _lastFocused;
-        private UIElement? _lastNonNullFocused;
-        private long _lastRebuildTick;
-        private bool _pickArmed;
-        private Button? _pickButton;
-
-        public DebugVisualTreeWindow(Window target)
-        {
-            ExcludeFromProfiler = true;
-            _target = target;
-
-            Title = "Live Visual Tree";
-            WindowSize = WindowSize.Resizable(520, 720);
-
-            _selectedLabel = new TextBlock { Text = "Selected: (none)" };
-            _modeLabel = new TextBlock { Text = "Mode: Follow/Peek" };
-
-            _followFocus = new CheckBox { Content = new TextBlock { Text = "Follow Focus", VerticalTextAlignment = TextAlignment.Center }, IsChecked = true };
-            _autoExpandFocus = new CheckBox { Content = new TextBlock { Text = "Auto Expand Focus", VerticalTextAlignment = TextAlignment.Center }, IsChecked = true };
-            _logicalMode = new CheckBox { Content = new TextBlock { Text = "Logical Tree", VerticalTextAlignment = TextAlignment.Center }, IsChecked = false };
-            _followFocus.CheckedChanged += _ => UpdateFollowUi();
-            _logicalMode.CheckedChanged += _ =>
-            {
-                Title = _logicalMode.IsChecked == true ? "Live Logical Tree" : "Live Visual Tree";
-                Refresh(preserveExpansion: false, preserveSelection: true);
-            };
-
-            _tree = new TreeView()
-                .ItemHeight(24)
-                .ExpandTrigger(TreeViewExpandTrigger.ClickNode);
-
-            _tree.ItemTemplate<VisualTreeNodeModel>(
-                build: ctx => new TextBlock().CenterVertical(),
-                bind: (view, item, _, ctx) =>
-                {
-                    ((TextBlock)view).Text(item.DisplayText).WithTheme((t, c) => c.FontWeight(item.Element is FrameworkElement fe && fe.Focusable ? FontWeight.SemiBold : FontWeight.Normal));
-                });
-
-            var refreshBtn = new Button().Content("Refresh");
-            refreshBtn.Click += Refresh;
-
-            _goFocusButton = new Button().Content("Go Focus");
-            _goFocusButton.Click += () => PeekElement(_lastNonNullFocused ?? _target.FocusManager.FocusedElement);
-
-            var pickBtn = new Button().Content("Pick (Click)");
-            _pickButton = pickBtn;
-            pickBtn.Click += TogglePick;
-
-            var clearBtn = new Button().Content("Clear Selection");
-            clearBtn.Click += () =>
-            {
-                if (_target._debugInspectorOverlay != null)
-                {
-                    _target._debugInspectorOverlay.HighlightedElement = null;
-                    _target.RequestRender();
-                }
-
-                if (_items != null)
-                {
-                    _items.SelectedIndex = -1;
-                }
-                _selectedLabel.Text = "Selected: (none)";
-            };
-
-
-            Content = new DockPanel()
-                .Spacing(8)
-                .Children(
-                    new StackPanel()
-                        .DockTop()
-                        .Horizontal()
-                        .Spacing(8)
-                        .Children(refreshBtn, _goFocusButton, pickBtn, clearBtn),
-                    new StackPanel()
-                        .DockTop()
-                        .Horizontal()
-                        .Spacing(12)
-                        .Children(_followFocus, _autoExpandFocus, _logicalMode),
-                    new Border()
-                        .DockTop()
-                        .Padding(8, 4)
-                        .Child(_modeLabel),
-                    new Border()
-                        .DockTop()
-                        .Padding(8)
-                        .Child(_selectedLabel),
-                    _tree
-                );
-
-            PreviewKeyDown += e =>
-            {
-                if (e.Key == Key.F5)
-                {
-                    Refresh();
-                    e.Handled = true;
-                }
-            };
-
-            _target.FrameRendered += OnTargetFrameRendered;
-            Closed += () => _target.FrameRendered -= OnTargetFrameRendered;
-
-            UpdateFollowUi();
-            Refresh();
-        }
-
-        private void UpdateFollowUi()
-        {
-            if (_goFocusButton != null)
-            {
-                _goFocusButton.IsEnabled = _followFocus.IsChecked != true;
-            }
-        }
-
-        private void TogglePick()
-        {
-            _pickArmed = !_pickArmed;
-            UpdatePickUi();
-        }
-
-        private void UpdatePickUi()
-        {
-            if (_pickButton != null)
-            {
-                _pickButton.Content(_pickArmed ? "Pick: ARMED (click target)" : "Pick (Click)");
-            }
-
-            _modeLabel.Text = _pickArmed ? "Mode: Pick (click in target window to select)" : "Mode: Follow/Peek";
-        }
-
-        public void OnTargetMouseDown(Point positionInWindow, MouseButton button, UIElement? element)
-        {
-            if (!_pickArmed || button != MouseButton.Left)
-            {
-                return;
-            }
-
-            _pickArmed = false;
-            UpdatePickUi();
-
-            if (element == null)
-            {
-                if (_target._debugInspectorOverlay != null)
-                {
-                    _target._debugInspectorOverlay.HighlightedElement = null;
-                    _target.RequestRender();
-                }
-                if (_items != null)
-                {
-                    _items.SelectedIndex = -1;
-                }
-                _selectedLabel.Text = "Selected: (none)";
-                return;
-            }
-
-            // Keep the UI responsive: tree might be slightly stale, so rebuild once if needed.
-            if (!_parentByKey.ContainsKey(element))
-            {
-                Refresh(preserveExpansion: true, preserveSelection: true);
-            }
-
-            SelectAndReveal(element);
-        }
-
-        private void OnTargetFrameRendered()
-        {
-            // Throttle rebuilds: a full tree walk is expensive, even for debug tools.
-            // Still keep selection syncing responsive.
-            long now = Environment.TickCount64;
-            bool rebuild = now - _lastRebuildTick >= 250;
-
-            var focused = _target.FocusManager.FocusedElement;
-            bool focusChanged = !ReferenceEquals(_lastFocused, focused);
-            _lastFocused = focused;
-            if (focused != null)
-            {
-                _lastNonNullFocused = focused;
-            }
-
-            if (rebuild)
-            {
-                _lastRebuildTick = now;
-                Refresh(preserveExpansion: true, preserveSelection: true);
-            }
-
-            if (_followFocus.IsChecked == true && focusChanged)
-            {
-                SelectAndReveal(focused);
-            }
-            else if (_autoExpandFocus.IsChecked == true && focusChanged)
-            {
-                ExpandToElement(focused);
-            }
-        }
-
-        private void Refresh()
-        {
-            Refresh(preserveExpansion: false, preserveSelection: false);
-        }
-
-        private void Refresh(bool preserveExpansion, bool preserveSelection)
-        {
-            var expandedKeys = preserveExpansion ? CaptureExpandedKeys() : null;
-            var selectedKey = preserveSelection ? _items?.SelectedItem?.Key : null;
-
-            var roots = BuildRoots();
-
-            if (_items != null)
-            {
-                _items.SelectionChanged -= OnItemsSelectionChanged;
-            }
-
-            _items = TreeItemsView.Create(
-                roots,
-                childrenSelector: n => n.Children,
-                textSelector: n => n.DisplayText,
-                keySelector: n => n.Key);
-            _items.SelectionChanged += OnItemsSelectionChanged;
-
-            _tree.ItemsSource = _items;
-
-            if (expandedKeys != null)
-            {
-                RestoreExpandedKeys(expandedKeys);
-            }
-
-            if (selectedKey != null)
-            {
-                ExpandAncestors(selectedKey);
-                SelectByKey(selectedKey);
-                _tree.ScrollIntoViewSelected();
-            }
-
-            if (!preserveExpansion && roots.Count > 0)
-            {
-                ExpandByKey(roots[0].Key);
-            }
-        }
-
-        private IReadOnlyList<VisualTreeNodeModel> BuildRoots()
-        {
-            _parentByKey.Clear();
-
-            var roots = new List<VisualTreeNodeModel>(4);
-            bool logical = _logicalMode.IsChecked == true;
-
-            // Logical mode starts from the user content; visual mode from the effective root
-            // (the template root when the window is templated).
-            var rootElement = logical ? _target.Content : _target.EffectiveVisualRoot;
-            if (rootElement != null)
-            {
-                var contentRoot = new VisualTreeNodeModel(key: "root:content", text: "Content", element: rootElement, children: [BuildModel(rootElement, parentKey: "root:content", logical)]);
-                roots.Add(contentRoot);
-            }
-            else
-            {
-                roots.Add(new VisualTreeNodeModel(key: "root:content", text: "Content (null)", element: null, children: Array.Empty<VisualTreeNodeModel>()));
-            }
-
-            // Popups/adorners are window-level visual layers; the logical tree shows user ownership only.
-            if (logical)
-            {
-                return roots;
-            }
-
-            if (_target._popupManager.Count > 0)
-            {
-                var popupModels = new List<VisualTreeNodeModel>(_target._popupManager.Count);
-                for (int i = 0; i < _target._popupManager.Count; i++)
-                {
-                    popupModels.Add(BuildModel(_target._popupManager.ElementAt(i), parentKey: "root:popups", logical: false));
-                }
-
-                roots.Add(new VisualTreeNodeModel(key: "root:popups", text: "Popups", element: null, children: popupModels));
-            }
-
-            if (_target._adorners.Count > 0)
-            {
-                var adornerModels = new List<VisualTreeNodeModel>(_target._adorners.Count);
-                for (int i = 0; i < _target._adorners.Count; i++)
-                {
-                    adornerModels.Add(BuildModel(_target._adorners[i].Element, parentKey: "root:adorners", logical: false));
-                }
-
-                roots.Add(new VisualTreeNodeModel(key: "root:adorners", text: "Adorners", element: null, children: adornerModels));
-            }
-
-            return roots;
-        }
-
-        private VisualTreeNodeModel BuildModel(Element element, object parentKey, bool logical)
-        {
-            var children = new List<VisualTreeNodeModel>();
-            if (logical)
-            {
-                if (element is ILogicalTreeHost logicalHost)
-                {
-                    logicalHost.VisitLogicalChildren(child =>
-                    {
-                        children.Add(BuildModel(child, parentKey: element, logical));
-                        return true;
-                    });
-                }
-            }
-            else if (element is IVisualTreeHost host)
-            {
-                host.VisitChildren(child =>
-                {
-                    children.Add(BuildModel(child, parentKey: element, logical));
-                    return true;
-                });
-            }
-
-            // Visual mode marks elements without a logical owner as [Type]: template parts,
-            // presenters, and other machinery stand out from user-owned structure.
-            string text = !logical && element.LogicalParent == null
-                ? $"[{element.GetType().Name}]"
-                : element.GetType().Name;
-
-            _parentByKey[element] = parentKey;
-            return new VisualTreeNodeModel(key: element, text: text, element: element, children: children);
-        }
-
-        private void ExpandAncestors(object key)
-        {
-            // Expand must happen from root -> leaf; otherwise keys for collapsed descendants won't be visible yet.
-            var chain = new List<object>(8);
-            for (object? current = key; current != null; current = _parentByKey.GetValueOrDefault(current))
-            {
-                chain.Add(current);
-            }
-
-            for (int i = chain.Count - 1; i >= 0; i--)
-            {
-                ExpandByKey(chain[i]);
-            }
-        }
-
-        private sealed class VisualTreeNodeModel
-        {
-            public object Key { get; }
-            public string Text { get; }
-            public Element? Element { get; }
-            public IReadOnlyList<VisualTreeNodeModel> Children { get; }
-            public int DescendantCount { get; }
-
-            public string DisplayText => DescendantCount > 0 ? $"{Text} ({DescendantCount})" : Text;
-
-            public VisualTreeNodeModel(object key, string text, Element? element, IReadOnlyList<VisualTreeNodeModel> children)
-            {
-                Key = key;
-                Text = text ?? string.Empty;
-                Element = element;
-                Children = children ?? Array.Empty<VisualTreeNodeModel>();
-                DescendantCount = CountDescendants(Children);
-            }
-
-            private static int CountDescendants(IReadOnlyList<VisualTreeNodeModel> children)
-            {
-                int count = 0;
-                for (int i = 0; i < children.Count; i++)
-                {
-                    var child = children[i];
-                    count += 1 + child.DescendantCount;
-                }
-
-                return count;
-            }
-        }
-
-        private void PeekElement(UIElement? element)
-        {
-            if (element == null)
-            {
-                return;
-            }
-
-            // Make sure the node exists in the latest tree.
-            Refresh(preserveExpansion: true, preserveSelection: true);
-            SelectAndReveal(element);
-        }
-
-        private void SelectAndReveal(UIElement? element)
-        {
-            if (element == null)
-            {
-                return;
-            }
-
-            ExpandAncestors(element);
-            SelectByKey(element);
-            _tree.ScrollIntoViewSelected();
-        }
-
-        private void ExpandToElement(UIElement? element)
-        {
-            if (element == null)
-            {
-                return;
-            }
-
-            ExpandAncestors(element);
-        }
-
-        private void OnItemsSelectionChanged(int index)
-        {
-            var element = _items?.SelectedItem?.Element as UIElement;
-
-            if (_target._debugInspectorOverlay != null)
-            {
-                _target._debugInspectorOverlay.HighlightedElement = element;
-                _target.RequestRender();
-            }
-
-            if (element == null)
-            {
-                _selectedLabel.Text = "Selected: (none)";
-            }
-            else
-            {
-                var logicalRoot = element.FindLogicalRoot();
-                _selectedLabel.Text =
-                    $"Selected: {element.GetType().Name} {FormatRect(GetElementRectInWindow(element))}\n" +
-                    $"Visual: parent={element.Parent?.GetType().Name ?? "(none)"}  root={element.FindVisualRoot()?.GetType().Name ?? "(none)"}\n" +
-                    $"Logical: parent={element.LogicalParent?.GetType().Name ?? "(none)"}  root={(ReferenceEquals(logicalRoot, element) ? "(self)" : logicalRoot.GetType().Name)}";
-            }
-
-            _tree.ScrollIntoView(index);
-            _tree.InvalidateVisual();
-        }
-
-        private List<(object Key, int Depth)> CaptureExpandedKeys()
-        {
-            var items = _items;
-            if (items == null)
-            {
-                return new List<(object, int)>();
-            }
-
-            var result = new List<(object, int)>();
-            for (int i = 0; i < items.Count; i++)
-            {
-                if (!items.GetIsExpanded(i))
-                {
-                    continue;
-                }
-
-                if (items.GetItem(i) is not VisualTreeNodeModel model)
-                {
-                    continue;
-                }
-
-                result.Add((model.Key, items.GetDepth(i)));
-            }
-
-            return result;
-        }
-
-        private void RestoreExpandedKeys(List<(object Key, int Depth)> expanded)
-        {
-            if (_items == null || expanded.Count == 0)
-            {
-                return;
-            }
-
-            expanded.Sort(static (a, b) => a.Depth.CompareTo(b.Depth));
-            for (int i = 0; i < expanded.Count; i++)
-            {
-                ExpandByKey(expanded[i].Key);
-            }
-        }
-
-        private void ExpandByKey(object key)
-        {
-            var items = _items;
-            if (items == null)
-            {
-                return;
-            }
-
-            int index = FindVisibleIndexByKey(items, key);
-            if (index < 0 || !items.GetHasChildren(index))
-            {
-                return;
-            }
-
-            items.SetIsExpanded(index, true);
-        }
-
-        private void SelectByKey(object key)
-        {
-            var items = _items;
-            if (items == null)
-            {
-                return;
-            }
-
-            int index = FindVisibleIndexByKey(items, key);
-            items.SelectedIndex = index;
-        }
-
-        private static int FindVisibleIndexByKey(ITreeItemsView items, object key)
-        {
-            var keySelector = items.KeySelector;
-            for (int i = 0; i < items.Count; i++)
-            {
-                var item = items.GetItem(i);
-                if (item == null)
-                {
-                    continue;
-                }
-
-                if (keySelector != null)
-                {
-                    if (Equals(keySelector(item), key))
-                    {
-                        return i;
-                    }
-                }
-                else
-                {
-                    if (ReferenceEquals(item, key) || Equals(item, key))
-                    {
-                        return i;
-                    }
-                }
-            }
-
-            return -1;
-        }
-
-        private Rect GetElementRectInWindow(UIElement element)
-        {
-            var size = element.RenderSize;
-            var local = new Rect(0, 0, size.Width, size.Height);
-
-            return element.TranslateRect(local, _target);
-        }
-
-        private static string FormatRect(Rect r)
-            => $"[{r.X:0.#},{r.Y:0.#} {r.Width:0.#}x{r.Height:0.#}]";
     }
 }
 #endif

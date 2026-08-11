@@ -33,6 +33,27 @@ public class PlatformConventions
     public virtual bool ReverseButtonOrder => false;
 
     /// <summary>
+    /// The gesture that navigates to the parent container (Alt+Up; Cmd+Up on macOS).
+    /// </summary>
+    public virtual KeyGesture NavigateUpGesture => new(Key.Up, ModifierKeys.Alt);
+
+    /// <summary>
+    /// The gesture that navigates back in history (Alt+Left; Cmd+Left on macOS).
+    /// </summary>
+    public virtual KeyGesture NavigateBackGesture => new(Key.Left, ModifierKeys.Alt);
+
+    /// <summary>
+    /// The gesture that navigates forward in history (Alt+Right; Cmd+Right on macOS).
+    /// </summary>
+    public virtual KeyGesture NavigateForwardGesture => new(Key.Right, ModifierKeys.Alt);
+
+    /// <summary>
+    /// The gestures that switch a location bar to text entry (Ctrl+L or Alt+D; Cmd+Shift+G on macOS).
+    /// </summary>
+    public virtual IReadOnlyList<KeyGesture> EditLocationGestures =>
+        [new(Key.L, ModifierKeys.Control), new(Key.D, ModifierKeys.Alt)];
+
+    /// <summary>
     /// Formats a <see cref="KeyGesture"/> for display (e.g. "Ctrl+S").
     /// </summary>
     public virtual string FormatGesture(KeyGesture gesture)

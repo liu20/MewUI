@@ -1,4 +1,4 @@
-﻿using Aprillz.MewUI.Controls;
+using Aprillz.MewUI.Controls;
 using Aprillz.MewUI.Diagnostics;
 using Aprillz.MewUI.Input;
 using Aprillz.MewUI.Rendering;
@@ -56,8 +56,8 @@ partial class Window
     /// </summary>
     private void InitializeDebugPerformanceProfiler()
     {
-        KeyBindings.Add(new KeyBinding(new KeyGesture(Key.P, ModifierKeys.Primary | ModifierKeys.Shift), TogglePerformanceMonitor));
-        KeyBindings.Add(new KeyBinding(new KeyGesture(Key.P, ModifierKeys.Primary | ModifierKeys.Shift | ModifierKeys.Alt), ToggleProfiler));
+        InputMap.Map(new KeyGesture(Key.P, ModifierKeys.Primary | ModifierKeys.Shift), TogglePerformanceMonitor);
+        InputMap.Map(new KeyGesture(Key.P, ModifierKeys.Primary | ModifierKeys.Shift | ModifierKeys.Alt), ToggleProfiler);
     }
 
     private void UpdateProfilerEnabled()
@@ -232,17 +232,21 @@ partial class Window
             }
             text.Append("\nCtrl+Shift+Alt+P: Profiler");
 
-            var font = GetFont();
             const double maxWidth = 380;
             const double pad = 8;
-            var size = context.MeasureText(text.WrittenSpan, font, maxWidth);
+            var size = MeasureEngineText(text.WrittenSpan, maxWidth, TextWrapping.Wrap);
             var x = Math.Max(Bounds.X + 8, Bounds.Right - size.Width - pad * 2 - 8);
             var panelRect = new Rect(x, Bounds.Y + 8, size.Width + pad * 2, size.Height + pad * 2);
             panelRect = LayoutRounding.SnapBoundsRectToPixels(panelRect, context.DpiScale);
 
             context.FillRoundedRectangle(panelRect, 6, 6, Color.FromArgb(205, 18, 18, 18));
             context.DrawRoundedRectangle(panelRect, 6, 6, Color.FromArgb(230, 210, 180, 0), 1, strokeInset: true);
-            context.DrawText(text.WrittenSpan, panelRect.Deflate(new Thickness(pad)), font, Color.White, TextAlignment.Left, TextAlignment.Top, TextWrapping.Wrap);
+            DrawEngineText(
+                context,
+                text.WrittenSpan,
+                panelRect.Deflate(new Thickness(pad)),
+                Color.White,
+                wrapping: TextWrapping.Wrap);
         }
     }
 
@@ -361,7 +365,12 @@ partial class Window
             text.Append("ms   GPU --ms   Frame ");
             text.Append(stats.FrameIndex);
             text.Append("   Space: pause/live");
-            context.DrawText(text.WrittenSpan, rect.Deflate(new Thickness(8, 0)), GetFont(), Color.White, TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
+            DrawEngineText(
+                context,
+                text.WrittenSpan,
+                rect.Deflate(new Thickness(8, 0)),
+                Color.White,
+                verticalAlignment: TextAlignment.Center);
         }
 
         private void DrawCpuChart(IGraphicsContext context, Rect rect)
@@ -563,10 +572,14 @@ partial class Window
                 return;
             }
 
-            var font = GetFont();
             var labelRect = new Rect(rect.X, rect.Y, 140, rect.Height);
             context.FillRectangle(labelRect, Color.FromArgb(255, 50, 50, 50));
-            context.DrawText("Main Thread", new Rect(labelRect.X + 8, labelRect.Y, labelRect.Width - 16, 28), font, Color.White, TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
+            DrawEngineText(
+                context,
+                "Main Thread",
+                new Rect(labelRect.X + 8, labelRect.Y, labelRect.Width - 16, 28),
+                Color.White,
+                verticalAlignment: TextAlignment.Center);
 
             var lane = new Rect(labelRect.Right, rect.Y, Math.Max(0, rect.Width - labelRect.Width), rect.Height);
             double frameMs = Math.Max(1, frame.Stats.FrameMs);
@@ -612,7 +625,12 @@ partial class Window
                 }
                 if (w > 44)
                 {
-                    context.DrawText(info.Name, block.Deflate(new Thickness(3, 0)), font, Color.White, TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
+                    DrawEngineText(
+                        context,
+                        info.Name,
+                        block.Deflate(new Thickness(3, 0)),
+                        Color.White,
+                        verticalAlignment: TextAlignment.Center);
                 }
             }
 
@@ -674,10 +692,9 @@ partial class Window
                 text.Append("\nElement (none)");
             }
 
-            var font = GetFont();
             const double pad = 6;
             const double maxWidth = 360;
-            var size = context.MeasureText(text.WrittenSpan, font, maxWidth);
+            var size = MeasureEngineText(text.WrittenSpan, maxWidth, TextWrapping.Wrap);
             double x = _lastMousePoint.X + 14;
             double y = _lastMousePoint.Y + 16;
             double w = Math.Min(maxWidth, size.Width) + pad * 2;
@@ -695,7 +712,12 @@ partial class Window
             var rect = LayoutRounding.SnapBoundsRectToPixels(new Rect(x, y, w, h), context.DpiScale);
             context.FillRoundedRectangle(rect, 4, 4, Color.FromArgb(235, 18, 18, 18));
             context.DrawRoundedRectangle(rect, 4, 4, Color.FromArgb(255, 220, 220, 220), 1, strokeInset: true);
-            context.DrawText(text.WrittenSpan, rect.Deflate(new Thickness(pad)), font, Color.White, TextAlignment.Left, TextAlignment.Top, TextWrapping.Wrap);
+            DrawEngineText(
+                context,
+                text.WrittenSpan,
+                rect.Deflate(new Thickness(pad)),
+                Color.White,
+                wrapping: TextWrapping.Wrap);
         }
 
         private bool TryFindTimelineSample(Point point, out int sampleIndex, out ProfilerSample sample)
@@ -814,17 +836,17 @@ partial class Window
 #if DEBUG
             }
 
-            if (_target._debugInspectorOverlay == null)
+            if (_target.DebugInspectorOverlay == null)
             {
                 _target.ToggleDebugInspector();
             }
 
-            if (_target._debugInspectorOverlay == null)
+            if (_target.DebugInspectorOverlay == null)
             {
                 return false;
             }
 
-            _target._debugInspectorOverlay.HighlightedElement = element;
+            _target.DebugInspectorOverlay.HighlightedElement = element;
             _target.RequestRender();
             return true;
 #endif
@@ -840,7 +862,6 @@ partial class Window
                 return;
             }
 
-            var font = GetFont();
             var prim = frame.Stats.PrimitiveStats;
             Span<char> buffer = stackalloc char[512];
             var text = new StackTextFormatter(buffer);
@@ -874,18 +895,24 @@ partial class Window
             text.Append(frame.Stats.Gen1Collections);
             text.Append('/');
             text.Append(frame.Stats.Gen2Collections);
-            context.DrawText(text.WrittenSpan, new Rect(rect.X + 8, rect.Y + 4, rect.Width - 16, 20), font, Color.White, TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
+            DrawEngineText(
+                context,
+                text.WrittenSpan,
+                new Rect(rect.X + 8, rect.Y + 4, rect.Width - 16, 20),
+                Color.White,
+                verticalAlignment: TextAlignment.Center);
 
             var header = new Rect(rect.X + 8, rect.Y + 28, rect.Width - 16, 18);
-            context.DrawText("Name", new Rect(header.X, header.Y, Math.Max(0, header.Width - 220), header.Height), font, Color.FromArgb(255, 210, 210, 210), TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
-            context.DrawText("Total", new Rect(header.Right - 210, header.Y, 70, header.Height), font, Color.FromArgb(255, 210, 210, 210), TextAlignment.Right, TextAlignment.Center, TextWrapping.NoWrap);
-            context.DrawText("Self", new Rect(header.Right - 135, header.Y, 70, header.Height), font, Color.FromArgb(255, 210, 210, 210), TextAlignment.Right, TextAlignment.Center, TextWrapping.NoWrap);
-            context.DrawText("Calls", new Rect(header.Right - 58, header.Y, 58, header.Height), font, Color.FromArgb(255, 210, 210, 210), TextAlignment.Right, TextAlignment.Center, TextWrapping.NoWrap);
+            var headerColor = Color.FromArgb(255, 210, 210, 210);
+            DrawEngineText(context, "Name", new Rect(header.X, header.Y, Math.Max(0, header.Width - 220), header.Height), headerColor, verticalAlignment: TextAlignment.Center);
+            DrawEngineText(context, "Total", new Rect(header.Right - 210, header.Y, 70, header.Height), headerColor, TextAlignment.Right, TextAlignment.Center);
+            DrawEngineText(context, "Self", new Rect(header.Right - 135, header.Y, 70, header.Height), headerColor, TextAlignment.Right, TextAlignment.Center);
+            DrawEngineText(context, "Calls", new Rect(header.Right - 58, header.Y, 58, header.Height), headerColor, TextAlignment.Right, TextAlignment.Center);
 
-            DrawAggregateRows(context, rect, frame, font);
+            DrawAggregateRows(context, rect, frame);
         }
 
-        private void DrawAggregateRows(IGraphicsContext context, Rect rect, FrameProfilerData frame, IFont font)
+        private void DrawAggregateRows(IGraphicsContext context, Rect rect, FrameProfilerData frame)
         {
             int sampleCount = Math.Min(frame.SampleCount, _childTicks.Length);
             Array.Clear(_childTicks, 0, sampleCount);
@@ -947,18 +974,18 @@ partial class Window
                 }
 
                 context.FillRectangle(new Rect(row.X, row.Y + 4, 7, row.Height - 8), info.Color);
-                context.DrawText(info.Name, new Rect(row.X + 12, row.Y, Math.Max(0, row.Width - 232), row.Height), font, Color.White, TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
+                DrawEngineText(context, info.Name, new Rect(row.X + 12, row.Y, Math.Max(0, row.Width - 232), row.Height), Color.White, verticalAlignment: TextAlignment.Center);
                 var totalText = new StackTextFormatter(totalBuffer);
                 totalText.Append(totalMs, "0.00");
-                context.DrawText(totalText.WrittenSpan, new Rect(row.Right - 210, row.Y, 70, row.Height), font, Color.White, TextAlignment.Right, TextAlignment.Center, TextWrapping.NoWrap);
+                DrawEngineText(context, totalText.WrittenSpan, new Rect(row.Right - 210, row.Y, 70, row.Height), Color.White, TextAlignment.Right, TextAlignment.Center);
 
                 var selfText = new StackTextFormatter(selfBuffer);
                 selfText.Append(selfMs, "0.00");
-                context.DrawText(selfText.WrittenSpan, new Rect(row.Right - 135, row.Y, 70, row.Height), font, Color.White, TextAlignment.Right, TextAlignment.Center, TextWrapping.NoWrap);
+                DrawEngineText(context, selfText.WrittenSpan, new Rect(row.Right - 135, row.Y, 70, row.Height), Color.White, TextAlignment.Right, TextAlignment.Center);
 
                 var callsText = new StackTextFormatter(callsBuffer);
                 callsText.Append(aggregate.Calls);
-                context.DrawText(callsText.WrittenSpan, new Rect(row.Right - 58, row.Y, 58, row.Height), font, Color.FromArgb(255, 210, 210, 210), TextAlignment.Right, TextAlignment.Center, TextWrapping.NoWrap);
+                DrawEngineText(context, callsText.WrittenSpan, new Rect(row.Right - 58, row.Y, 58, row.Height), Color.FromArgb(255, 210, 210, 210), TextAlignment.Right, TextAlignment.Center);
             }
 
             if (_aggregateRows.Count > maxRows && maxRows > 0)
@@ -996,12 +1023,12 @@ partial class Window
             double y = rect.Bottom - ms / maxMs * rect.Height;
             context.DrawLine(new Point(rect.X, y), new Point(rect.Right, y), Color.FromArgb(180, 210, 210, 210), 1);
             double labelY = Math.Clamp(y - 18, rect.Y + 2, rect.Bottom - 18);
-            context.DrawText(label, new Rect(rect.X + 6, labelY, 120, 16), GetFont(), Color.White, TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
+            DrawEngineText(context, label, new Rect(rect.X + 6, labelY, 120, 16), Color.White, verticalAlignment: TextAlignment.Center);
         }
 
         private void DrawEmpty(IGraphicsContext context, Rect rect, string text)
         {
-            context.DrawText(text, rect, GetFont(), Color.FromArgb(255, 180, 180, 180), TextAlignment.Center, TextAlignment.Center, TextWrapping.NoWrap);
+            DrawEngineText(context, text, rect, Color.FromArgb(255, 180, 180, 180), TextAlignment.Center, TextAlignment.Center);
         }
     }
 

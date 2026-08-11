@@ -49,7 +49,7 @@ partial class GalleryView
                         new TextBlock()
                             .Text("Port of WpfConfetti by caefale")
                             .WithTheme((t, c) => c.Foreground(t.Palette.DisabledText))
-                            .FontSize(11),
+                            .FontSize(ThemeFontSize.Small),
                         new Grid()
                             .Columns("*,*")
                             .Rows("Auto,Auto,Auto,Auto")

@@ -5,11 +5,9 @@ using Aprillz.MewUI.Rendering;
 namespace MewUI.Test.Core;
 
 /// <summary>
-/// Deterministic allocation gate for the value store's hot paths (the "Tier 1" gate from the 06-B
-/// design). Reads and single-source sets of a reference-typed property must allocate nothing per op.
-/// These pass against today's single-slot store and become the regression detector the multi-slot
-/// rewrite must not break: a naive multi-slot store that computes the effective value on every read
-/// or allocates a slot set for a single-source write would fail here.
+/// Deterministic allocation gate for the multi-slot value store's hot paths. Reads and single-source
+/// sets of a reference-typed property must allocate nothing per op. A regression that computes the
+/// effective value on every read or allocates a slot set for a single-source write fails here.
 /// Uses <see cref="GC.GetAllocatedBytesForCurrentThread"/>, which is per-thread and so unaffected by
 /// other tests running in parallel.
 /// </summary>

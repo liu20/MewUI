@@ -2,6 +2,7 @@ using System.Diagnostics;
 
 using Aprillz.MewUI;
 using Aprillz.MewUI.Rendering;
+using Aprillz.MewUI.Text;
 
 namespace Svg;
 
@@ -41,13 +42,12 @@ internal sealed class MewFontDefn : IFontDefn
         // this glyph; subtracting the glyph's own advance yields its kerned start
         // position. Single-character MeasureText returns the glyph's own advance with
         // no kerning partner.
-        Span<char> single = stackalloc char[1];
+        var layout = GetLayout(renderer, text);
         for (int i = 0; i < text.Length; i++)
         {
             var ch = text[i];
-            var prefixInclusive = renderer.GraphicsContext.MeasureText(text.AsSpan(0, i + 1), _font).Width;
-            single[0] = ch;
-            var ownAdvance = renderer.GraphicsContext.MeasureText(single, _font).Width;
+            var prefixInclusive = layout.GetCaretBounds(new CharacterHit(i + 1, 0)).X;
+            var ownAdvance = GetLayout(renderer, ch.ToString()).MeasuredSize.Width;
             var cursor = new Point(location.X + prefixInclusive - ownAdvance, location.Y);
             _outlineFont.TryAppendGlyphOutline(path, ch, cursor, out _);
         }
@@ -58,13 +58,14 @@ internal sealed class MewFontDefn : IFontDefn
     public IList<Rect> MeasureCharacters(ISvgRenderer renderer, string text)
     {
         var results = new List<Rect>(text.Length);
+        var layout = GetLayout(renderer, text);
         double previousWidth = 0;
         for (int i = 0; i < text.Length; i++)
         {
-            var prefixSize = renderer.GraphicsContext.MeasureText(text.AsSpan(0, i + 1), _font);
-            var width = Math.Max(0, prefixSize.Width - previousWidth);
+            double currentWidth = layout.GetCaretBounds(new CharacterHit(i + 1, 0)).X;
+            var width = Math.Max(0, currentWidth - previousWidth);
             results.Add(new Rect(previousWidth, 0, width, Ascent(renderer)));
-            previousWidth = prefixSize.Width;
+            previousWidth = currentWidth;
         }
 
         return results;
@@ -72,8 +73,27 @@ internal sealed class MewFontDefn : IFontDefn
 
     public Size MeasureString(ISvgRenderer renderer, string text)
     {
-        var size = renderer.GraphicsContext.MeasureText(text, _font);
+        var size = GetLayout(renderer, text).MeasuredSize;
         return new Size(size.Width, Ascent(renderer));
+    }
+
+    private ITextLayout GetLayout(ISvgRenderer renderer, string text)
+    {
+        var decoration = (_font.IsUnderline ? TextDecoration.Underline : TextDecoration.None) |
+                         (_font.IsStrikethrough ? TextDecoration.Strikethrough : TextDecoration.None);
+        return renderer.GraphicsFactory.TextEngine.GetOrCreateLayout(
+            new TextLayoutRequest
+            {
+                Text = (text ?? string.Empty).AsMemory(),
+                Dpi = (uint)Math.Clamp(Math.Round(_ppi), 1, uint.MaxValue),
+                DefaultStyle = new TextRunStyle(
+                    _font.Family,
+                    _font.Size,
+                    _font.Weight,
+                    _font.IsItalic,
+                    decoration)
+            },
+            TextLayoutCachePolicy.Content);
     }
 
     public void Dispose()

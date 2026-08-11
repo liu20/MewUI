@@ -76,8 +76,8 @@ internal interface IPlatformHost : IDisposable
     /// Runs the platform message loop for the application.
     /// </summary>
     /// <param name="app">Application instance.</param>
-    /// <param name="mainWindow">Main window to show.</param>
-    void Run(Application app, Window mainWindow);
+    /// <param name="mainWindow">Main window to show, or null for a run without a main window.</param>
+    void Run(Application app, Window? mainWindow);
 
     /// <summary>
     /// Requests that the platform message loop terminates.

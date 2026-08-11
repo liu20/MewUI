@@ -15,11 +15,11 @@ partial class GalleryView
                 "A PathGeometry wrapped in a PathShape. The fill follows the inherited foreground."),
             new NavigationIconEntry(
                 "Emoji",
-                new TextBlock().Text("😀").FontSize(14).Center(),
+                DimWhenDisabled(new TextBlock().Text("😀").FontSize(14).Center()),
                 "An emoji rendered by a TextBlock, demonstrating that an icon can be any Element."),
             new NavigationIconEntry(
                 "Image",
-                new Image { Source = imageSource, StretchMode = Stretch.Uniform },
+                DimWhenDisabled(new Image().Source(imageSource).StretchMode(Stretch.Uniform)),
                 "A bitmap icon rendered by Image with Uniform stretch inside the navigation icon slot."),
         };
 
@@ -27,7 +27,9 @@ partial class GalleryView
         {
             Height = 300,
             PaneWidth = 190,
-            PaneDisplayMode = PaneDisplayMode.Expanded,
+            // Inline rather than Auto: the card is far narrower than the width Auto needs to keep the
+            // pane beside the content, and this sample is about the icon slot, not the adaptive rule.
+            PaneDisplayMode = PaneDisplayMode.Inline,
         };
         navigation.Items(
             entries,
@@ -40,7 +42,7 @@ partial class GalleryView
                     .Vertical()
                     .Spacing(8)
                     .Children(
-                        new TextBlock().Text(entry.Title).FontSize(22).Bold(),
+                        new TextBlock().Text(entry.Title).FontSize(ThemeFontSize.Medium).SemiBold(),
                         new TextBlock().Text(entry.Description).TextWrapping(TextWrapping.Wrap))));
         navigation.SelectedIndex = 0;
 
@@ -55,6 +57,22 @@ partial class GalleryView
                         .WithTheme((t, text) => text.Foreground(t.Palette.DisabledText)),
                     navigation),
             minWidth: 560);
+    }
+
+    /// <summary>
+    /// Icons are arbitrary elements rather than a dedicated icon type, so nothing dims them when an
+    /// ancestor is disabled. An element trigger declares the disabled look and restores the normal
+    /// one on re-enable; the transition animates both directions.
+    /// </summary>
+    private static T DimWhenDisabled<T>(T icon) where T : UIElement
+    {
+        icon.Transitions = [Transition.Create(UIElement.OpacityProperty, 150)];
+        icon.Triggers =
+        [
+            ElementTrigger.When(UIElement.IsEffectivelyEnabledProperty, false,
+                Setter.Create(UIElement.OpacityProperty, 0.5)),
+        ];
+        return icon;
     }
 
     private sealed record NavigationIconEntry(string Title, Element Icon, string Description);

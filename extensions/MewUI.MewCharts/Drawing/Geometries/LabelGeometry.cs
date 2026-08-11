@@ -1,4 +1,5 @@
 using LiveChartsCore.Drawing;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.MewCharts.Drawing.Geometries;
 
@@ -17,12 +18,12 @@ public class LabelGeometry : BaseLabelGeometry, IDrawnElement<MewDrawingContext>
     {
         if (string.IsNullOrEmpty(Text)) return;
 
-        var font = MewChartsText.GetFont(TextSize);
-        if (font is null) return;
+        var layout = MewChartsText.GetLayout(Text, TextSize);
+        if (layout is null) return;
 
-        var text = MewChartsText.Measure(Text, TextSize);
-        var width = text.Width + Padding.Left + Padding.Right;
-        var height = text.Height + Padding.Top + Padding.Bottom;
+        var textSize = layout.MeasuredSize;
+        var width = textSize.Width + Padding.Left + Padding.Right;
+        var height = textSize.Height + Padding.Top + Padding.Bottom;
 
         // Align the padded box around (X, Y), then inset the text by the padding.
         var left = HorizontalAlign switch
@@ -39,7 +40,9 @@ public class LabelGeometry : BaseLabelGeometry, IDrawnElement<MewDrawingContext>
             _ => Y - height / 2,
         };
 
-        var textBounds = new Rect(left + Padding.Left, top + Padding.Top, text.Width, text.Height);
-        context.G.DrawText(Text, textBounds, font, context.ActiveColor);
+        context.G.Text.Draw(
+            layout,
+            new Point(left + Padding.Left, top + Padding.Top),
+            new TextDrawOptions(context.ActiveColor));
     }
 }

@@ -12,9 +12,7 @@ namespace Aprillz.MewUI;
 internal sealed class PopupManager
 {
     /// <summary>
-    /// Host popups in their own OS windows (native) instead of the owner surface. Internal, not a public
-    /// policy surface (see agent/popup-native-window/plan.md). Headless tests set this false to keep the
-    /// in-surface path as their baseline.
+    /// Host popups in their own OS windows instead of the owner surface; headless tests set it false.
     /// </summary>
     internal static bool PreferNativePopups = true;
 
@@ -68,10 +66,25 @@ internal sealed class PopupManager
         _nativeHost.NotifyDpiChanged(oldDpi, newDpi);
     }
 
+    internal void VisitAll(Action<Element> visitor)
+    {
+        for (int i = 0; i < _popups.Count; i++)
+        {
+            VisualTree.Visit(_popups[i].Element, visitor);
+        }
+    }
+
     internal void Dispose()
     {
-        foreach (var entry in _popups)
+        // Detaching closes the popup surface, whose close policy re-enters this manager and removes
+        // entries; take each one out before running its side effects, the way CloseAndDetachEntry
+        // does. Draining from the end also closes submenus before the popups that opened them.
+        while (_popups.Count > 0)
         {
+            int last = _popups.Count - 1;
+            var entry = _popups[last];
+            _popups.RemoveAt(last);
+
             if (entry.Element is IDisposable disposable)
             {
                 disposable.Dispose();
@@ -80,7 +93,6 @@ internal sealed class PopupManager
             entry.Host?.Detach(entry);
         }
 
-        _popups.Clear();
         _toolTipOwner = null;
         _toolTip = null;
     }
@@ -133,6 +145,13 @@ internal sealed class PopupManager
             _window.Activate();
         }
 
+        // An interactive popup supersedes the hover tooltip; leaving it up would also let its surface
+        // churn hover state against the popup's own (see the suppression in ShowToolTip).
+        if (popup.IsHitTestVisible)
+        {
+            CloseToolTip();
+        }
+
         // Replace if already present.
         for (int i = 0; i < _popups.Count; i++)
         {
@@ -140,7 +159,7 @@ internal sealed class PopupManager
             {
                 _popups[i].Owner = owner;
                 _popups[i].Host?.OnOwnerChanged(_popups[i]);
-                var updatedBounds = measureBounds(_window);
+                var updatedBounds = SnapPlacementToDevicePixels(measureBounds(_window));
                 UpdatePopup(popup, updatedBounds);
                 return updatedBounds;
             }
@@ -155,7 +174,7 @@ internal sealed class PopupManager
         // to) sized the popup from unstyled metrics - a zero border thickness that forced a spurious
         // scrollbar, or a fallback font that clipped content.
         PopupHostSupport.AttachChrome(_window, entry);
-        var measuredBounds = measureBounds(_window);
+        var measuredBounds = SnapPlacementToDevicePixels(measureBounds(_window));
         entry.Bounds = measuredBounds;
         // Register before showing the native surface: when a sibling popup (submenu) shows and takes
         // the platform watch during ShowSurface, the parent's watch-transfer check scans _popups to
@@ -171,6 +190,7 @@ internal sealed class PopupManager
 
     internal void UpdatePopup(UIElement popup, Rect bounds)
     {
+        bounds = SnapPlacementToDevicePixels(bounds);
         for (int i = 0; i < _popups.Count; i++)
         {
             if (_popups[i].Element != popup)
@@ -182,6 +202,17 @@ internal sealed class PopupManager
             _window.Invalidate();
             return;
         }
+    }
+
+    /// <summary>Snaps a popup's placement origin to the device-pixel grid; the size is left as measured.</summary>
+    private Rect SnapPlacementToDevicePixels(Rect bounds)
+    {
+        double dpiScale = _window.DpiScale;
+        return new Rect(
+            LayoutRounding.RoundToPixel(bounds.X, dpiScale),
+            LayoutRounding.RoundToPixel(bounds.Y, dpiScale),
+            bounds.Width,
+            bounds.Height);
     }
 
     internal void ClosePopup(UIElement popup)
@@ -204,11 +235,16 @@ internal sealed class PopupManager
         }
     }
 
-    internal void RequestClosePopups(PopupCloseRequest request)
+    /// <summary>
+    /// Applies <paramref name="request"/>'s close policy. Returns true when a press closed a popup by
+    /// landing on that popup's own trigger: the press did the closing, so the caller must not also
+    /// route it (the trigger would reopen what it just closed).
+    /// </summary>
+    internal bool RequestClosePopups(PopupCloseRequest request)
     {
         if (_popups.Count == 0 || _isClosingPopups)
         {
-            return;
+            return false;
         }
 
         switch (request.TriggerKind)
@@ -216,11 +252,33 @@ internal sealed class PopupManager
             case PopupCloseRequest.Trigger.PointerDown:
             {
                 var leaf = request.PointerLeaf;
-                // Hit-test-invisible popups (e.g. ToolTip) are never "related" - always close on any click.
-                CloseTransientPopups(leaf == null
-                    ? null
-                    : entry => entry.Element.IsHitTestVisible && IsRelated(leaf, entry, applyContextMenuOwnerPolicy: true));
-                break;
+                if (leaf == null)
+                {
+                    CloseTransientPopups(shouldKeep: null);
+                    break;
+                }
+
+                bool pressedOwnTrigger = false;
+                CloseTransientPopups(entry =>
+                {
+                    // Hit-test-invisible popups (e.g. ToolTip) are never "related" - always close on any click.
+                    if (!entry.Element.IsHitTestVisible)
+                    {
+                        return false;
+                    }
+
+                    if (IsRelated(leaf, entry, applyContextMenuOwnerPolicy: true))
+                    {
+                        return true;
+                    }
+
+                    // Kept out by the toggle policy alone, so this press is on the trigger of the very
+                    // popup it is closing.
+                    pressedOwnTrigger |= IsRelated(leaf, entry, applyContextMenuOwnerPolicy: false);
+                    return false;
+                });
+
+                return pressedOwnTrigger;
             }
             case PopupCloseRequest.Trigger.FocusChanged:
             {
@@ -245,6 +303,8 @@ internal sealed class PopupManager
                 break;
             }
         }
+
+        return false;
     }
 
     /// <summary>
@@ -331,6 +391,14 @@ internal sealed class PopupManager
         // focus/close side effects that re-enter this manager, and a stale index would strand RemoveAt.
         var entry = _popups[index];
         _popups.RemoveAt(index);
+
+        // A Popup learns it closed from its own detach, which carries no reason; hand it the reason
+        // first. The owner notification below cannot do this - the popup element is not the owner.
+        if (entry.Element is Popup popup)
+        {
+            popup.NotifyClosing(kind);
+        }
+
         entry.Host?.Detach(entry);
 
         if (entry.Owner is IPopupOwner owner)
@@ -405,9 +473,9 @@ internal sealed class PopupManager
     }
 
     /// <summary>
-    /// Ensures the tooltip can resolve inherited properties (e.g. FontFamily) before
-    /// it is added to the visual tree via ShowPopup. Without this, the tooltip measures
-    /// with the registered default font ("Segoe UI") instead of the platform/theme font.
+    /// Ensures the tooltip can resolve inherited properties (e.g. FontSize, Foreground) before
+    /// it is added to the visual tree via ShowPopup. Without this, the tooltip measures with
+    /// registered property defaults instead of the theme values.
     /// </summary>
     private void EnsureToolTipInheritsFromWindow()
     {
@@ -431,10 +499,31 @@ internal sealed class PopupManager
         ArgumentNullException.ThrowIfNull(owner);
         ArgumentNullException.ThrowIfNull(content);
 
+        // Tooltips stay away while an interactive popup (menu, drop-down) is open: hover is not the
+        // user's focus then, and the tooltip surface appearing/disappearing under the pointer flips
+        // hover state against the popup surface, which reads as flicker.
+        if (HasInteractivePopup())
+        {
+            return;
+        }
+
         _toolTip ??= new ToolTip();
         _toolTip.Content = content;
         _toolTipOwner = owner;
         ShowPopup(owner, _toolTip, bounds);
+    }
+
+    private bool HasInteractivePopup()
+    {
+        for (int i = 0; i < _popups.Count; i++)
+        {
+            if (_popups[i].Element.IsHitTestVisible)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     internal void CloseToolTip(UIElement? owner = null)

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
+using Aprillz.MewUI.Animation;
 using Aprillz.MewUI.Native;
 using Aprillz.MewUI.Native.Constants;
 using Aprillz.MewUI.Native.Structs;
@@ -30,7 +31,12 @@ public sealed class Win32PlatformHost : IPlatformHost
     private int _renderRequested;
     private nint _renderEvent;
 
-    public string DefaultFontFamily { get; } = QuerySystemFontFamily();
+    /// <summary>
+    /// Gets the system UI font family, queried once so registration can report it without a host instance.
+    /// </summary>
+    internal static string SystemFontFamily { get; } = QuerySystemFontFamily();
+
+    public string DefaultFontFamily => SystemFontFamily;
 
     public IReadOnlyList<string> DefaultFontFallbacks { get; } = BuildDefaultFontFallbacks();
 
@@ -153,7 +159,7 @@ public sealed class Win32PlatformHost : IPlatformHost
         _windows.Remove(hwnd);
     }
 
-    public void Run(Application app, Window mainWindow)
+    public void Run(Application app, Window? mainWindow)
     {
         try
         {
@@ -176,7 +182,7 @@ public sealed class Win32PlatformHost : IPlatformHost
             }
 
             // Show after dispatcher is ready so timers/postbacks work immediately (WPF-style dispatcher lifetime).
-            mainWindow.Show();
+            app.OnHostLoopStarting(mainWindow);
 
             PumpLoop(null);
         }
@@ -213,7 +219,7 @@ public sealed class Win32PlatformHost : IPlatformHost
 
                 try
                 {
-                    RenderAllWindows();
+                    RenderContinuousWindows(scheduler);
                 }
                 catch (Exception ex)
                 {
@@ -506,6 +512,25 @@ public sealed class Win32PlatformHost : IPlatformHost
         foreach (var backend in _windows.Values)
         {
             _renderBackends.Add(backend);
+        }
+
+        for (int i = 0; i < _renderBackends.Count; i++)
+        {
+            _renderBackends[i].RenderNow();
+        }
+    }
+
+    private void RenderContinuousWindows(RenderLoopSettings settings)
+    {
+        using var pulse = AnimationManager.Instance.BeginPulse(settings);
+
+        _renderBackends.Clear();
+        foreach (var backend in _windows.Values)
+        {
+            if (pulse.ShouldRender(backend.Window, backend.NeedsRender))
+            {
+                _renderBackends.Add(backend);
+            }
         }
 
         for (int i = 0; i < _renderBackends.Count; i++)

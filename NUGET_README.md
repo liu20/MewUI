@@ -45,7 +45,7 @@ var window = new Window()
             .Spacing(8)
             .Children(
                 new Label().Text("Hello, Aprillz.MewUI").FontSize(18).Bold(),
-                new Button().Content("Quit").OnClick(() => Application.Quit())
+                new Button().Content("Exit").OnClick(Application.Shutdown)
             )
     );
 

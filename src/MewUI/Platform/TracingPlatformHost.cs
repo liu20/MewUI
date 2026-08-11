@@ -46,9 +46,11 @@ internal sealed class TracingPlatformHost : IPlatformHost
 
     public bool SupportsTransparentOverlay => _inner.SupportsTransparentOverlay;
 
-    public void Run(Application app, Window mainWindow)
+    public void Run(Application app, Window? mainWindow)
     {
-        DiagLog.Write($"[PlatformHost#{_id}] Run mainTitle='{mainWindow.Title}'");
+        DiagLog.Write(mainWindow != null
+            ? $"[PlatformHost#{_id}] Run mainTitle='{mainWindow.Title}'"
+            : $"[PlatformHost#{_id}] Run without main window");
         _inner.Run(app, mainWindow);
         DiagLog.Write($"[PlatformHost#{_id}] Run returned");
     }
@@ -167,6 +169,12 @@ internal sealed class TracingPlatformHost : IPlatformHost
         {
             DiagLog.Write($"[WindowBackend#{_backendId}] SetPosition {leftDip:0.##},{topDip:0.##}");
             _innerBackend.SetPosition(leftDip, topDip);
+        }
+
+        public void SetPositionPx(int leftPx, int topPx)
+        {
+            DiagLog.Write($"[WindowBackend#{_backendId}] SetPositionPx {leftPx},{topPx}");
+            _innerBackend.SetPositionPx(leftPx, topPx);
         }
 
         public void CaptureMouse()

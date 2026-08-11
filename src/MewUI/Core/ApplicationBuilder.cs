@@ -11,6 +11,13 @@ public sealed class ApplicationBuilder
     public Func<Window>? MainWindowFactory { get; set; }
 
     /// <summary>
+    /// Gets the callback invoked with the command-line arguments on the UI thread after the dispatcher is
+    /// installed and before the main window is shown. A configured callback without a main window factory
+    /// starts without a main window.
+    /// </summary>
+    internal Action<string[]>? Startup { get; set; }
+
+    /// <summary>
     /// Initializes a new instance of the <see cref="ApplicationBuilder"/> class.
     /// </summary>
     /// <param name="options">Application options.</param>
@@ -26,7 +33,8 @@ public sealed class ApplicationBuilder
     public AppOptions Options { get; }
 
     /// <summary>
-    /// Applies configured options and runs the application using <see cref="MainWindowFactory"/>.
+    /// Applies configured options and runs the application. When no <see cref="MainWindowFactory"/>
+    /// is configured, a startup callback is required and the application runs without a main window.
     /// </summary>
     public void Run()
     {
@@ -34,9 +42,10 @@ public sealed class ApplicationBuilder
         {
             throw new InvalidOperationException("ApplicationBuilder cannot be used after Application is running.");
         }
-        if (MainWindowFactory == null)
+        if (MainWindowFactory == null && Startup == null)
         {
-            throw new InvalidOperationException("Main window is not configured. Use UseMainWindow(...) or Run<TWindow>().");
+            throw new InvalidOperationException(
+                "Application startup is not configured. Use BuildMainWindow(...), OnStartup(...), or Run<TWindow>().");
         }
 
         // 1. Platform setup - establishes platform font and system theme detection.
@@ -44,10 +53,16 @@ public sealed class ApplicationBuilder
         // 2. Theme/options - user overrides applied on top of platform defaults.
         ApplyOptions();
 
-        var mainWindow = MainWindowFactory();
-        ArgumentNullException.ThrowIfNull(mainWindow);
-
-        Application.Run(mainWindow);
+        if (MainWindowFactory != null)
+        {
+            var mainWindow = MainWindowFactory();
+            ArgumentNullException.ThrowIfNull(mainWindow);
+            RunApplication(mainWindow);
+        }
+        else
+        {
+            Application.RunInternal(mainWindow: null, Startup, Options.ShutdownMode);
+        }
     }
 
     /// <summary>
@@ -68,7 +83,7 @@ public sealed class ApplicationBuilder
 
         _ = Application.DefaultPlatformHost;
         ApplyOptions();
-        Application.Run(mainWindow);
+        RunApplication(mainWindow);
     }
 
     /// <summary>
@@ -83,8 +98,11 @@ public sealed class ApplicationBuilder
 
         _ = Application.DefaultPlatformHost;
         ApplyOptions();
-        Application.Run(new TWindow());
+        RunApplication(new TWindow());
     }
+
+    private void RunApplication(Window mainWindow)
+        => Application.RunInternal(mainWindow, Startup, Options.ShutdownMode);
 
     private void ApplyOptions()
     {
@@ -95,20 +113,7 @@ public sealed class ApplicationBuilder
 
         if (Options.Metrics != null)
         {
-            var metrics = Options.Metrics;
-
-            // If the user's metrics still has the compile-time default font ("Segoe UI")
-            // but the platform provides a different system font (e.g. ".AppleSystemUIFont"),
-            // merge the platform font so it isn't lost.
-            var platformFont = ThemeMetrics.DefaultFontFamily;
-            if (!string.IsNullOrEmpty(platformFont) &&
-                metrics.FontFamily == ThemeMetrics.Default.FontFamily &&
-                metrics.FontFamily != platformFont)
-            {
-                metrics = metrics with { FontFamily = platformFont };
-            }
-
-            ThemeManager.DefaultMetrics = metrics;
+            ThemeManager.DefaultMetrics = Options.Metrics;
         }
 
         if (Options.LightSeed != null)

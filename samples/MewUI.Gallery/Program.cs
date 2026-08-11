@@ -3,7 +3,6 @@ using System.Diagnostics;
 using Aprillz.MewUI;
 using Aprillz.MewUI.Controls;
 using Aprillz.MewUI.Gallery;
-using Aprillz.MewUI.Rendering;
 
 if (OperatingSystem.IsWindows())
 {
@@ -31,6 +30,7 @@ var cullText = new ObservableValue<string>("Cull: -");
 var fpsStopwatch = new Stopwatch();
 var fpsFrames = 0;
 var maxFpsEnabled = new ObservableValue<bool>(false);
+var topMost = new ObservableValue<bool>(false);
 
 var currentAccent = ThemeManager.DefaultAccent;
 
@@ -55,6 +55,7 @@ Application
         .StartCenterScreen()
         .Build(x => x
             .Ref(out window)
+            .Bind(Window.TopmostProperty, topMost)
             .Icon(icon)
             .Padding(0)
             .Title("Aprillz.MewUI Controls Gallery")
@@ -149,7 +150,7 @@ FrameworkElement TopBar() => new Border()
                                 new TextBlock()
                                     .Text("Aprillz.MewUI Gallery")
                                     .WithTheme((t, c) => c.Foreground(t.Palette.Accent))
-                                    .FontSize(18)
+                                    .FontSize(ThemeFontSize.Large)
                                     .SemiBold(),
 
                                 new TextBlock()
@@ -164,7 +165,10 @@ FrameworkElement TopBar() => new Border()
                     .CenterVertical()
                     .Spacing(12)
                     .Children(
-
+                        new ToggleButton()
+                            .IsChecked()
+                            .Content("Toggle")
+                            .OnCheckedChanged(x => gallery.IsEnabled(x)),
                         new CheckBox()
                             .Content("Max FPS")
                             .BindIsChecked(maxFpsEnabled)
@@ -180,25 +184,27 @@ FrameworkElement SettingsControls() => new StackPanel()
     .Margin(16)
     .Spacing(16)
     .Children(
-        new TextBlock().Text("Settings").FontSize(22).Bold(),
-
         new StackPanel().Vertical().Spacing(8).Children(
-            new TextBlock().Text("Theme").FontSize(14).Bold(),
+            new TextBlock().WithTheme((t, c) => c.Foreground(t.Palette.Accent)).Text("Theme").Bold(),
             new StackPanel().Horizontal().Spacing(12).CenterVertical().Children(
                 ThemeModePicker(),
                 new TextBlock().Ref(out themeText).CenterVertical())),
 
         new StackPanel().Vertical().Spacing(8).Children(
-            new TextBlock().Text("Accent").FontSize(14).Bold(),
+            new TextBlock().WithTheme((t, c) => c.Foreground(t.Palette.Accent)).Text("Accent").Bold(),
             AccentPicker()),
 
         new StackPanel().Vertical().Spacing(8).Children(
-            new TextBlock().Text("Rendering").FontSize(14).Bold(),
+            new TextBlock().WithTheme((t, c) => c.Foreground(t.Palette.Accent)).Text("Rendering").Bold(),
             new WrapPanel().Spacing(12).Children(
                 new CheckBox()
                     .Content("Cached")
                     .IsChecked(true)
                     .OnCheckedChanged(v => gallery.SetCardsCached(v == true))
+                    .CenterVertical(),
+                new CheckBox()
+                    .Content("TopMost")
+                    .BindIsChecked(topMost)
                     .CenterVertical()))
     );
 

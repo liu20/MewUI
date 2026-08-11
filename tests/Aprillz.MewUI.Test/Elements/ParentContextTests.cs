@@ -218,6 +218,36 @@ public sealed class ParentContextTests
         Assert.AreSame(window, hosted.FindVisualRoot(), "visual root keeps following Parent");
     }
 
+    [TestMethod]
+    public void StyleSheetReplacement_ReResolvesContextOverrideConsumers()
+    {
+        var first = Color.FromRgb(71, 0, 0);
+        var second = Color.FromRgb(0, 72, 0);
+
+        var window = new Window();
+        var stack = new StackPanel();
+        var firstSheet = SheetWithAccent(first);
+        var owner = new Border { StyleSheet = firstSheet };
+        var hostSlot = new Border();
+        hostSlot.ContextParentOverride = owner;
+        var hosted = new Border { StyleName = "accent" };
+        hostSlot.Child = hosted;
+        stack.Add(owner);
+        stack.Add(hostSlot);
+        window.Content = stack;
+
+        Assert.AreEqual(first, hosted.Background);
+        Assert.IsTrue(firstSheet.IsFrozen, "the first attached lookup freezes the live sheet");
+
+        var secondSheet = SheetWithAccent(second);
+        owner.StyleSheet = secondSheet;
+
+        Assert.AreEqual(second, hosted.Background, "consumer outside owner's visual subtree refreshed");
+        Assert.IsTrue(secondSheet.IsFrozen, "the replacement freezes on its first live lookup");
+        Assert.ThrowsExactly<InvalidOperationException>(
+            () => secondSheet.Define("late", () => new Style(typeof(Border))));
+    }
+
     // Clearing the override must restore resolution through the visual chain.
     [TestMethod]
     public void ContextParentOverride_ClearRestoresVisualChainResolution()

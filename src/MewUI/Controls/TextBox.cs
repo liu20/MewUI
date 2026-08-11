@@ -8,20 +8,23 @@ public sealed class TextBox : SingleLineTextBase
     public static readonly MewProperty<string> TextProperty =
         MewProperty<string>.Register<TextBox>(nameof(Text), string.Empty,
             MewPropertyOptions.BindsTwoWayByDefault,
-            static (self, _, newVal) => self.ApplyExternalTextPropertyChange(newVal));
+            static (self, _, value) => self.ApplyExternalTextCore(value));
 
     /// <summary>
     /// Gets or sets the text content.
     /// </summary>
     public string Text
     {
-        get => GetTextCore();
-        set => SetMirroredTextProperty(TextProperty, value);
+        get => GetTextSnapshot();
+        set => SetValue(TextProperty, value ?? string.Empty);
     }
 
-    protected override void NotifyTextChanged()
-    {
-        SyncTextPropertyFromDocument(TextProperty);
-        base.NotifyTextChanged();
-    }
+    private protected override MewProperty<string>? TextSyncProperty => TextProperty;
+
+    /// <summary>
+    /// Gets the currently selected text.
+    /// </summary>
+    public string SelectedText => GetSelectedDocumentText();
+
+    private protected override string? GetClipboardCopyText() => SelectedText;
 }

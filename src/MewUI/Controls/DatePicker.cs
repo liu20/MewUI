@@ -1,4 +1,5 @@
 using Aprillz.MewUI.Rendering;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Controls;
 
@@ -8,6 +9,7 @@ namespace Aprillz.MewUI.Controls;
 public sealed class DatePicker : DropDownBase
 {
     private Calendar? _calendar;
+    private bool _syncingCalendar;
     private DateTime? _cachedHeaderDate;
     private string? _cachedHeaderFormat;
     private string? _cachedHeaderText;
@@ -60,7 +62,7 @@ public sealed class DatePicker : DropDownBase
     private void OnSelectedDatePropertyChanged(DateTime? oldValue, DateTime? newValue)
     {
         if (_calendar != null)
-            _calendar.SelectedDate = newValue;
+            SyncCalendarSelectedDate(newValue);
 
         SelectedDateChanged?.Invoke(newValue);
     }
@@ -75,7 +77,7 @@ public sealed class DatePicker : DropDownBase
 
         if (SelectedDate.HasValue)
         {
-            _calendar.SelectedDate = SelectedDate;
+            SyncCalendarSelectedDate(SelectedDate);
             _calendar.DisplayDate = SelectedDate.Value;
         }
 
@@ -102,7 +104,7 @@ public sealed class DatePicker : DropDownBase
             // Sync full state only when opening
             if (SelectedDate.HasValue)
             {
-                _calendar.SelectedDate = SelectedDate;
+                SyncCalendarSelectedDate(SelectedDate);
                 _calendar.DisplayDate = SelectedDate.Value;
             }
 
@@ -116,17 +118,40 @@ public sealed class DatePicker : DropDownBase
 
     private void OnCalendarSelectedDateChanged(DateTime? date)
     {
+        if (_syncingCalendar)
+        {
+            return;
+        }
+
         // Sync value during navigation (keyboard arrows) without closing popup.
         if (date.HasValue)
         {
-            SelectedDate = date;
+            CommitTargetValue(SelectedDateProperty, date);
+        }
+    }
+
+    private void SyncCalendarSelectedDate(DateTime? date)
+    {
+        if (_calendar == null)
+        {
+            return;
+        }
+
+        _syncingCalendar = true;
+        try
+        {
+            _calendar.SelectedDate = date;
+        }
+        finally
+        {
+            _syncingCalendar = false;
         }
     }
 
     private void OnCalendarDateActivated(DateTime date)
     {
         // Commit action (mouse click or Enter key) - close popup.
-        SelectedDate = date;
+        CommitTargetValue(SelectedDateProperty, date);
         IsDropDownOpen = false;
     }
 
@@ -136,8 +161,8 @@ public sealed class DatePicker : DropDownBase
 
         // Measure a representative date string to determine width
         string sample = DateTime.Today.ToString(DateFormat);
-        using var measure = BeginTextMeasurement();
-        var textSize = measure.Context.MeasureText(sample, measure.Font);
+        var style = GetTextRunStyle();
+        var textSize = TextLayoutOperations.Measure(GetGraphicsFactory(), sample, GetDpi(), in style);
 
         double width = textSize.Width + ArrowAreaWidth;
         return new Size(width, headerHeight);
@@ -176,8 +201,11 @@ public sealed class DatePicker : DropDownBase
 
         if (!string.IsNullOrEmpty(text))
         {
-            context.DrawText(text, textRect, GetFont(), textColor,
-                TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
+            var style = GetTextRunStyle();
+            var layout = TextLayoutOperations.GetOrCreate(
+                GetGraphicsFactory(), text, GetDpi(), in style, textRect.Width, textRect.Height);
+            TextLayoutOperations.DrawInBounds(
+                context, layout, textRect, textColor, TextAlignment.Center, this);
         }
     }
 

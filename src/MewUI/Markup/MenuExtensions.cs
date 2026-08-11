@@ -80,6 +80,27 @@ public static class MenuExtensions
     }
 
     /// <summary>
+    /// Adds a command item using the command's normalized text and default access key.
+    /// </summary>
+    public static MenuBar Item(this MenuBar bar, Command command)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        bar.Add(new MenuItem(command));
+        return bar;
+    }
+
+    /// <summary>
+    /// Adds a command item with a presentation and access-key override. A single underscore marks
+    /// the following character as the access key; use a double underscore for a literal underscore.
+    /// </summary>
+    public static MenuBar Item(this MenuBar bar, string text, Command command)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        bar.Add(new MenuItem(text, command));
+        return bar;
+    }
+
+    /// <summary>
     /// Adds a menu item with text and submenu.
     /// </summary>
     /// <param name="bar">Target menu bar.</param>
@@ -94,7 +115,8 @@ public static class MenuExtensions
     }
 
     /// <summary>
-    /// Sets the menu item text.
+    /// Sets the menu item's presentation and access-key override. A single underscore marks the
+    /// following character as the access key; use a double underscore for a literal underscore.
     /// </summary>
     /// <param name="item">Target menu item.</param>
     /// <param name="text">Item text.</param>
@@ -102,6 +124,51 @@ public static class MenuExtensions
     public static MenuItem Text(this MenuItem item, string text)
     {
         item.Text = text ?? string.Empty;
+        return item;
+    }
+
+    /// <summary>
+    /// Binds this placement's access-key-aware text override to an observable source.
+    /// </summary>
+    public static MenuItem BindText(this MenuItem item, ObservableValue<string> source)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        ArgumentNullException.ThrowIfNull(source);
+        item.SetBinding(MenuItem.TextProperty, source, BindingMode.OneWay);
+        return item;
+    }
+
+    /// <summary>Sets the semantic command invoked by this item.</summary>
+    public static MenuItem Command(this MenuItem item, Command? command)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        item.Command = command;
+        return item;
+    }
+
+    /// <summary>Binds the semantic command invoked by this item.</summary>
+    public static MenuItem BindCommand(this MenuItem item, ObservableValue<Command?> source)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        ArgumentNullException.ThrowIfNull(source);
+        item.SetBinding(MenuItem.CommandProperty, source, BindingMode.OneWay);
+        return item;
+    }
+
+    /// <summary>Sets the menu item's icon presentation override.</summary>
+    public static MenuItem Icon(this MenuItem item, IconTemplate? icon)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        item.Icon = icon;
+        return item;
+    }
+
+    /// <summary>Binds this placement's icon override to an observable source.</summary>
+    public static MenuItem BindIcon(this MenuItem item, ObservableValue<IconTemplate?> source)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        ArgumentNullException.ThrowIfNull(source);
+        item.SetBinding(MenuItem.IconProperty, source, BindingMode.OneWay);
         return item;
     }
 
@@ -118,18 +185,6 @@ public static class MenuExtensions
     }
 
     /// <summary>
-    /// Sets the keyboard shortcut gesture. Auto-generates display text.
-    /// </summary>
-    /// <param name="item">Target menu item.</param>
-    /// <param name="gesture">Keyboard shortcut gesture.</param>
-    /// <returns>The menu item for chaining.</returns>
-    public static MenuItem Shortcut(this MenuItem item, KeyGesture? gesture)
-    {
-        item.Shortcut = gesture;
-        return item;
-    }
-
-    /// <summary>
     /// Sets whether the menu item is enabled.
     /// </summary>
     /// <param name="item">Target menu item.</param>
@@ -142,26 +197,14 @@ public static class MenuExtensions
     }
 
     /// <summary>
-    /// Sets the predicate that determines whether the menu item can be clicked.
+    /// Binds the local enabled value. Command CanExecute is combined with this value and does not
+    /// replace the binding.
     /// </summary>
-    /// <param name="item">Target menu item.</param>
-    /// <param name="value">Can-click predicate.</param>
-    /// <returns>The menu item for chaining.</returns>
-    public static MenuItem CanClick(this MenuItem item, Func<bool>? value)
+    public static MenuItem BindIsEnabled(this MenuItem item, ObservableValue<bool> source)
     {
-        item.CanClick = value;
-        return item;
-    }
-
-    /// <summary>
-    /// Sets the menu item click action.
-    /// </summary>
-    /// <param name="item">Target menu item.</param>
-    /// <param name="value">Click action.</param>
-    /// <returns>The menu item for chaining.</returns>
-    public static MenuItem Click(this MenuItem item, Action? value)
-    {
-        item.Click = value;
+        ArgumentNullException.ThrowIfNull(item);
+        ArgumentNullException.ThrowIfNull(source);
+        item.SetBinding(MenuItem.IsEnabledProperty, source, BindingMode.OneWay);
         return item;
     }
 
@@ -174,19 +217,6 @@ public static class MenuExtensions
     public static MenuItem SubMenu(this MenuItem item, Menu? value)
     {
         item.SubMenu = value;
-        return item;
-    }
-
-    /// <summary>
-    /// Sets the keyboard shortcut gesture by key and modifiers. Auto-generates display text.
-    /// </summary>
-    /// <param name="item">Target menu item.</param>
-    /// <param name="key">Shortcut key.</param>
-    /// <param name="modifiers">Shortcut modifiers.</param>
-    /// <returns>The menu item for chaining.</returns>
-    public static MenuItem Shortcut(this MenuItem item, Key key, ModifierKeys modifiers = ModifierKeys.None)
-    {
-        item.Shortcut = new KeyGesture(key, modifiers);
         return item;
     }
 
@@ -204,25 +234,33 @@ public static class MenuExtensions
         return menu;
     }
 
-    /// <summary>
-    /// Adds a clickable menu item.
-    /// </summary>
-    /// <param name="menu">Target menu.</param>
-    /// <param name="text">Menu item text.</param>
-    /// <param name="onClick">Click handler.</param>
-    /// <param name="isEnabled">Whether the item is enabled.</param>
-    /// <param name="shortcut">Keyboard shortcut gesture (optional).</param>
-    /// <returns>The menu for chaining.</returns>
-    public static Menu Item(this Menu menu, string text, Action? onClick = null, bool isEnabled = true, KeyGesture? shortcut = null)
+    /// <summary>Adds a semantic command item using the command's normalized text and default access key.</summary>
+    public static Menu Item(this Menu menu, Command command)
     {
         ArgumentNullException.ThrowIfNull(menu);
-        menu.Items.Add(new MenuItem
-        {
-            Text = text ?? string.Empty,
-            Click = onClick,
-            IsEnabled = isEnabled,
-            Shortcut = shortcut
-        });
+        ArgumentNullException.ThrowIfNull(command);
+        menu.Items.Add(new MenuItem(command));
+        return menu;
+    }
+
+    /// <summary>Adds a non-executable presentation item.</summary>
+    public static Menu Item(this Menu menu, string text, bool isEnabled = true)
+    {
+        ArgumentNullException.ThrowIfNull(menu);
+        menu.Items.Add(new MenuItem(text) { IsEnabled = isEnabled });
+        return menu;
+    }
+
+    /// <summary>
+    /// Adds a semantic command item with a presentation and access-key override. A single
+    /// underscore marks the following character as the access key; use a double underscore for a
+    /// literal underscore.
+    /// </summary>
+    public static Menu Item(this Menu menu, string text, Command command)
+    {
+        ArgumentNullException.ThrowIfNull(menu);
+        ArgumentNullException.ThrowIfNull(command);
+        menu.Items.Add(new MenuItem(text, command));
         return menu;
     }
 
@@ -233,9 +271,8 @@ public static class MenuExtensions
     /// <param name="text">Menu item text.</param>
     /// <param name="subMenu">Submenu.</param>
     /// <param name="isEnabled">Whether the item is enabled.</param>
-    /// <param name="shortcut">Keyboard shortcut gesture (optional).</param>
     /// <returns>The menu for chaining.</returns>
-    public static Menu SubMenu(this Menu menu, string text, Menu subMenu, bool isEnabled = true, KeyGesture? shortcut = null)
+    public static Menu SubMenu(this Menu menu, string text, Menu subMenu, bool isEnabled = true)
     {
         ArgumentNullException.ThrowIfNull(menu);
         ArgumentNullException.ThrowIfNull(subMenu);
@@ -244,7 +281,6 @@ public static class MenuExtensions
         {
             Text = text ?? string.Empty,
             IsEnabled = isEnabled,
-            Shortcut = shortcut,
             SubMenu = subMenu
         });
         return menu;

@@ -152,7 +152,7 @@ public sealed class ToggleSwitch : ToggleBase
             return;
         }
 
-        IsChecked = !IsChecked;
+        CommitIsChecked(!IsChecked);
 
         e.Handled = true;
     }

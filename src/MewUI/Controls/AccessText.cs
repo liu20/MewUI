@@ -1,19 +1,25 @@
 using Aprillz.MewUI.Rendering;
 using Aprillz.MewUI.Diagnostics;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Controls;
 
 /// <summary>
-/// A TextBlock that parses "_" access key markers.
-/// The displayed text has markers removed ("_File" → "File").
-/// Draws an underline under the access key character when ShowAccessKeys is active.
-/// Automatically registers/unregisters with the Window's AccessKeyManager.
-/// Activation is delegated to the owning control via <see cref="UIElement.OnAccessKey"/>.
+/// A text element that parses "_" access key markers. The displayed text has markers removed
+/// ("_File" → "File") and an underline is drawn under the access key character while the Window's
+/// access keys are active. The raw markup is a bindable property (<see cref="RawTextProperty"/>), and the
+/// element registers/unregisters with the Window's AccessKeyManager automatically. Activation is delegated
+/// to the owning control via <see cref="UIElement.OnAccessKey"/>.
 /// </summary>
-internal sealed class AccessText : TextBlock
+internal sealed class AccessText : TextBlockBase
 {
-    private string _rawText = string.Empty;
-    private bool _updatingText;
+    /// <summary>The raw text with "_" markers; the display text strips them.</summary>
+    public static readonly MewProperty<string> RawTextProperty =
+        MewProperty<string>.Register<AccessText>(nameof(RawText), string.Empty,
+            MewPropertyOptions.AffectsLayout,
+            static (self, _, _) => self.ApplyRawText());
+
+    private string _display = string.Empty;
     private Window? _registeredWindow;
 
     /// <summary>
@@ -27,45 +33,36 @@ internal sealed class AccessText : TextBlock
     public int UnderlineIndex { get; private set; } = -1;
 
     /// <summary>
-    /// Sets the raw text with "_" markers. The displayed text will have markers removed.
+    /// Gets or sets the raw text with "_" markers.
     /// </summary>
-    public void SetRawText(string rawText)
+    public string RawText
     {
-        rawText ??= string.Empty;
-        if (_rawText == rawText) return;
+        get => GetValue(RawTextProperty);
+        set => SetValue(RawTextProperty, value ?? string.Empty);
+    }
 
+    protected override string DisplayText => _display;
+
+    private void ApplyRawText()
+    {
         UnregisterAccessKey();
-        _rawText = rawText;
 
+        string rawText = GetValue(RawTextProperty);
         if (AccessKeyHelper.TryParse(rawText, out var key, out var display))
         {
             AccessKey = key;
             UnderlineIndex = AccessKeyHelper.GetUnderlineIndex(rawText);
+            _display = display;
         }
         else
         {
             AccessKey = default;
             UnderlineIndex = -1;
+            _display = rawText;
         }
 
-        _updatingText = true;
-        Text = display;
-        _updatingText = false;
-
+        InvalidateTextLayout();
         RegisterAccessKey();
-    }
-
-    protected override void OnTextChanged()
-    {
-        if (!_updatingText)
-        {
-            UnregisterAccessKey();
-            _rawText = Text;
-            AccessKey = default;
-            UnderlineIndex = -1;
-        }
-
-        base.OnTextChanged();
     }
 
     protected override void OnVisualRootChanged(Element? oldRoot, Element? newRoot)
@@ -95,26 +92,16 @@ internal sealed class AccessText : TextBlock
         _registeredWindow = null;
     }
 
-    protected override void OnRenderTextDecorations(
-        IGraphicsContext context,
-        TextFormat format,
-        TextLayout layout,
-        string text,
-        Rect bounds)
+    protected override void OnGetTextPaintSpans(IList<TextPaintSpan> output)
     {
-        if (UnderlineIndex < 0 || string.IsNullOrEmpty(text))
+        if (UnderlineIndex < 0 || UnderlineIndex >= _display.Length)
             return;
 
         if (!GetValue(Window.ShowAccessKeysProperty))
             return;
 
-        if (UnderlineIndex >= text.Length)
-            return;
-
-        using (ProfilerMarkers.AccessTextUnderline.Auto())
-        {
-            var metrics = AccessKeyRenderer.MeasureUnderline(context, text, UnderlineIndex, format, layout);
-            AccessKeyRenderer.DrawUnderline(context, bounds, format, metrics, Foreground, GetDpi() / 96.0);
-        }
+        output.Add(new TextPaintSpan(
+            new TextRange(UnderlineIndex, 1),
+            Decoration: TextDecoration.Underline));
     }
 }

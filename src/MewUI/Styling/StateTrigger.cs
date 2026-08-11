@@ -1,5 +1,3 @@
-using System.Numerics;
-
 namespace Aprillz.MewUI;
 
 /// <summary>
@@ -8,6 +6,8 @@ namespace Aprillz.MewUI;
 /// </summary>
 public sealed class StateTrigger
 {
+    private IReadOnlyList<SetterBase>? _setters;
+
     /// <summary>
     /// Flags that must ALL be present for this trigger to match.
     /// Use <see cref="VisualStateFlags.None"/> when only <see cref="Exclude"/> matters.
@@ -22,9 +22,13 @@ public sealed class StateTrigger
 
     /// <summary>
     /// Setter values to apply when this trigger matches.
-    /// May contain both <see cref="Setter"/> and <see cref="TargetSetter"/>.
+    /// May contain <see cref="Setter"/> and <see cref="UnsetSetter"/> declarations.
     /// </summary>
-    public required IReadOnlyList<SetterBase> Setters { get; init; }
+    public required IReadOnlyList<SetterBase> Setters
+    {
+        get => _setters!;
+        init => _setters = value;
+    }
 
     /// <summary>
     /// Tests whether this trigger matches the given flags.
@@ -32,12 +36,17 @@ public sealed class StateTrigger
     public bool Matches(VisualStateFlags flags)
         => (flags & Match) == Match && (flags & Exclude) == 0;
 
-    /// <summary>
-    /// Specificity - number of bits set in <see cref="Match"/>.
-    /// Higher specificity wins when multiple triggers match for the same property.
-    /// Ties are broken by declaration order (later wins).
-    /// </summary>
-    public int Specificity => BitOperations.PopCount((uint)Match);
+    internal SetterBase[] SnapshotSetters()
+    {
+        if (_setters == null)
+        {
+            throw new InvalidOperationException("StateTrigger.Setters cannot be null.");
+        }
+
+        var snapshot = _setters.ToArray();
+        _setters = snapshot;
+        return snapshot;
+    }
 }
 
 /// <summary>
@@ -73,5 +82,9 @@ public enum VisualStateFlags : uint
     /// <summary>Input is read-only.</summary>
     ReadOnly = 1 << 8,
 
-    // Bits 9–31: reserved for future framework extension
+    // Tier 4 - semantic state projected from framework services
+    /// <summary>One or more bindings on the control currently have an error.</summary>
+    Invalid = 1 << 9,
+
+    // Bits 10-31: reserved for future framework extension
 }

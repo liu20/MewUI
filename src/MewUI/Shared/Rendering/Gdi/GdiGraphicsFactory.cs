@@ -6,17 +6,20 @@ using Aprillz.MewUI.Platform;
 using Aprillz.MewUI.Platform.Win32;
 using Aprillz.MewUI.Rendering.Gdi.Core;
 using Aprillz.MewUI.Resources;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Rendering.Gdi;
 
 /// <summary>
 /// GDI+ graphics factory implementation.
 /// </summary>
-public sealed class GdiGraphicsFactory : IGraphicsFactory, IRenderDevice, IWindowResourceReleaser, IWindowSurfacePresenter, IDisposable
+public sealed class GdiGraphicsFactory : IGraphicsFactory, ITextBackendFactory, IRenderDevice, IWindowResourceReleaser, IWindowSurfacePresenter, IDisposable
 {
     public const string BackendIdentifier = "Gdi";
 
     public string Backend => BackendIdentifier;
+
+    public ITextEngine TextEngine => TextServices.GetEngine(this);
 
     internal GdiGraphicsFactory() { }
 
@@ -33,6 +36,7 @@ public sealed class GdiGraphicsFactory : IGraphicsFactory, IRenderDevice, IWindo
         bool italic = false, bool underline = false, bool strikethrough = false)
     {
         uint dpi = DpiHelper.GetSystemDpi();
+        family = GdiFont.SelectFamilyCandidate(family);
         family = ResolveFontFamilyOrFile(family);
         return new GdiFont(family, size, weight, italic, underline, strikethrough, dpi);
     }
@@ -43,6 +47,7 @@ public sealed class GdiGraphicsFactory : IGraphicsFactory, IRenderDevice, IWindo
     public IFont CreateFont(string family, double size, uint dpi, FontWeight weight = FontWeight.Normal,
         bool italic = false, bool underline = false, bool strikethrough = false)
     {
+        family = GdiFont.SelectFamilyCandidate(family);
         family = ResolveFontFamilyOrFile(family);
         return new GdiFont(family, size, weight, italic, underline, strikethrough, dpi);
     }
@@ -145,7 +150,7 @@ public sealed class GdiGraphicsFactory : IGraphicsFactory, IRenderDevice, IWindo
         ? GdiPlusGraphicsContext.CreateDoubleBuffered(hwnd, hdc, dpiScale, ImageScaleQuality, transparentComposition)
         : new GdiPlusGraphicsContext(hwnd, hdc, dpiScale, ImageScaleQuality);
 
-    public IGraphicsContext CreateMeasurementContext(uint dpi)
+    ITextBackendMeasurementContext ITextBackendFactory.CreateTextMeasurementContext(uint dpi)
     {
         var hdc = User32.GetDC(0);
         return new GdiMeasurementContext(hdc, dpi);
@@ -210,6 +215,7 @@ public sealed class GdiGraphicsFactory : IGraphicsFactory, IRenderDevice, IWindo
 
     public void Dispose()
     {
+        TextServices.ReleaseEngine(this);
         _renderResourceCache.Dispose();
 
         lock (_layeredLock)

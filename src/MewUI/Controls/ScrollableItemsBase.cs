@@ -204,4 +204,30 @@ public abstract class ScrollableItemsBase : Control, ISubtreeInvalidationHost
         double xContent = local.X;
         return presenter.TryGetItemIndexAt(xContent, yContent, out index);
     }
+
+    /// <summary>
+    /// The reverse of <see cref="TryMapPointToItemIndex"/>: takes the item's range in content space
+    /// and returns it where the item is drawn. The rectangle can fall outside the viewport, since
+    /// where an item off screen would sit is what a caller scrolling towards it needs.
+    /// </summary>
+    private protected bool TryMapItemIndexToBounds(int index, IItemsPresenter presenter, out Rect bounds)
+    {
+        bounds = default;
+
+        if (presenter is not UIElement presenterElement ||
+            !presenter.TryGetItemYRange(index, out double top, out double bottom))
+        {
+            return false;
+        }
+
+        var dpiScale = GetDpi() / 96.0;
+        double alignedOffsetY = LayoutRounding.RoundToPixel(_scrollViewer.VerticalOffset, dpiScale);
+        var presenterBounds = presenterElement.Bounds;
+        bounds = new Rect(
+            presenterBounds.X,
+            presenterBounds.Y + top - alignedOffsetY,
+            presenterBounds.Width,
+            Math.Max(0, bottom - top));
+        return bounds.Height > 0;
+    }
 }

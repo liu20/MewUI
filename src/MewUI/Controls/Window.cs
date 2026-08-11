@@ -2,7 +2,6 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 
-using Aprillz.MewUI.Animation;
 using Aprillz.MewUI.Controls;
 using Aprillz.MewUI.Diagnostics;
 using Aprillz.MewUI.Input;
@@ -366,7 +365,8 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
     /// <summary>
     /// Window-level overlay layer for elements positioned relative to the full window area.
-    /// Renders above adorners but below popups. Examples: toast, progress ring, dim background.
+    /// Renders above adorners and in-surface popups. Native popups use separate OS surfaces.
+    /// Examples: toast, progress ring, dim background.
     /// </summary>
     public OverlayLayer OverlayLayer { get; }
 
@@ -395,7 +395,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
                 if (existing != null && existing != source && existing.IsChecked)
                 {
-                    existing.IsChecked = false;
+                    existing.CommitIsChecked(false);
                 }
 
                 return;
@@ -414,7 +414,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
             if (existingScope != null && existingScope != source && existingScope.IsChecked)
             {
-                existingScope.IsChecked = false;
+                existingScope.CommitIsChecked(false);
             }
         }
 
@@ -538,7 +538,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     public static readonly MewProperty<WindowStartupLocation> StartupLocationProperty =
         MewProperty<WindowStartupLocation>.Register<Window>(nameof(StartupLocation), WindowStartupLocation.CenterScreen, MewPropertyOptions.None);
 
-    public static readonly MewProperty<double> OpacityProperty =
+    public new static readonly MewProperty<double> OpacityProperty =
         MewProperty<double>.Register<Window>(nameof(Opacity), 1.0, MewPropertyOptions.None,
             static (self, _, _) => self.OnOpacityChanged(),
             static (_, value) => Math.Clamp(value, 0.0, 1.0));
@@ -665,12 +665,12 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
     /// <summary>
     /// Whether this window is a non-activating surface (popup or overlay): it must never take native
-    /// activation/key/main status away from its owner. Backends consult this at every decision point
-    /// that can activate a window - show command, mouse activation, programmatic move/resize/style
-    /// refresh, zoom/state sync, and close path. The decision-point checklist lives in
-    /// agent/popup-native-window/plan.md.
+    /// activation away from its owner. Backends consult it wherever a window could be activated.
     /// </summary>
     internal bool IsNonActivatingSurface => _kind is WindowKind.Popup or WindowKind.Overlay;
+
+    /// <summary>Whether this surface lets the mouse through to whatever is underneath.</summary>
+    internal bool IsInputTransparentSurface { get; set; }
 
     /// <summary>
     /// Whether this window is a chrome-less surface: no native title bar, border, shadow, or close
@@ -700,6 +700,18 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         }
     }
 
+    // Backends resolve placement through this rather than the raw property.
+    internal WindowStartupLocation EffectiveStartupLocation =>
+        ResolveEffectiveStartupLocation(StartupLocation, Owner != null && Owner.Handle != 0);
+
+    // Pure decision so the placement fallback is unit-testable in isolation. A CenterOwner window whose
+    // owner is absent or not yet realized has nothing to center against, so it centers on the screen
+    // instead of falling through to a backend default position.
+    internal static WindowStartupLocation ResolveEffectiveStartupLocation(WindowStartupLocation requested, bool hasRealizedOwner)
+        => requested == WindowStartupLocation.CenterOwner && !hasRealizedOwner
+            ? WindowStartupLocation.CenterScreen
+            : requested;
+
     /// <summary>
     /// Gets the resolved startup position in DIPs for <see cref="WindowStartupLocation.CenterOwner"/>
     /// and <see cref="WindowStartupLocation.Manual"/> modes. <see langword="null"/> for <see cref="WindowStartupLocation.CenterScreen"/>.
@@ -716,10 +728,21 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         }
     }
 
+    /// <summary>Startup position in screen device pixels; takes precedence over <see cref="StartupPosition"/>.</summary>
+    internal (int X, int Y)? StartupPositionPx
+    {
+        get;
+        set
+        {
+            ThrowIfShown();
+            field = value;
+        }
+    }
+
     /// <summary>
     /// Gets or sets the window opacity (0..1).
     /// </summary>
-    public double Opacity
+    public new double Opacity
     {
         get => GetValue(OpacityProperty);
         set => SetValue(OpacityProperty, value);
@@ -1032,6 +1055,20 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     }
 
     /// <summary>
+    /// Moves the window to a screen position given in device pixels.
+    /// </summary>
+    internal void MoveToPx(int leftPx, int topPx)
+    {
+        if (_backend == null || Handle == 0)
+        {
+            return;
+        }
+
+        // DIPs would pick up whichever monitor's scale each side assumed.
+        _backend.SetPositionPx(leftPx, topPx);
+    }
+
+    /// <summary>
     /// Gets or sets whether layout rounding is enabled.
     /// </summary>
     public bool UseLayoutRounding
@@ -1055,26 +1092,6 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     {
         get => GetValue(ShowAccessKeysProperty);
         set => SetValue(ShowAccessKeysProperty, value);
-    }
-
-    /// <summary>
-    /// Gets the list of global keyboard shortcuts for this window.
-    /// Bindings are checked after bubbling (so control-level shortcuts like TextBox Ctrl+C take priority).
-    /// </summary>
-    public List<KeyBinding> KeyBindings { get; } = new();
-
-    /// <summary>
-    /// Processes global key bindings. Called after bubbling if the event is still unhandled.
-    /// </summary>
-    internal void ProcessKeyBindings(KeyEventArgs e)
-    {
-        if (e.Handled) return;
-
-        for (int i = 0; i < KeyBindings.Count; i++)
-        {
-            if (KeyBindings[i].TryHandle(e))
-                return;
-        }
     }
 
     internal void ProcessAccessKeyDown(KeyEventArgs e) => AccessKeyManager.OnKeyDown(e);
@@ -1285,7 +1302,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         ResolveStartupPosition();
         _backend!.EnsureTheme(Theme.IsDark);
 
-        // Unified display sequence, identical on every backend (see agent/window-lifecycle/plan.md):
+        // Unified display sequence, identical on every backend:
         //   1) CreateSurface   create hidden, Handle/DPI valid
         //   2) PerformLayout   confirm size (unconditional, so step 4 always sees a laid-out tree even
         //                      when step 3 defers Loaded)
@@ -1554,7 +1571,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         // Release modal state from the Closed event, which fires before the native window is destroyed, so the
         // owner is re-enabled/activated *before* destruction. Doing it after the loop (post-destroy) makes Win32
         // hand the foreground elsewhere for a frame, flickering the top-level window. The finally is an
-        // idempotent safety net for early loop exit (e.g. Application.Quit before the dialog closed).
+        // idempotent safety net for early loop exit (e.g. Application.Shutdown before the dialog closed).
         bool modalEnded = false;
         void EndModalOnce()
         {
@@ -1718,6 +1735,28 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Whether input to this surface belongs to <paramref name="modal"/>: the modal window itself,
+    /// or a popup/overlay it owns. Platforms without an OS-level disabled window emulate modality by
+    /// dropping input aimed elsewhere, and a menu the modal opened is a surface of the modal, not a
+    /// window competing with it.
+    /// </summary>
+    internal bool IsInModalScope(Window modal)
+    {
+        for (Window? current = this; current != null; current = current.Owner)
+        {
+            if (ReferenceEquals(current, modal))
+            {
+                return true;
+            }
+            if (!current.IsNonActivatingSurface)
+            {
+                break;
+            }
+        }
+        return false;
     }
 
     internal void NotifyInputWhenDisabled()
@@ -2412,7 +2451,16 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
     internal void SetClientSizeDip(double widthDip, double heightDip) => _clientSizeDip = new Size(widthDip, heightDip);
 
-    internal void SetIsActive(bool isActive) => IsActive = isActive;
+    internal void SetIsActive(bool isActive)
+    {
+        if (IsActive == isActive)
+        {
+            return;
+        }
+
+        IsActive = isActive;
+        FocusManager.InvalidateFocusVisualStates();
+    }
 
     internal void RaiseLoaded()
     {
@@ -2595,17 +2643,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     {
         var profiler = PerformanceProfiler.Instance;
         var frameTiming = _excludeFromProfiler ? default : profiler.BeginFrame(_profilerSourceId);
-
-        // Update animations before rendering so controls see current values.
-        long phaseStart = frameTiming.Enabled ? Stopwatch.GetTimestamp() : 0;
-        using (frameTiming.Enabled ? ProfilerMarkers.AnimationUpdate.Auto() : default)
-        {
-            AnimationManager.Instance.Update();
-        }
-        if (frameTiming.Enabled)
-        {
-            frameTiming.AnimationTicks += Stopwatch.GetTimestamp() - phaseStart;
-        }
+        long phaseStart;
 
         // Render surfaces are one-shot (different target instance per call).
         // Window-targeted contexts are cached so backends can pool per-frame state.
@@ -2911,6 +2949,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         {
             DisposeAdorners();
             _popupManager.Dispose();
+            ClearCommandSources();
             return;
         }
 
@@ -2937,6 +2976,8 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         }
 
         OverlayLayer.Dispose();
+
+        ClearCommandSources();
 
         DisposeAdorners();
         _popupManager.Dispose();
@@ -2980,19 +3021,102 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
         _popupManager.NotifyThemeChanged(oldTheme, newTheme);
 
+        // The whole adorner subtree, as the content walk above does: an adorner carries its own
+        // controls, and notifying only the adorner leaves everything it holds on the old theme.
         var adorners = _adorners.ToArray();
         for (int i = 0; i < adorners.Length; i++)
         {
-            if (adorners[i].Element is FrameworkElement fe)
+            VisitVisualTree(adorners[i].Element, e =>
             {
-                fe.NotifyThemeChanged(oldTheme, newTheme);
-            }
+                if (e is FrameworkElement c)
+                {
+                    c.NotifyThemeChanged(oldTheme, newTheme);
+                }
+            });
         }
 
         ThemeChanged?.Invoke(oldTheme, newTheme);
     }
 
     internal static void VisitVisualTree(Element element, Action<Element> visitor) => VisualTree.Visit(element, visitor);
+
+    /// <summary>
+    /// Re-resolves controls whose context chain passes through <paramref name="scope"/>. The walk
+    /// includes portal and overlay surfaces that are not descendants of the scope in the visual tree.
+    /// A null scope represents the application StyleSheet and refreshes every control in the window.
+    /// </summary>
+    internal void RefreshStyles(Element? scope, bool animate)
+    {
+        void Refresh(Element element)
+        {
+            if (element is not Control control ||
+                (scope != null && !IsInStyleContext(control, scope)))
+            {
+                return;
+            }
+
+            control.ResolveAndApplyStyle(animate);
+        }
+
+        Refresh(this);
+
+        if (EffectiveVisualRoot != null)
+        {
+            VisitVisualTree(EffectiveVisualRoot, Refresh);
+        }
+
+        OverlayLayer.VisitAll(Refresh);
+        _popupManager.VisitAll(Refresh);
+
+        for (int i = 0; i < _adorners.Count; i++)
+        {
+            VisitVisualTree(_adorners[i].Element, Refresh);
+        }
+    }
+
+    internal void InvalidateStyleSheetLazyCaches()
+    {
+        var sheets = new HashSet<StyleSheet>();
+
+        void Collect(Element element)
+        {
+            if (element is FrameworkElement { StyleSheet: { } sheet })
+            {
+                sheets.Add(sheet);
+            }
+        }
+
+        Collect(this);
+        if (EffectiveVisualRoot != null)
+        {
+            VisitVisualTree(EffectiveVisualRoot, Collect);
+        }
+
+        OverlayLayer.VisitAll(Collect);
+        _popupManager.VisitAll(Collect);
+        for (int i = 0; i < _adorners.Count; i++)
+        {
+            VisitVisualTree(_adorners[i].Element, Collect);
+        }
+
+        foreach (var sheet in sheets)
+        {
+            sheet.InvalidateLazyCache();
+        }
+    }
+
+    private static bool IsInStyleContext(Element element, Element scope)
+    {
+        for (Element? current = element; current != null; current = current.ContextParent)
+        {
+            if (ReferenceEquals(current, scope))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     internal void RaiseDpiChanged(uint oldDpi, uint newDpi)
     {
@@ -3019,10 +3143,13 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
         for (int i = 0; i < _adorners.Count; i++)
         {
-            if (_adorners[i].Element is FrameworkElement fe)
+            VisitVisualTree(_adorners[i].Element, e =>
             {
-                fe.NotifyDpiChanged(oldDpi, newDpi);
-            }
+                if (e is FrameworkElement c)
+                {
+                    c.NotifyDpiChanged(oldDpi, newDpi);
+                }
+            });
 
             _adorners[i].Element.ClearDpiCacheDeep();
         }
@@ -3041,7 +3168,11 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     internal Rect ShowPopup(UIElement owner, UIElement popup, Func<Window, Rect> measureBounds, bool sizeToContent = false, bool staysOpen = false)
         => _popupManager.ShowPopup(owner, popup, measureBounds, sizeToContent, staysOpen);
 
-    internal void RequestClosePopups(PopupCloseRequest request)
+    /// <summary>
+    /// Applies the close policy; true when the press itself closed a popup by landing on that popup's
+    /// trigger, in which case the caller must not route the press any further.
+    /// </summary>
+    internal bool RequestClosePopups(PopupCloseRequest request)
         => _popupManager.RequestClosePopups(request);
 
     /// <summary>
@@ -3155,8 +3286,11 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         ArgumentNullException.ThrowIfNull(adornedElement);
         ArgumentNullException.ThrowIfNull(adorner);
 
-        // Attach to this window so FindVisualRoot()/theme/DPI work.
+        // Attach to this window so FindVisualRoot()/theme/DPI work, and resolve through the adorned
+        // element the way a popup resolves through its owner: an adorner decorates that element, so
+        // its inherited values and styles are the ones it should be drawn with.
         adorner.Parent = this;
+        adorner.ContextParentOverride = adornedElement;
 
         _adorners.Add(new AdornerEntry
         {
@@ -3174,6 +3308,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         {
             if (ReferenceEquals(_adorners[i].Element, adorner))
             {
+                _adorners[i].Element.ContextParentOverride = null;
                 _adorners[i].Element.Parent = null;
                 _adorners.RemoveAt(i);
                 RequestUpdatePass();
@@ -3192,6 +3327,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         {
             if (ReferenceEquals(_adorners[i].Adorned, adornedElement))
             {
+                _adorners[i].Element.ContextParentOverride = null;
                 _adorners[i].Element.Parent = null;
                 _adorners.RemoveAt(i);
                 removed++;

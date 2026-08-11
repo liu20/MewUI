@@ -83,8 +83,10 @@ public abstract partial class ToggleBase : ContentControl
 
     protected virtual void ToggleFromKeyboard()
     {
-        IsChecked = !IsChecked;
+        CommitIsChecked(!IsChecked);
     }
+
+    internal void CommitIsChecked(bool value) => CommitTargetValue(IsCheckedProperty, value);
 
     protected override void OnDispose()
     {

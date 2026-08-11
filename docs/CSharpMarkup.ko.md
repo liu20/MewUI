@@ -36,7 +36,9 @@ new Button()
 | 패턴 | 설명 | 예시 |
 |------|------|------|
 | `OnEventName(handler)` | 이벤트 핸들러 등록 | `.OnClick(...)`, `.OnTextChanged(...)` |
-| `OnCanEventName(func)` | 조건부 실행 (Commanding) | `.OnCanClick(() => isValid)` |
+
+조건부 실행과 재사용 가능한 동작은 이벤트 확장이 아니라 `Command(...)`를 사용합니다. `BindCommand(...)`는
+동적으로 제공되는 의미 `Command`를 위한 데이터 바인딩입니다.
 
 같은 `On*` 메서드를 핸들러 delegate의 매개변수 타입만 바꿔 오버로드하지 않습니다. 타입이 명시되지 않은 람다는 두 오버로드에 모두 일치할 수 있으며, 기반 클래스용 확장과 파생 클래스용 확장 사이에서도 같은 문제가 발생합니다. `OnCheckStateChanged`, `OnLayoutSizeChanged`처럼 의미가 구분되는 이름을 사용합니다.
 
@@ -48,6 +50,10 @@ new Button()
 | `BindPropertyName(source, convert, convertBack)` | 양방향 변환 바인딩 | `.BindValue(vm.Level, x => (double)x, x => (int)x)` |
 
 `Bind*` 편의 메서드는 컨버터 오버로드를 제공합니다. 기본 양방향 속성에서 `convertBack`을 생략하면 변환 바인딩은 의도적으로 단방향으로 동작합니다.
+
+receiver가 `Command`인 `.BindText(source)`와 `.BindIcon(source)`도 같은 규칙을 따릅니다. 이 메서드들은
+`Command.Presentation.AccessTextProperty`와 `IconProperty`에 실제 단방향 binding을 만듭니다. text source의
+`_`는 AccessKey 표식이며, 니모닉을 지원하지 않는 소비자는 정규화된 `Command.Text`를 사용할 수 있습니다.
 
 ### 속성 이름 별칭
 
@@ -308,18 +314,35 @@ new Label()
 
 ```csharp
 new Button()
-    .Content("Click Me")
-    .OnCanClick(() => isFormValid)
-    .OnClick(() => Submit())
+    .Command(submitCommand, presentation: CommandPresentationMode.TextAndIcon)
 ```
 
 | 메서드 | 설명 |
 |--------|------|
 | `Content(string)` | 버튼 텍스트 |
 | `OnClick(Action)` | 클릭 핸들러 |
-| `OnCanClick(Func<bool>)` | 클릭 가능 조건 (Commanding) |
+| `Command(Command, CommandPresentationMode)` | 의미 명령 설정, 선택적으로 Command 텍스트/아이콘 콘텐츠 생성 |
+| `BindCommand(ObservableValue<Command?>, CommandPresentationMode)` | 의미 Command 속성 바인딩과 표시 모드 설정 |
 | `BindContent(ObservableValue<string>)` | 콘텐츠 바인딩 |
 | `BindContent(source, convert)` | 변환된 텍스트 또는 요소 콘텐츠 바인딩 |
+
+### ButtonGroup 세그먼트
+
+```csharp
+new ButtonGroup()
+    .Items(commands, command => command.Text)
+    .PrepareContainer<Command>((segment, command, _) =>
+        segment.Command(command))
+```
+
+| 메서드 | 설명 |
+|--------|------|
+| `PrepareContainer<T>(Action<SegmentButton, T, int>)` | 항목별 세그먼트 구성 |
+| `SegmentButton.Command(Command)` | 세그먼트가 실행할 의미 Command 설정 |
+| `SegmentButton.BindCommand(ObservableValue<Command?>)` | 세그먼트 Command 속성 바인딩 |
+
+`SegmentedControl`은 Command 소비자가 아니라 선택 컨트롤입니다. 독립 동작 묶음은 `ButtonGroup`의
+각 `SegmentButton`에 Command를 지정하고, 단일 선택 값은 `SegmentedControl`의 선택 API에 바인딩합니다.
 
 ### TextBox
 
@@ -863,7 +886,14 @@ new DockPanel()
 | 메서드 | 용도 |
 |--------|------|
 | `Add(...)`, `Item(...)`, `SubMenu(...)`, `Separator()` | 메뉴 구성 |
-| `Menu(...)`, `Shortcut(...)` | MenuItem 하위 메뉴 및 단축키 |
+| `Item(Command)` | Command의 정규화된 기본 텍스트와 AccessKey 사용 |
+| `Item(string, Command)`, `Text(string)` | `_` 표식으로 MenuItem 텍스트와 AccessKey를 함께 override |
+| `Menu(...)`, `Command(...)`, `Icon(...)` | MenuItem 하위 메뉴, 명령 및 아이콘 placement override 설정 |
+| `BindText(...)`, `BindCommand(...)`, `BindIcon(...)`, `BindIsEnabled(...)` | MenuItem의 실제 MewProperty binding |
+
+`MenuItem.Text`/`Icon`에 값 source가 없으면 Command의 기본 표시를 사용합니다. 명시적인 빈 텍스트와 null
+아이콘은 각각 Command 기본값을 숨깁니다. `IsEnabled` binding은 `CanExecute`에 의해 교체되지 않고 최종
+활성 상태에서 AND로 결합됩니다.
 
 ### Shape 및 Glyph
 
@@ -880,42 +910,6 @@ new DockPanel()
 | `Interval(...)`, `IntervalMs(...)`, `OnTick(...)`, `Start()`, `Stop()` | DispatcherTimer 설정 |
 | `With(...)` | StyleSheet에 스타일 추가 |
 | `HeaderInset(...)` | 헤더 레이아웃 인셋 |
-
----
-
-## Commanding (CanExecute 패턴)
-
-Button의 `OnCanClick`을 사용하여 WPF ICommand와 유사한 패턴을 구현할 수 있습니다.
-
-```csharp
-var text = new ObservableValue<string>("");
-
-new TextBox()
-    .BindText(text)
-    .OnTextChanged(_ => window.RequerySuggested()),
-
-new Button()
-    .Content("Submit")
-    .OnCanClick(() => !string.IsNullOrWhiteSpace(text.Value))
-    .OnClick(() => Submit(text.Value))
-```
-
-### 자동 재평가 시점
-
-`CanClick`은 다음 시점에 자동으로 재평가됩니다:
-- **Focus 변경** - 포커스가 이동할 때
-- **MouseUp** - 마우스 버튼을 뗄 때
-- **KeyUp** - 키를 뗄 때
-
-### 수동 재평가
-
-상태가 변경된 후 수동으로 재평가가 필요한 경우:
-
-```csharp
-// 이벤트 핸들러 내에서 상태 변경 후
-counter.Value++;
-window.RequerySuggested();  // CanClick 재평가 트리거
-```
 
 ---
 

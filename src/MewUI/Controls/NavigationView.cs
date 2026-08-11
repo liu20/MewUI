@@ -34,9 +34,8 @@ public sealed class NavigationView : Control, IVisualTreeHost
     private bool _footerActive;          // true when the selected item lives in the footer region
     private bool _suppressSelectionSync; // guards the two lists clearing each other
 
-    private PaneDisplayMode _effectiveMode = PaneDisplayMode.Expanded;
-    private bool _isPaneOpen;
-    private bool _userCollapsed;   // toggle preference for the inline pane: Expanded (false) vs Compact (true)
+    private PaneDisplayMode _effectiveMode = PaneDisplayMode.Inline;
+    private bool _effectiveModeChangedPending;
     private Rect _paneRect;
     private Rect _contentRect;
 
@@ -62,6 +61,14 @@ public sealed class NavigationView : Control, IVisualTreeHost
     public static readonly MewProperty<PaneDisplayMode> PaneDisplayModeProperty =
         MewProperty<PaneDisplayMode>.Register<NavigationView>(nameof(PaneDisplayMode), PaneDisplayMode.Auto,
             MewPropertyOptions.AffectsLayout, static (self, _, _) => self.InvalidateMeasure());
+
+    public static readonly MewProperty<bool> IsPaneOpenProperty =
+        MewProperty<bool>.Register<NavigationView>(nameof(IsPaneOpen), true,
+            MewPropertyOptions.AffectsLayout, static (self, _, _) => self.OnIsPaneOpenChanged());
+
+    public static readonly MewProperty<bool> IsPaneToggleButtonVisibleProperty =
+        MewProperty<bool>.Register<NavigationView>(nameof(IsPaneToggleButtonVisible), true,
+            MewPropertyOptions.AffectsLayout, static (self, _, newValue) => self._paneToggle.IsVisible = newValue);
 
     public NavigationView()
     {
@@ -124,12 +131,38 @@ public sealed class NavigationView : Control, IVisualTreeHost
         set => SetValue(CompactPaneWidthProperty, value);
     }
 
-    /// <summary>Gets or sets the pane display mode. <see cref="PaneDisplayMode.Auto"/> resolves from width.</summary>
+    /// <summary>Gets or sets the requested pane placement. <see cref="PaneDisplayMode.Auto"/> resolves from width.</summary>
     public PaneDisplayMode PaneDisplayMode
     {
         get => GetValue(PaneDisplayModeProperty);
         set => SetValue(PaneDisplayModeProperty, value);
     }
+
+    /// <summary>
+    /// Gets the placement in effect, with <see cref="PaneDisplayMode.Auto"/> already resolved: never
+    /// returns Auto. Raises <see cref="EffectivePaneDisplayModeChanged"/> when it changes.
+    /// </summary>
+    public PaneDisplayMode EffectivePaneDisplayMode => _effectiveMode;
+
+    /// <summary>Gets or sets whether the pane is expanded (an icon rail when inline, hidden when overlaid).</summary>
+    public bool IsPaneOpen
+    {
+        get => GetValue(IsPaneOpenProperty);
+        set => SetValue(IsPaneOpenProperty, value);
+    }
+
+    /// <summary>Gets or sets whether the toggle button is shown. Hiding it pins the pane to its current state.</summary>
+    public bool IsPaneToggleButtonVisible
+    {
+        get => GetValue(IsPaneToggleButtonVisibleProperty);
+        set => SetValue(IsPaneToggleButtonVisibleProperty, value);
+    }
+
+    /// <summary>
+    /// Occurs after <see cref="EffectivePaneDisplayMode"/> changes. Raised once the layout pass that
+    /// resolved it has finished, so a handler may invalidate layout without re-entering it.
+    /// </summary>
+    public event Action? EffectivePaneDisplayModeChanged;
 
     /// <summary>Gets or sets the selected item index (-1 = none).</summary>
     public int SelectedIndex
@@ -141,12 +174,11 @@ public sealed class NavigationView : Control, IVisualTreeHost
     /// <summary>Gets the selected item object (from either the main or footer region), or <see langword="null"/>.</summary>
     public object? SelectedItem => _footerActive ? _footerPane.SelectedItem : _pane.SelectedItem;
 
-    /// <summary>True when the pane currently shows item text (Expanded, or an open Minimal overlay).</summary>
-    public bool PaneShowsText => _effectiveMode == PaneDisplayMode.Expanded
-        || (_effectiveMode == PaneDisplayMode.Minimal && _isPaneOpen);
+    /// <summary>True when the pane currently shows item text.</summary>
+    public bool PaneShowsText => IsPaneOpen;
 
-    /// <summary>True when the pane is a compact icon-only rail.</summary>
-    public bool PaneIsRail => _effectiveMode == PaneDisplayMode.Compact;
+    /// <summary>True when the pane is a closed inline pane, i.e. an icon-only rail.</summary>
+    public bool PaneIsRail => _effectiveMode == PaneDisplayMode.Inline && !IsPaneOpen;
 
     /// <summary>
     /// Gets or sets the selector mapping the selected item to its content element. Built content is cached
@@ -181,24 +213,21 @@ public sealed class NavigationView : Control, IVisualTreeHost
     /// <summary>Occurs when the selection changes.</summary>
     public event Action<object?>? SelectionChanged;
 
-    private void OnToggle()
+    private void OnToggle() => IsPaneOpen = !IsPaneOpen;
+
+    private void OnIsPaneOpenChanged()
     {
-        if (_effectiveMode == PaneDisplayMode.Minimal)
+        // Rows differ between the open pane and the rail, so rebuild them before the pane is measured.
+        _pane.RefreshItems();
+        _footerPane.RefreshItems();
+
+        if (_effectiveMode == PaneDisplayMode.Overlay)
         {
-            // Too narrow to sit inline: slide the pane in/out as an overlay flyout.
-            _isPaneOpen = !_isPaneOpen;
-            if (_isPaneOpen)
-            {
-                _pane.RefreshItems();
-                _footerPane.RefreshItems();
-            }
-            AnimateOverlay(_isPaneOpen ? 1.0 : 0.0);
+            AnimateOverlay(IsPaneOpen ? 1.0 : 0.0);
         }
         else
         {
-            // Collapse/expand the inline pane between Expanded and Compact. This is a preference, not the
-            // display mode, so width-driven Minimal still applies when the window shrinks.
-            _userCollapsed = !_userCollapsed;
+            AnimateInlineWidth();
         }
 
         InvalidateMeasure();
@@ -245,11 +274,9 @@ public sealed class NavigationView : Control, IVisualTreeHost
             }
         }
 
-        if (_effectiveMode == PaneDisplayMode.Minimal && _isPaneOpen)
+        if (_effectiveMode == PaneDisplayMode.Overlay && IsPaneOpen)
         {
-            _isPaneOpen = false;   // dismiss the overlay after a pick
-            AnimateOverlay(0.0);
-            InvalidateVisual();
+            IsPaneOpen = false;   // dismiss the overlay after a pick
         }
         UpdateContent();
         SelectionChanged?.Invoke(item);
@@ -287,20 +314,22 @@ public sealed class NavigationView : Control, IVisualTreeHost
         {
             return PaneDisplayMode;
         }
-        if (!double.IsPositiveInfinity(width) && width < MinimalThreshold)
-        {
-            return PaneDisplayMode.Minimal;
-        }
-        return _userCollapsed ? PaneDisplayMode.Compact : PaneDisplayMode.Expanded;
+
+        return !double.IsPositiveInfinity(width) && width < MinimalThreshold
+            ? PaneDisplayMode.Overlay
+            : PaneDisplayMode.Inline;
     }
 
-    // Target width the pane occupies inline (0 for Minimal, which overlays instead).
-    private double InlinePaneWidth() => _effectiveMode switch
+    // Target width the pane occupies inline (0 when overlaid, since it covers the content instead).
+    private double InlinePaneWidth()
     {
-        PaneDisplayMode.Expanded => PaneWidth,
-        PaneDisplayMode.Compact => CompactPaneWidth,
-        _ => 0,
-    };
+        if (_effectiveMode == PaneDisplayMode.Overlay)
+        {
+            return 0;
+        }
+
+        return IsPaneOpen ? PaneWidth : CompactPaneWidth;
+    }
 
     // Tweens the inline width toward the current target (Expanded <-> Compact); snaps on first layout.
     private void AnimateInlineWidth()
@@ -322,7 +351,8 @@ public sealed class NavigationView : Control, IVisualTreeHost
 
     private AnimationClock CreateWidthClock()
     {
-        var clock = new AnimationClock(TimeSpan.FromMilliseconds(200), Easing.EaseOutCubic);
+        var clock = new AnimationClock(TimeSpan.FromMilliseconds(200), Easing.EaseOutCubic)
+            .AttachTo(this);
         clock.TickCallback = progress =>
         {
             _inlineWidth = _widthFrom + (_widthTo - _widthFrom) * progress;
@@ -350,7 +380,8 @@ public sealed class NavigationView : Control, IVisualTreeHost
 
     private AnimationClock CreateOverlayClock()
     {
-        var clock = new AnimationClock(TimeSpan.FromMilliseconds(200), Easing.EaseOutCubic);
+        var clock = new AnimationClock(TimeSpan.FromMilliseconds(200), Easing.EaseOutCubic)
+            .AttachTo(this);
         clock.TickCallback = progress =>
         {
             _overlayProgress = _overlayFrom + (_overlayTo - _overlayFrom) * progress;
@@ -370,12 +401,17 @@ public sealed class NavigationView : Control, IVisualTreeHost
         if (mode != _effectiveMode)
         {
             _effectiveMode = mode;
-            if (mode != PaneDisplayMode.Minimal)
+            _effectiveModeChangedPending = true;
+
+            // The overlay slide only means anything while overlaid; leaving that placement snaps it away
+            // so an inline pane never renders shifted. IsPaneOpen is deliberately untouched - it is the
+            // user's preference and outlives a width-driven placement change.
+            if (mode != PaneDisplayMode.Overlay)
             {
-                _isPaneOpen = false;   // the overlay-open state only applies in Minimal
-                _overlayProgress = 0;
+                _overlayProgress = IsPaneOpen ? 1.0 : 0.0;
                 _overlayClock?.Stop();
             }
+
             // Rebind rows for the new mode here, before measuring the pane, so the rebind and the
             // re-arrange complete within this same layout pass. Deferring to ArrangeContent would issue
             // the invalidation mid-arrange, where it can be dropped, leaving the previous mode's rows
@@ -391,7 +427,7 @@ public sealed class NavigationView : Control, IVisualTreeHost
         }
 
         double inlinePane = double.IsPositiveInfinity(inner.Width) ? _inlineWidth : Math.Min(_inlineWidth, inner.Width);
-        bool minimal = _effectiveMode == PaneDisplayMode.Minimal;
+        bool minimal = _effectiveMode == PaneDisplayMode.Overlay;
         // Minimal: content is full width below a top bar holding the hamburger. Inline modes: content sits
         // right of the pane.
         double leftInset = minimal ? 0 : inlinePane;
@@ -418,7 +454,7 @@ public sealed class NavigationView : Control, IVisualTreeHost
         var inner = bounds.Deflate(border).Deflate(Padding);
 
         double inlinePane = Math.Min(double.IsNaN(_inlineWidth) ? InlinePaneWidth() : _inlineWidth, inner.Width);
-        bool minimal = _effectiveMode == PaneDisplayMode.Minimal;
+        bool minimal = _effectiveMode == PaneDisplayMode.Overlay;
         double leftInset = minimal ? 0 : inlinePane;
         double topInset = minimal ? MinimalBarHeight : 0;
         _contentRect = new Rect(inner.X + leftInset, inner.Y + topInset,
@@ -433,6 +469,14 @@ public sealed class NavigationView : Control, IVisualTreeHost
 
         // The hamburger stays pinned to the top-left in every mode.
         _paneToggle.Arrange(new Rect(inner.X, inner.Y, CompactSlot, CompactSlot));
+
+        // Measure resolved a new placement. Report it only now that the pass is over, so a handler is
+        // free to invalidate layout without re-entering the pass that produced the change.
+        if (_effectiveModeChangedPending)
+        {
+            _effectiveModeChangedPending = false;
+            EffectivePaneDisplayModeChanged?.Invoke();
+        }
     }
 
     protected override void OnRender(IGraphicsContext context)
@@ -447,7 +491,7 @@ public sealed class NavigationView : Control, IVisualTreeHost
         _contentHost.Render(context);
 
         // Inline pane, or the Minimal overlay while it is (partly) slid in.
-        if (_effectiveMode != PaneDisplayMode.Minimal || _overlayProgress > 0.001)
+        if (_effectiveMode != PaneDisplayMode.Overlay || _overlayProgress > 0.001)
         {
             _paneHost.Render(context);
             DrawPaneSeparator(context);
@@ -481,9 +525,9 @@ public sealed class NavigationView : Control, IVisualTreeHost
             return toggleHit;
         }
 
-        if (_effectiveMode == PaneDisplayMode.Minimal)
+        if (_effectiveMode == PaneDisplayMode.Overlay)
         {
-            if (_isPaneOpen)
+            if (IsPaneOpen)
             {
                 // Overlay grabs its hits; anywhere else light-dismisses it (handled in OnMouseDown).
                 return _paneHost.HitTest(point) ?? (Bounds.Contains(point) ? this : null);
@@ -500,11 +544,9 @@ public sealed class NavigationView : Control, IVisualTreeHost
     {
         base.OnMouseDown(e);
         // Click outside the open overlay dismisses it.
-        if (!e.Handled && _effectiveMode == PaneDisplayMode.Minimal && _isPaneOpen && !_paneRect.Contains(e.GetPosition(this)))
+        if (!e.Handled && _effectiveMode == PaneDisplayMode.Overlay && IsPaneOpen && !_paneRect.Contains(e.GetPosition(this)))
         {
-            _isPaneOpen = false;
-            AnimateOverlay(0.0);
-            InvalidateVisual();
+            IsPaneOpen = false;
             e.Handled = true;
         }
     }
@@ -513,18 +555,18 @@ public sealed class NavigationView : Control, IVisualTreeHost
         => visitor(_paneHost) && visitor(_paneToggle) && visitor(_contentHost);
 }
 
-/// <summary>Display mode for a <see cref="NavigationView"/> pane.</summary>
+/// <summary>
+/// How a <see cref="NavigationView"/> pane is placed. Whether the pane is currently expanded is a
+/// separate axis, <see cref="NavigationView.IsPaneOpen"/>.
+/// </summary>
 public enum PaneDisplayMode
 {
-    /// <summary>Resolve Expanded / Compact / Minimal from the available width.</summary>
+    /// <summary>Resolve the placement from the available width.</summary>
     Auto,
 
-    /// <summary>Full pane with icon and text.</summary>
-    Expanded,
+    /// <summary>The pane sits beside the content; closed, it stays as an icon rail.</summary>
+    Inline,
 
-    /// <summary>Narrow icon-only rail; group headers become spacers.</summary>
-    Compact,
-
-    /// <summary>Pane hidden behind a toggle that opens it as an overlay.</summary>
-    Minimal,
+    /// <summary>The pane floats over the content; closed, it is hidden behind the toggle.</summary>
+    Overlay,
 }

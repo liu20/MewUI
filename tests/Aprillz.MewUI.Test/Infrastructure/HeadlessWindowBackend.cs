@@ -34,6 +34,8 @@ internal sealed class HeadlessWindowBackend : IWindowBackend
 
     public void SetPosition(double leftDip, double topDip) { }
 
+    public void SetPositionPx(int leftPx, int topPx) { }
+
     public void CaptureMouse() { }
 
     public void ReleaseMouseCapture() { }

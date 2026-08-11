@@ -152,9 +152,10 @@ internal static class PerPixelAlphaTextRenderer
                 byte b = row[i + 0];
                 byte g = row[i + 1];
                 byte r = row[i + 2];
-                byte coverage = b;
-                if (g > coverage) coverage = g;
-                if (r > coverage) coverage = r;
+
+                // Luminance, not the channel maximum: one bright ClearType subpixel would overstate the
+                // edge, and the darkening curve compensating for that flattens the antialiasing.
+                byte coverage = (byte)((r * 30 + g * 59 + b * 11) / 100);
 
                 if (coverage == 0 || aColor == 0)
                 {
@@ -165,8 +166,6 @@ internal static class PerPixelAlphaTextRenderer
                     continue;
                 }
 
-                // GDI grayscale coverage is gamma-encoded; apply a simple curve to avoid overly bold edges.
-                coverage = (byte)((coverage * coverage + 127) / 255);
                 byte a = (byte)((coverage * aColor + 127) / 255);
                 row[i + 0] = (byte)((color.B * a + 127) / 255);
                 row[i + 1] = (byte)((color.G * a + 127) / 255);

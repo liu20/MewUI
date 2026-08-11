@@ -52,7 +52,7 @@ partial class GalleryView
                 .Spacing(8)
                 .Children(
                     new TextBlock()
-                        .FontSize(11)
+                        .FontSize(ThemeFontSize.Small)
                         .Text("Window-level file drop:"),
                     new MultiLineTextBox()
                         .Height(80)
@@ -68,11 +68,11 @@ partial class GalleryView
                 .Spacing(8)
                 .Children(
                     new TextBlock()
-                        .FontSize(11)
+                        .FontSize(ThemeFontSize.Small)
                         .Text("Internal element drag (drag a chip between the two slots):"),
                     BuildInternalDragSample(),
                     new TextBlock()
-                        .FontSize(11)
+                        .FontSize(ThemeFontSize.Small)
                         .BindText(_dragLog)
                 ),
             minWidth: 360);
@@ -128,7 +128,7 @@ partial class GalleryView
                 .Vertical()
                 .Spacing(6)
                 .Children(
-                    new TextBlock().Text(title).Bold().FontSize(11),
+                    new TextBlock().Text(title).Bold().FontSize(ThemeFontSize.Small),
                     dropCanvas));
 
         slot.AllowDrop = true;
@@ -223,7 +223,7 @@ partial class GalleryView
             .Padding(new Thickness(8, 4))
             .CornerRadius(4)
             .WithTheme((t, c) => c.Background(t.Palette.ButtonFace.Lerp(t.Palette.Accent, 0.5)))
-            .Child(new TextBlock().Text(label).FontSize(11));
+            .Child(new TextBlock().Text(label).FontSize(ThemeFontSize.Small));
 
         chip.CanDrag = true;
         chip.DragStarting += e =>
@@ -275,7 +275,7 @@ partial class GalleryView
                 .Spacing(8)
                 .Children(
                     new TextBlock()
-                        .FontSize(11)
+                        .FontSize(ThemeFontSize.Small)
                         .TextWrapping(TextWrapping.Wrap)
                         .Text("Open a second window, then drag a chip from here into its slot (and back). "
                             + "Same-process routing - no OS clipboard, the .NET payload is passed by reference."),
@@ -295,6 +295,7 @@ partial class GalleryView
         new Window()
             .Ref(out second)
             .Resizable(340, 280)
+            .Topmost()
             .StartCenterOwner()
             .Build(x =>
             {
@@ -305,7 +306,7 @@ partial class GalleryView
                     .Spacing(8)
                     .Children(
                         new TextBlock()
-                            .FontSize(11)
+                            .FontSize(ThemeFontSize.Small)
                             .TextWrapping(TextWrapping.Wrap)
                             .Text("Drag chips here from the main window - or drag 'Yellow' back."),
                         BuildDragSlot("Drop here", target));

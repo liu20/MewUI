@@ -23,7 +23,7 @@ public sealed class TemplateContextTests
         context.Reset();
         source.Value = "third";
 
-        Assert.AreEqual("second", target.Text);
+        Assert.AreEqual(string.Empty, target.Text, "reset removes the Binding slot and reveals the default");
     }
 
     [TestMethod]
@@ -41,7 +41,7 @@ public sealed class TemplateContextTests
         first.Value = "old";
         second.Value = "new";
 
-        Assert.AreEqual("second", target.Text);
+        Assert.AreEqual(string.Empty, target.Text, "reset clears the replacement Binding slot once");
     }
 
     [TestMethod]
@@ -57,7 +57,7 @@ public sealed class TemplateContextTests
         context.Reset();
         source.Value = 2;
 
-        Assert.AreEqual("1", target.Text);
+        Assert.AreEqual(string.Empty, target.Text, "reset removes the converted Binding value");
     }
 
     [TestMethod]
@@ -85,7 +85,7 @@ public sealed class TemplateContextTests
         context.Reset();
         source.Node.Value.Text.Value = "third";
 
-        Assert.AreEqual("second", target.Text);
+        Assert.AreEqual(string.Empty, target.Text, "reset removes the BindingPath value");
     }
 
     [TestMethod]
@@ -134,7 +134,7 @@ public sealed class TemplateContextTests
         context.Reset();
         source.Count.Value = 2;
 
-        Assert.AreEqual("Count: 1", target.Text);
+        Assert.AreEqual(string.Empty, target.Text, "reset removes the converted BindingPath value");
     }
 
     [TestMethod]

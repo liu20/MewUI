@@ -1,4 +1,7 @@
 using Aprillz.MewUI.Rendering;
+using Aprillz.MewUI.Text;
+
+#pragma warning disable CS0618 // Keep fluent compatibility methods for the legacy MultiLineTextBox.
 
 namespace Aprillz.MewUI.Controls;
 
@@ -86,6 +89,29 @@ public static class ControlExtensions
         control.FontSize = fontSize;
         return control;
     }
+
+    /// <summary>
+    /// Sets the font size resolved once from the current theme's <see cref="ThemeMetrics"/>;
+    /// themes with per-variant metrics re-resolve by calling this inside a WithTheme callback.
+    /// </summary>
+    /// <typeparam name="T">Control type.</typeparam>
+    /// <param name="control">Target control.</param>
+    /// <param name="size">Theme font size step.</param>
+    /// <returns>The control for chaining.</returns>
+    public static T FontSize<T>(this T control, ThemeFontSize size) where T : Control
+    {
+        control.FontSize = ResolveThemeFontSize(control.ThemeInternal.Metrics, size);
+        return control;
+    }
+
+    private static double ResolveThemeFontSize(ThemeMetrics metrics, ThemeFontSize size) => size switch
+    {
+        ThemeFontSize.Small => metrics.FontSizeSmall,
+        ThemeFontSize.Medium => metrics.FontSizeMedium,
+        ThemeFontSize.Large => metrics.FontSizeLarge,
+        ThemeFontSize.ExtraLarge => metrics.FontSizeExtraLarge,
+        _ => metrics.FontSize
+    };
 
     /// <summary>
     /// Sets the font weight.
@@ -522,6 +548,15 @@ public static class ControlExtensions
         return element;
     }
 
+    /// <summary>Adds a text input handler to the extensible multi-line editor.</summary>
+    public static MultiLineTextBox OnTextInput(
+        this MultiLineTextBox element,
+        Action<TextInputEventArgs> handler)
+    {
+        element.TextInput += handler;
+        return element;
+    }
+
     /// <summary>
     /// Adds a text composition start event handler.
     /// </summary>
@@ -530,6 +565,15 @@ public static class ControlExtensions
     /// <param name="handler">Event handler.</param>
     /// <returns>The element for chaining.</returns>
     public static T OnTextCompositionStart<T>(this T element, Action<TextCompositionEventArgs> handler) where T : TextBase
+    {
+        element.TextCompositionStart += handler;
+        return element;
+    }
+
+    /// <summary>Adds a composition-start handler to the extensible multi-line editor.</summary>
+    public static MultiLineTextBox OnTextCompositionStart(
+        this MultiLineTextBox element,
+        Action<TextCompositionEventArgs> handler)
     {
         element.TextCompositionStart += handler;
         return element;
@@ -548,6 +592,15 @@ public static class ControlExtensions
         return element;
     }
 
+    /// <summary>Adds a composition-update handler to the extensible multi-line editor.</summary>
+    public static MultiLineTextBox OnTextCompositionUpdate(
+        this MultiLineTextBox element,
+        Action<TextCompositionEventArgs> handler)
+    {
+        element.TextCompositionUpdate += handler;
+        return element;
+    }
+
     /// <summary>
     /// Adds a text composition end event handler.
     /// </summary>
@@ -556,6 +609,15 @@ public static class ControlExtensions
     /// <param name="handler">Event handler.</param>
     /// <returns>The element for chaining.</returns>
     public static T OnTextCompositionEnd<T>(this T element, Action<TextCompositionEventArgs> handler) where T : TextBase
+    {
+        element.TextCompositionEnd += handler;
+        return element;
+    }
+
+    /// <summary>Adds a composition-end handler to the extensible multi-line editor.</summary>
+    public static MultiLineTextBox OnTextCompositionEnd(
+        this MultiLineTextBox element,
+        Action<TextCompositionEventArgs> handler)
     {
         element.TextCompositionEnd += handler;
         return element;
@@ -678,7 +740,7 @@ public static class ControlExtensions
         if (accessKey)
         {
             var at = new AccessText().SemiBold();
-            at.SetRawText(text ?? string.Empty);
+            at.RawText = text ?? string.Empty;
             control.Header = at;
         }
         else
@@ -989,6 +1051,43 @@ public static class ControlExtensions
     }
 
     /// <summary>
+    /// Sets the extra gap between lines (in DIPs); negative values tighten.
+    /// </summary>
+    /// <param name="textBlock">Target text block.</param>
+    /// <param name="lineSpacing">Gap in DIPs added between line boxes.</param>
+    /// <returns>The text block for chaining.</returns>
+    public static TextBlock LineSpacing(this TextBlock textBlock, double lineSpacing)
+    {
+        textBlock.LineSpacing = lineSpacing;
+        return textBlock;
+    }
+
+    /// <summary>
+    /// Sets cap-height trimming of the outer line boxes; ink may paint outside the trimmed bounds.
+    /// </summary>
+    /// <param name="textBlock">Target text block.</param>
+    /// <param name="trim">Trim mode.</param>
+    /// <returns>The text block for chaining.</returns>
+    public static TextBlock LineBoxTrim(this TextBlock textBlock, LineBoxTrim trim)
+    {
+        textBlock.LineBoxTrim = trim;
+        return textBlock;
+    }
+
+    /// <summary>
+    /// Sets the font size resolved once from the current theme's <see cref="ThemeMetrics"/>;
+    /// themes with per-variant metrics re-resolve by calling this inside a WithTheme callback.
+    /// </summary>
+    /// <param name="textBlock">Target text block.</param>
+    /// <param name="size">Theme font size step.</param>
+    /// <returns>The text block for chaining.</returns>
+    public static TextBlock FontSize(this TextBlock textBlock, ThemeFontSize size)
+    {
+        textBlock.FontSize = ResolveThemeFontSize(textBlock.ThemeInternal.Metrics, size);
+        return textBlock;
+    }
+
+    /// <summary>
     /// Sets the font weight.
     /// </summary>
     /// <param name="textBlock">Target text block.</param>
@@ -1115,7 +1214,7 @@ public static class ControlExtensions
 
     internal static AccessText RawText(this AccessText at, string text)
     {
-        at.SetRawText(text);
+        at.RawText = text;
         return at;
     }
 
@@ -1190,7 +1289,7 @@ public static class ControlExtensions
                 TextAlignment = MewUI.TextAlignment.Center,
                 VerticalTextAlignment = MewUI.TextAlignment.Center,
             };
-            at.SetRawText(text);
+            at.RawText = text;
             button.Content = at;
         }
         else
@@ -1212,18 +1311,34 @@ public static class ControlExtensions
     /// </summary>
     /// <param name="button">Target button.</param>
     /// <param name="source">Observable source.</param>
+    /// <param name="accessKey">Whether underscore prefixes define access keys.</param>
     /// <returns>The button for chaining.</returns>
-    public static Button BindContent(this Button button, ObservableValue<string> source)
+    public static Button BindContent(this Button button, ObservableValue<string> source, bool accessKey = true)
     {
-        var tb = new TextBlock
+        if (accessKey)
         {
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            TextAlignment = MewUI.TextAlignment.Center,
-            VerticalTextAlignment = MewUI.TextAlignment.Center,
-        };
-        tb.SetBinding(TextBlock.TextProperty, source, BindingMode.OneWay);
-        button.Content = tb;
+            var at = new AccessText
+            {
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = MewUI.TextAlignment.Center,
+                VerticalTextAlignment = MewUI.TextAlignment.Center,
+            };
+            at.SetBinding(AccessText.RawTextProperty, source, BindingMode.OneWay);
+            button.Content = at;
+        }
+        else
+        {
+            var tb = new TextBlock
+            {
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = MewUI.TextAlignment.Center,
+                VerticalTextAlignment = MewUI.TextAlignment.Center,
+            };
+            tb.SetBinding(TextBlock.TextProperty, source, BindingMode.OneWay);
+            button.Content = tb;
+        }
         return button;
     }
 
@@ -1234,18 +1349,34 @@ public static class ControlExtensions
     /// <param name="button">Target button.</param>
     /// <param name="source">Observable source.</param>
     /// <param name="convert">Conversion function.</param>
+    /// <param name="accessKey">Whether underscore prefixes define access keys.</param>
     /// <returns>The button for chaining.</returns>
-    public static Button BindContent<TSource>(this Button button, ObservableValue<TSource> source, Func<TSource, string> convert)
+    public static Button BindContent<TSource>(this Button button, ObservableValue<TSource> source, Func<TSource, string> convert, bool accessKey = true)
     {
-        var tb = new TextBlock
+        if (accessKey)
         {
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            TextAlignment = MewUI.TextAlignment.Center,
-            VerticalTextAlignment = MewUI.TextAlignment.Center,
-        };
-        tb.SetBinding(TextBlock.TextProperty, source, v => convert(v) ?? string.Empty);
-        button.Content = tb;
+            var at = new AccessText
+            {
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = MewUI.TextAlignment.Center,
+                VerticalTextAlignment = MewUI.TextAlignment.Center,
+            };
+            at.SetBinding(AccessText.RawTextProperty, source, v => convert(v) ?? string.Empty);
+            button.Content = at;
+        }
+        else
+        {
+            var tb = new TextBlock
+            {
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = MewUI.TextAlignment.Center,
+                VerticalTextAlignment = MewUI.TextAlignment.Center,
+            };
+            tb.SetBinding(TextBlock.TextProperty, source, v => convert(v) ?? string.Empty);
+            button.Content = tb;
+        }
         return button;
     }
 
@@ -1279,6 +1410,35 @@ public static class ControlExtensions
         ArgumentNullException.ThrowIfNull(convert);
 
         button.SetBinding(Button.ContentProperty, source, convert, mode: BindingMode.OneWay);
+        return button;
+    }
+
+    /// <summary>
+    /// Sets the semantic command invoked by the button.
+    /// </summary>
+    public static Button Command(
+        this Button button,
+        Command? command,
+        CommandPresentationMode presentation = CommandPresentationMode.None)
+    {
+        ArgumentNullException.ThrowIfNull(button);
+        button.Command = command;
+        button.CommandPresentationMode = presentation;
+        return button;
+    }
+
+    /// <summary>
+    /// Binds the button's semantic command to an observable value.
+    /// </summary>
+    public static Button BindCommand(
+        this Button button,
+        ObservableValue<Command?> source,
+        CommandPresentationMode presentation = CommandPresentationMode.None)
+    {
+        ArgumentNullException.ThrowIfNull(button);
+        ArgumentNullException.ThrowIfNull(source);
+        button.SetBinding(Button.CommandProperty, source, BindingMode.OneWay);
+        button.CommandPresentationMode = presentation;
         return button;
     }
 
@@ -1318,33 +1478,6 @@ public static class ControlExtensions
         return button;
     }
 
-    /// <summary>
-    /// Sets the can click predicate.
-    /// </summary>
-    /// <param name="button">Target button.</param>
-    /// <param name="canClick">Can click function.</param>
-    /// <returns>The button for chaining.</returns>
-    public static Button OnCanClick(this Button button, Func<bool> canClick)
-    {
-        ArgumentNullException.ThrowIfNull(button);
-        ArgumentNullException.ThrowIfNull(canClick);
-
-        button.CanClick = canClick;
-        return button;
-    }
-
-    /// <summary>
-    /// Sets the predicate that determines whether the button can be clicked.
-    /// </summary>
-    /// <param name="button">Target button.</param>
-    /// <param name="value">Can-click predicate.</param>
-    /// <returns>The button for chaining.</returns>
-    public static Button CanClick(this Button button, Func<bool>? value)
-    {
-        button.CanClick = value;
-        return button;
-    }
-
     #endregion
 
     #region TextBox
@@ -1373,6 +1506,13 @@ public static class ControlExtensions
         return textBox;
     }
 
+    /// <summary>Sets placeholder text on the extensible multi-line editor.</summary>
+    public static MultiLineTextBox Placeholder(this MultiLineTextBox textBox, string placeholder)
+    {
+        textBox.Placeholder = placeholder;
+        return textBox;
+    }
+
     /// <summary>
     /// Sets the password.
     /// </summary>
@@ -1396,6 +1536,7 @@ public static class ControlExtensions
         passwordBox.PasswordChar = value;
         return passwordBox;
     }
+
 
     /// <summary>
     /// Sets the placeholder text.
@@ -1423,6 +1564,12 @@ public static class ControlExtensions
         return textBox;
     }
 
+    public static MultiLineTextBox IsReadOnly(this MultiLineTextBox textBox, bool isReadOnly = true)
+    {
+        textBox.IsReadOnly = isReadOnly;
+        return textBox;
+    }
+
     /// <summary>
     /// Sets whether the text box accepts tab characters.
     /// </summary>
@@ -1436,6 +1583,12 @@ public static class ControlExtensions
         return textBox;
     }
 
+    public static MultiLineTextBox AcceptTab(this MultiLineTextBox textBox, bool acceptTab = true)
+    {
+        textBox.AcceptTab = acceptTab;
+        return textBox;
+    }
+
     /// <summary>
     /// Sets the caret position.
     /// </summary>
@@ -1444,6 +1597,12 @@ public static class ControlExtensions
     /// <param name="value">Caret position.</param>
     /// <returns>The text input for chaining.</returns>
     public static T CaretPosition<T>(this T textBox, int value) where T : TextBase
+    {
+        textBox.CaretPosition = value;
+        return textBox;
+    }
+
+    public static MultiLineTextBox CaretPosition(this MultiLineTextBox textBox, int value)
     {
         textBox.CaretPosition = value;
         return textBox;
@@ -1465,6 +1624,14 @@ public static class ControlExtensions
         return textBox;
     }
 
+    public static MultiLineTextBox ImeMode(
+        this MultiLineTextBox textBox,
+        global::Aprillz.MewUI.Input.ImeMode value)
+    {
+        textBox.ImeMode = value;
+        return textBox;
+    }
+
     /// <summary>
     /// Sets the maximum text length.
     /// </summary>
@@ -1478,16 +1645,9 @@ public static class ControlExtensions
         return textBox;
     }
 
-    /// <summary>
-    /// Adds a text wrapping state change handler.
-    /// </summary>
-    /// <typeparam name="T">Text input type.</typeparam>
-    /// <param name="textBox">Target text input.</param>
-    /// <param name="handler">Event handler.</param>
-    /// <returns>The text input for chaining.</returns>
-    public static T OnWrapChanged<T>(this T textBox, Action<bool> handler) where T : TextBase
+    public static MultiLineTextBox MaxLength(this MultiLineTextBox textBox, int value)
     {
-        textBox.WrapChanged += handler;
+        textBox.MaxLength = value;
         return textBox;
     }
 
@@ -1499,6 +1659,14 @@ public static class ControlExtensions
     /// <param name="handler">Event handler.</param>
     /// <returns>The text box for chaining.</returns>
     public static T OnTextChanged<T>(this T textBox, Action<string> handler) where T : TextBase
+    {
+        textBox.TextChanged += handler;
+        return textBox;
+    }
+
+    public static MultiLineTextBox OnTextChanged(
+        this MultiLineTextBox textBox,
+        Action<string> handler)
     {
         textBox.TextChanged += handler;
         return textBox;
@@ -1633,12 +1801,66 @@ public static class ControlExtensions
         if (accessKey)
         {
             var at = new AccessText();
-            at.SetRawText(text);
+            at.RawText = text;
             control.Content = at;
         }
         else
         {
             control.Content = new TextBlock { Text = text };
+        }
+        return control;
+    }
+
+    /// <summary>
+    /// Binds the content to an observable text label. When <paramref name="accessKey"/> is true (default),
+    /// "_" prefixes mark access key characters and stay in sync as the source changes.
+    /// </summary>
+    /// <typeparam name="T">Toggle control type.</typeparam>
+    /// <param name="control">Target toggle control.</param>
+    /// <param name="source">Observable source.</param>
+    /// <param name="accessKey">Whether underscore prefixes define access keys.</param>
+    /// <returns>The control for chaining.</returns>
+    public static T BindContent<T>(this T control, ObservableValue<string> source, bool accessKey = true) where T : ToggleBase
+    {
+        if (accessKey)
+        {
+            var at = new AccessText();
+            at.SetBinding(AccessText.RawTextProperty, source, BindingMode.OneWay);
+            control.Content = at;
+        }
+        else
+        {
+            var tb = new TextBlock();
+            tb.SetBinding(TextBlock.TextProperty, source, BindingMode.OneWay);
+            control.Content = tb;
+        }
+        return control;
+    }
+
+    /// <summary>
+    /// Binds the content to an observable value with a converter. When <paramref name="accessKey"/> is true
+    /// (default), "_" prefixes in the converted text mark access key characters.
+    /// </summary>
+    /// <typeparam name="T">Toggle control type.</typeparam>
+    /// <typeparam name="TSource">Source value type.</typeparam>
+    /// <param name="control">Target toggle control.</param>
+    /// <param name="source">Observable source.</param>
+    /// <param name="convert">Conversion function.</param>
+    /// <param name="accessKey">Whether underscore prefixes define access keys.</param>
+    /// <returns>The control for chaining.</returns>
+    public static T BindContent<T, TSource>(this T control, ObservableValue<TSource> source, Func<TSource, string> convert, bool accessKey = true) where T : ToggleBase
+    {
+        if (accessKey)
+        {
+            var at = new AccessText();
+            at.SetBinding(AccessText.RawTextProperty, source, v => convert(v) ?? string.Empty);
+            control.Content = at;
+        }
+        else
+        {
+            var tb = new TextBlock();
+            tb.SetBinding(TextBlock.TextProperty, source, v => convert(v) ?? string.Empty);
+            control.Content = tb;
         }
         return control;
     }
@@ -1686,12 +1908,64 @@ public static class ControlExtensions
         if (accessKey)
         {
             var at = new AccessText();
-            at.SetRawText(text);
+            at.RawText = text;
             checkBox.Content = at;
         }
         else
         {
             checkBox.Content = new TextBlock { Text = text };
+        }
+        return checkBox;
+    }
+
+    /// <summary>
+    /// Binds the content to an observable text label. When <paramref name="accessKey"/> is true (default),
+    /// "_" prefixes mark access key characters and stay in sync as the source changes.
+    /// </summary>
+    /// <param name="checkBox">Target check box.</param>
+    /// <param name="source">Observable source.</param>
+    /// <param name="accessKey">Whether underscore prefixes define access keys.</param>
+    /// <returns>The check box for chaining.</returns>
+    public static CheckBox BindContent(this CheckBox checkBox, ObservableValue<string> source, bool accessKey = true)
+    {
+        if (accessKey)
+        {
+            var at = new AccessText();
+            at.SetBinding(AccessText.RawTextProperty, source, BindingMode.OneWay);
+            checkBox.Content = at;
+        }
+        else
+        {
+            var tb = new TextBlock();
+            tb.SetBinding(TextBlock.TextProperty, source, BindingMode.OneWay);
+            checkBox.Content = tb;
+        }
+        return checkBox;
+    }
+
+    /// <summary>
+    /// Binds the content to an observable value with a converter. When <paramref name="accessKey"/> is true
+    /// (default), "_" prefixes in the converted text mark access key characters.
+    /// </summary>
+    /// <typeparam name="TSource">Source value type.</typeparam>
+    /// <param name="checkBox">Target check box.</param>
+    /// <param name="source">Observable source.</param>
+    /// <param name="convert">Conversion function.</param>
+    /// <param name="accessKey">Whether underscore prefixes define access keys.</param>
+    /// <returns>The check box for chaining.</returns>
+    public static CheckBox BindContent<TSource>(this CheckBox checkBox, ObservableValue<TSource> source, Func<TSource, string> convert, bool accessKey = true)
+    {
+        if (accessKey)
+        {
+            var at = new AccessText();
+            at.SetBinding(AccessText.RawTextProperty, source, v => convert(v) ?? string.Empty);
+            checkBox.Content = at;
+        }
+        else
+        {
+            var tb = new TextBlock();
+            tb.SetBinding(TextBlock.TextProperty, source, v => convert(v) ?? string.Empty);
+            checkBox.Content = tb;
         }
         return checkBox;
     }
@@ -1988,7 +2262,7 @@ public static class ControlExtensions
                 TextAlignment = MewUI.TextAlignment.Center,
                 VerticalTextAlignment = MewUI.TextAlignment.Center,
             };
-            at.SetRawText(text);
+            at.RawText = text;
             toggleButton.Content = at;
         }
         else
@@ -2001,6 +2275,82 @@ public static class ControlExtensions
                 TextAlignment = MewUI.TextAlignment.Center,
                 VerticalTextAlignment = MewUI.TextAlignment.Center,
             };
+        }
+        return toggleButton;
+    }
+
+    /// <summary>
+    /// Binds the content to an observable text label (centered). When <paramref name="accessKey"/> is true
+    /// (default), "_" prefixes mark access key characters and stay in sync as the source changes.
+    /// </summary>
+    /// <param name="toggleButton">Target toggle button.</param>
+    /// <param name="source">Observable source.</param>
+    /// <param name="accessKey">Whether underscore prefixes define access keys.</param>
+    /// <returns>The toggle button for chaining.</returns>
+    public static ToggleButton BindContent(this ToggleButton toggleButton, ObservableValue<string> source, bool accessKey = true)
+    {
+        if (accessKey)
+        {
+            var at = new AccessText
+            {
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = MewUI.TextAlignment.Center,
+                VerticalTextAlignment = MewUI.TextAlignment.Center,
+            };
+            at.SetBinding(AccessText.RawTextProperty, source, BindingMode.OneWay);
+            toggleButton.Content = at;
+        }
+        else
+        {
+            var tb = new TextBlock
+            {
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = MewUI.TextAlignment.Center,
+                VerticalTextAlignment = MewUI.TextAlignment.Center,
+            };
+            tb.SetBinding(TextBlock.TextProperty, source, BindingMode.OneWay);
+            toggleButton.Content = tb;
+        }
+        return toggleButton;
+    }
+
+    /// <summary>
+    /// Binds the content to an observable value with a converter (centered). When <paramref name="accessKey"/>
+    /// is true (default), "_" prefixes in the converted text mark access key characters.
+    /// </summary>
+    /// <typeparam name="TSource">Source value type.</typeparam>
+    /// <param name="toggleButton">Target toggle button.</param>
+    /// <param name="source">Observable source.</param>
+    /// <param name="convert">Conversion function.</param>
+    /// <param name="accessKey">Whether underscore prefixes define access keys.</param>
+    /// <returns>The toggle button for chaining.</returns>
+    public static ToggleButton BindContent<TSource>(this ToggleButton toggleButton, ObservableValue<TSource> source, Func<TSource, string> convert, bool accessKey = true)
+    {
+        if (accessKey)
+        {
+            var at = new AccessText
+            {
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = MewUI.TextAlignment.Center,
+                VerticalTextAlignment = MewUI.TextAlignment.Center,
+            };
+            at.SetBinding(AccessText.RawTextProperty, source, v => convert(v) ?? string.Empty);
+            toggleButton.Content = at;
+        }
+        else
+        {
+            var tb = new TextBlock
+            {
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = MewUI.TextAlignment.Center,
+                VerticalTextAlignment = MewUI.TextAlignment.Center,
+            };
+            tb.SetBinding(TextBlock.TextProperty, source, v => convert(v) ?? string.Empty);
+            toggleButton.Content = tb;
         }
         return toggleButton;
     }
@@ -2515,8 +2865,9 @@ public static class ControlExtensions
 
     /// <summary>
     /// Configures each <see cref="ButtonGroup"/> segment container after its content is bound. Use it
-    /// to wire the segment's <see cref="SegmentButton.Click"/> (command), <see cref="SegmentButton.IsCheckable"/>
-    /// / <see cref="SegmentButton.IsChecked"/> (independent toggle), enabled state, or tooltip.
+    /// to assign <see cref="SegmentButton.Command"/>, subscribe to <see cref="SegmentButton.Click"/>,
+    /// or configure <see cref="SegmentButton.IsCheckable"/> / <see cref="SegmentButton.IsChecked"/>
+    /// (independent toggle), enabled state, or tooltip.
     /// </summary>
     public static ButtonGroup PrepareContainer<T>(this ButtonGroup control, Action<SegmentButton, T, int> prepare)
     {
@@ -2525,6 +2876,23 @@ public static class ControlExtensions
 
         control.SetPrepareContainer((container, item, index) => prepare(container, (T)item!, index));
         return control;
+    }
+
+    /// <summary>Sets the semantic command invoked by a segment button.</summary>
+    public static SegmentButton Command(this SegmentButton button, Command? command)
+    {
+        ArgumentNullException.ThrowIfNull(button);
+        button.Command = command;
+        return button;
+    }
+
+    /// <summary>Binds the semantic command invoked by a segment button.</summary>
+    public static SegmentButton BindCommand(this SegmentButton button, ObservableValue<Command?> source)
+    {
+        ArgumentNullException.ThrowIfNull(button);
+        ArgumentNullException.ThrowIfNull(source);
+        button.SetBinding(SegmentButton.CommandProperty, source, BindingMode.OneWay);
+        return button;
     }
 
     /// <summary>Sets how a segmented control sizes its segments along the horizontal axis.</summary>
@@ -3348,33 +3716,37 @@ public static class ControlExtensions
     }
 
     /// <summary>
-    /// Adds a menu item.
+    /// Adds a semantic command item.
     /// </summary>
     /// <param name="menu">Target context menu.</param>
     /// <param name="text">Item text.</param>
-    /// <param name="onClick">Click handler.</param>
-    /// <param name="isEnabled">Enabled state.</param>
+    /// <param name="command">Semantic command.</param>
     /// <returns>The context menu for chaining.</returns>
-    public static ContextMenu Item(this ContextMenu menu, string text, Action? onClick = null, bool isEnabled = true)
+    public static ContextMenu Item(this ContextMenu menu, string text, Command command)
     {
         ArgumentNullException.ThrowIfNull(menu);
-        menu.AddItem(text, onClick, isEnabled);
+        menu.AddItem(text, command);
+        return menu;
+    }
+
+    /// <summary>Adds a non-executable presentation item.</summary>
+    public static ContextMenu Item(this ContextMenu menu, string text, bool isEnabled = true)
+    {
+        ArgumentNullException.ThrowIfNull(menu);
+        menu.AddItem(text, isEnabled);
         return menu;
     }
 
     /// <summary>
-    /// Adds a menu item with a keyboard shortcut.
+    /// Adds a semantic command item using command presentation metadata.
     /// </summary>
     /// <param name="menu">Target context menu.</param>
-    /// <param name="text">Item text.</param>
-    /// <param name="shortcut">Keyboard shortcut gesture.</param>
-    /// <param name="onClick">Click handler.</param>
-    /// <param name="isEnabled">Enabled state.</param>
+    /// <param name="command">Semantic command.</param>
     /// <returns>The context menu for chaining.</returns>
-    public static ContextMenu Item(this ContextMenu menu, string text, KeyGesture shortcut, Action? onClick = null, bool isEnabled = true)
+    public static ContextMenu Item(this ContextMenu menu, Command command)
     {
         ArgumentNullException.ThrowIfNull(menu);
-        menu.AddItem(text, onClick, isEnabled, shortcut);
+        menu.AddItem(command);
         return menu;
     }
 
@@ -3392,24 +3764,6 @@ public static class ControlExtensions
         ArgumentNullException.ThrowIfNull(subMenu);
 
         menu.AddSubMenu(text, subMenu.Menu, isEnabled);
-        return menu;
-    }
-
-    /// <summary>
-    /// Adds a submenu with a keyboard shortcut.
-    /// </summary>
-    /// <param name="menu">Target context menu.</param>
-    /// <param name="text">Submenu text.</param>
-    /// <param name="shortcut">Keyboard shortcut gesture.</param>
-    /// <param name="subMenu">Submenu.</param>
-    /// <param name="isEnabled">Enabled state.</param>
-    /// <returns>The context menu for chaining.</returns>
-    public static ContextMenu SubMenu(this ContextMenu menu, string text, KeyGesture shortcut, ContextMenu subMenu, bool isEnabled = true)
-    {
-        ArgumentNullException.ThrowIfNull(menu);
-        ArgumentNullException.ThrowIfNull(subMenu);
-
-        menu.AddSubMenu(text, subMenu.Menu, isEnabled, shortcut);
         return menu;
     }
 
@@ -3710,7 +4064,7 @@ public static class ControlExtensions
         if (accessKey)
         {
             var at = new AccessText();
-            at.SetRawText(text);
+            at.RawText = text;
             tab.Header = at;
         }
         else
@@ -3976,6 +4330,51 @@ public static class ControlExtensions
     #endregion
 
     #region ProgressBar
+
+    /// <summary>
+    /// Sets whether the progress bar shows an indeterminate animation.
+    /// </summary>
+    /// <param name="progressBar">Target progress bar.</param>
+    /// <param name="value">Whether the progress bar is indeterminate.</param>
+    /// <returns>The progress bar for chaining.</returns>
+    public static ProgressBar IsIndeterminate(this ProgressBar progressBar, bool value = true)
+    {
+        progressBar.IsIndeterminate = value;
+        return progressBar;
+    }
+
+    /// <summary>
+    /// Binds the indeterminate state to an observable value.
+    /// </summary>
+    /// <param name="progressBar">Target progress bar.</param>
+    /// <param name="source">Observable source.</param>
+    /// <returns>The progress bar for chaining.</returns>
+    public static ProgressBar BindIsIndeterminate(this ProgressBar progressBar, ObservableValue<bool> source)
+    {
+        progressBar.SetBinding(ProgressBar.IsIndeterminateProperty, source);
+        return progressBar;
+    }
+
+    /// <summary>
+    /// Binds the indeterminate state to a converted observable value.
+    /// </summary>
+    /// <typeparam name="TSource">Source value type.</typeparam>
+    /// <param name="progressBar">Target progress bar.</param>
+    /// <param name="source">Observable source.</param>
+    /// <param name="convert">Source-to-indeterminate-state converter.</param>
+    /// <returns>The progress bar for chaining.</returns>
+    public static ProgressBar BindIsIndeterminate<TSource>(
+        this ProgressBar progressBar,
+        ObservableValue<TSource> source,
+        Func<TSource, bool> convert)
+    {
+        ArgumentNullException.ThrowIfNull(progressBar);
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(convert);
+
+        progressBar.SetBinding(ProgressBar.IsIndeterminateProperty, source, convert, mode: BindingMode.OneWay);
+        return progressBar;
+    }
 
     /// <summary>
     /// Binds the value to an observable value.
@@ -4610,6 +5009,62 @@ public static class ControlExtensions
 
     #endregion
 
+    #region Popup
+
+    /// <summary>
+    /// Sets the element shown in the popup surface.
+    /// </summary>
+    /// <typeparam name="T">Popup type.</typeparam>
+    /// <param name="popup">Target popup.</param>
+    /// <param name="content">Content element.</param>
+    /// <returns>The popup for chaining.</returns>
+    public static T Content<T>(this T popup, UIElement content) where T : Popup
+    {
+        popup.Content = content;
+        return popup;
+    }
+
+    /// <summary>
+    /// Sets whether the popup survives an outside press and a focus change.
+    /// </summary>
+    /// <typeparam name="T">Popup type.</typeparam>
+    /// <param name="popup">Target popup.</param>
+    /// <param name="staysOpen">Whether the popup stays open.</param>
+    /// <returns>The popup for chaining.</returns>
+    public static T StaysOpen<T>(this T popup, bool staysOpen = true) where T : Popup
+    {
+        popup.StaysOpen = staysOpen;
+        return popup;
+    }
+
+    /// <summary>
+    /// Adds a handler raised after the popup opens.
+    /// </summary>
+    /// <typeparam name="T">Popup type.</typeparam>
+    /// <param name="popup">Target popup.</param>
+    /// <param name="handler">Event handler.</param>
+    /// <returns>The popup for chaining.</returns>
+    public static T OnOpened<T>(this T popup, EventHandler handler) where T : Popup
+    {
+        popup.Opened += handler;
+        return popup;
+    }
+
+    /// <summary>
+    /// Adds a handler raised after the popup closes.
+    /// </summary>
+    /// <typeparam name="T">Popup type.</typeparam>
+    /// <param name="popup">Target popup.</param>
+    /// <param name="handler">Event handler.</param>
+    /// <returns>The popup for chaining.</returns>
+    public static T OnClosed<T>(this T popup, EventHandler<PopupClosedEventArgs> handler) where T : Popup
+    {
+        popup.Closed += handler;
+        return popup;
+    }
+
+    #endregion
+
     #region Calendar
 
     /// <summary>
@@ -5109,3 +5564,5 @@ public static class ControlExtensions
 
     #endregion
 }
+
+#pragma warning restore CS0618

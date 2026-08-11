@@ -64,7 +64,7 @@ public sealed class TracingPlatformHostTests
         public uint GetDpiForWindow(nint windowHandle) => 96;
         public bool EnablePerMonitorDpiAwareness() => false;
         public int GetSystemMetricsForDpi(int nIndex, uint dpi) => 0;
-        public void Run(Application app, Window mainWindow) { }
+        public void Run(Application app, Window? mainWindow) { }
         public void Quit(Application app) { }
         public void DoEvents() { }
         public void Dispose() { }
@@ -101,6 +101,8 @@ public sealed class TracingPlatformHostTests
         public void SetClientSize(double widthDip, double heightDip) { }
         public Point GetPosition() => default;
         public void SetPosition(double leftDip, double topDip) { }
+
+        public void SetPositionPx(int leftPx, int topPx) { }
         public void CaptureMouse() { }
         public void ReleaseMouseCapture() { }
         public Point ClientToScreen(Point clientPointDip) => clientPointDip;

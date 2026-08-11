@@ -2,6 +2,7 @@ using Aprillz.MewUI;
 using Aprillz.MewUI.Controls;
 using Aprillz.MewUI.Input;
 using Aprillz.MewUI.Platform;
+using MewUI.Test.Infrastructure;
 
 namespace MewUI.Test.Core;
 
@@ -9,8 +10,7 @@ namespace MewUI.Test.Core;
 [DoNotParallelize]
 public sealed class ApplicationFailureRecoveryTests
 {
-    private static readonly Queue<FailurePlatformHost> Hosts = new();
-    private static bool _registered;
+    private static Queue<IPlatformHost> Hosts => TestPlatformHosts.Queue;
 
     [TestMethod]
     public void StartupAndRunFailures_DoNotPreventAnotherRun()
@@ -67,6 +67,35 @@ public sealed class ApplicationFailureRecoveryTests
         Application.Run(mainWindow);
 
         Assert.IsFalse(WindowDragDropRouter.HasPendingState);
+    }
+
+    [TestMethod]
+    public void DispatcherDrain_ReevaluatesCommandSourcesWithoutNotification()
+    {
+        if (!OperatingSystem.IsWindows()) { Assert.Inconclusive("GDI backend is Windows-only."); return; }
+
+        EnsureRegistered();
+        bool canExecute = false;
+        var command = new Command("test.dispatcherDrain");
+        var button = new Button { Command = command };
+        var mainWindow = HeadlessWindow.Create();
+        mainWindow.Commands.Register(command, static () => { }, () => canExecute);
+        mainWindow.Content = button;
+        mainWindow.PerformLayout();
+
+        Hosts.Enqueue(new FailurePlatformHost(onRun: (_, _) =>
+        {
+            Assert.IsFalse(button.IsEffectivelyEnabled);
+
+            var queue = new DispatcherQueue();
+            queue.Enqueue(DispatcherPriority.Normal, () => canExecute = true);
+            queue.Process();
+
+            Assert.IsTrue(button.IsEffectivelyEnabled,
+                "dispatcher drain must evaluate tracked sources without RequerySuggested");
+        }));
+
+        Application.Run(mainWindow);
     }
 
     [TestMethod]
@@ -139,58 +168,35 @@ public sealed class ApplicationFailureRecoveryTests
     public void OnExplicitShutdown_ClosingSoleWindow_DoesNotQuit()
     {
         EnsureRegistered();
-        var previous = Application.ShutdownMode;
-        Application.ShutdownMode = ShutdownMode.OnExplicitShutdown;
-        try
-        {
-            var host = new FailurePlatformHost(onRun: (app, window) => app.UnregisterWindow(window));
-            Hosts.Enqueue(host);
+        var host = new FailurePlatformHost(onRun: (app, window) => app.UnregisterWindow(window));
+        Hosts.Enqueue(host);
 
-            Application.Run(new Window());
+        Application.Create()
+            .WithShutdownMode(ShutdownMode.OnExplicitShutdown)
+            .Run(new Window());
 
-            Assert.IsFalse(host.QuitCalled);
-        }
-        finally
-        {
-            Application.ShutdownMode = previous;
-        }
+        Assert.IsFalse(host.QuitCalled);
     }
 
     [TestMethod]
     public void OnMainWindowClose_ClosingMainWhileOthersRemain_Quits()
     {
         EnsureRegistered();
-        var previous = Application.ShutdownMode;
-        Application.ShutdownMode = ShutdownMode.OnMainWindowClose;
-        try
+        var host = new FailurePlatformHost(onRun: (app, mainWindow) =>
         {
-            var host = new FailurePlatformHost(onRun: (app, mainWindow) =>
-            {
-                app.RegisterWindow(new Window());
-                app.UnregisterWindow(mainWindow);
-            });
-            Hosts.Enqueue(host);
+            app.RegisterWindow(new Window());
+            app.UnregisterWindow(mainWindow);
+        });
+        Hosts.Enqueue(host);
 
-            Application.Run(new Window());
+        Application.Create()
+            .WithShutdownMode(ShutdownMode.OnMainWindowClose)
+            .Run(new Window());
 
-            Assert.IsTrue(host.QuitCalled);
-        }
-        finally
-        {
-            Application.ShutdownMode = previous;
-        }
+        Assert.IsTrue(host.QuitCalled);
     }
 
-    private static void EnsureRegistered()
-    {
-        if (_registered)
-        {
-            return;
-        }
-
-        Application.RegisterPlatformHost(static () => Hosts.Dequeue(), Aprillz.MewUI.Platform.PlatformSurfaceKind.Win32, "Test");
-        _registered = true;
-    }
+    private static void EnsureRegistered() => TestPlatformHosts.EnsureRegistered();
 
     private sealed class FailurePlatformHost(
         bool throwFromFontDefaults = false,
@@ -214,7 +220,7 @@ public sealed class ApplicationFailureRecoveryTests
         public bool EnablePerMonitorDpiAwareness() => false;
         public int GetSystemMetricsForDpi(int nIndex, uint dpi) => 0;
 
-        public void Run(Application app, Window mainWindow)
+        public void Run(Application app, Window? mainWindow)
         {
             RunningApplication = app;
             if (throwFromRun)
@@ -222,7 +228,7 @@ public sealed class ApplicationFailureRecoveryTests
                 throw new InvalidOperationException("run failure");
             }
 
-            onRun?.Invoke(app, mainWindow);
+            onRun?.Invoke(app, mainWindow!);
         }
 
         public bool QuitCalled { get; private set; }

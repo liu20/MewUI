@@ -33,7 +33,7 @@ public class Expander : HeaderedContentControl, IVisualTreeHost
     internal override void OnAccessKey()
     {
         Focus();
-        IsExpanded = !IsExpanded;
+        CommitTargetValue(IsExpandedProperty, !IsExpanded);
     }
 
     protected virtual void OnIsExpandedChanged(bool oldValue, bool newValue)
@@ -213,7 +213,7 @@ public class Expander : HeaderedContentControl, IVisualTreeHost
 
         if (headerRow.Contains(e.Position))
         {
-            IsExpanded = !IsExpanded;
+            CommitTargetValue(IsExpandedProperty, !IsExpanded);
             Focus();
             e.Handled = true;
         }
@@ -230,7 +230,7 @@ public class Expander : HeaderedContentControl, IVisualTreeHost
 
         if (e.Key == Key.Space || e.Key == Key.Enter)
         {
-            IsExpanded = !IsExpanded;
+            CommitTargetValue(IsExpandedProperty, !IsExpanded);
             e.Handled = true;
         }
     }

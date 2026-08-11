@@ -265,9 +265,12 @@ partial class GalleryView
             bgra[i * 4 + 2] = color.R;
             bgra[i * 4 + 3] = 255;
         }
+        // A stretching image reports whatever width the wrap panel offers it, which is the whole
+        // card, so the swatch states the size it wants instead.
         return new Image()
             .Source(ImageSource.FromBgraPixels(w, h, bgra))
-            .StretchMode(Stretch.Fill);
+            .Width(w)
+            .Height(h);
     }
 
     private static FrameworkElement MakeTransitionBlock(string text, int colorIndex)

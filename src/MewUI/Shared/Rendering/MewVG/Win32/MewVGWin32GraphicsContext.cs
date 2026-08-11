@@ -137,104 +137,6 @@ internal sealed partial class MewVGWin32GraphicsContext
 
     #region Text Rendering
 
-    protected override void DrawTextCore(ReadOnlySpan<char> text, Rect bounds, IFont font, Color color,
-        TextAlignment horizontalAlignment = TextAlignment.Left,
-        TextAlignment verticalAlignment = TextAlignment.Top,
-        TextWrapping wrapping = TextWrapping.NoWrap,
-        TextTrimming trimming = TextTrimming.None)
-    {
-        if (text.IsEmpty) return;
-        if (font is not GdiFont gdiFont) return;
-
-        var boundsPx = ToPixelRect(bounds);
-        int widthPx = boundsPx.Width;
-        int heightPx = boundsPx.Height;
-
-        if (widthPx <= 0 || heightPx <= 0) return;
-
-        widthPx = ClampTextRasterExtent(widthPx, boundsPx, axis: 0);
-        heightPx = ClampTextRasterExtent(heightPx, boundsPx, axis: 1);
-        boundsPx = new PixelRect(boundsPx.Left, boundsPx.Top, widthPx, heightPx);
-
-        if (_clipBoundsWorld.HasValue)
-        {
-            var c = _clipBoundsWorld.Value;
-            // Transform the full text rect (rotation/skew aware, not just translation) before the clip test, so
-            // rotated text is not wrongly culled and skipped.
-            var worldText = TransformRectToWorldAABB(new Rect(bounds.X, bounds.Y, widthPx / DpiScale, heightPx / DpiScale));
-            if (worldText.Right <= c.X || worldText.X >= c.Right || worldText.Bottom <= c.Y || worldText.Y >= c.Bottom)
-                return;
-        }
-
-        double drawX = bounds.X;
-        double drawY = bounds.Y;
-        double widthDip = widthPx / DpiScale;
-        double heightDip = heightPx / DpiScale;
-
-        if (bounds.Width > 0)
-        {
-            drawX = horizontalAlignment switch
-            {
-                TextAlignment.Center => bounds.X + (bounds.Width - widthDip) * 0.5,
-                TextAlignment.Right => bounds.Right - widthDip,
-                _ => bounds.X
-            };
-        }
-
-        if (bounds.Height > 0)
-        {
-            drawY = verticalAlignment switch
-            {
-                TextAlignment.Center => bounds.Y + (bounds.Height - heightDip) * 0.5,
-                TextAlignment.Bottom => bounds.Bottom - heightDip,
-                _ => bounds.Y
-            };
-        }
-
-        if (_textPixelSnap)
-        {
-            if (_transform.M12 == 0f && _transform.M21 == 0f)
-            {
-                drawX = RenderingUtil.RoundToPixelInt(drawX, DpiScale) / DpiScale;
-                drawY = RenderingUtil.RoundToPixelInt(drawY, DpiScale) / DpiScale;
-            }
-            else if (Matrix3x2.Invert(_transform, out var inv))
-            {
-                // Rotated: snap the glyph origin on the DEVICE grid (post-transform), then map back to local, so a
-                // quarter turn lands texel-on-pixel regardless of where the rotation centre fell (odd/even parity).
-                var world = Vector2.Transform(new Vector2((float)drawX, (float)drawY), _transform);
-                var snapped = new Vector2(
-                    (float)(RenderingUtil.RoundToPixelInt(world.X, DpiScale) / DpiScale),
-                    (float)(RenderingUtil.RoundToPixelInt(world.Y, DpiScale) / DpiScale));
-                var local = Vector2.Transform(snapped, inv);
-                drawX = local.X;
-                drawY = local.Y;
-            }
-        }
-
-        bool needsLinear = NeedsLinearFilter();
-        var textHash = string.GetHashCode(text);
-        var key = new MewVGTextCacheKey(new TextCacheKey(
-            textHash, gdiFont.Handle, string.Empty, 0, color.ToArgb(),
-            widthPx, heightPx,
-            (int)horizontalAlignment, (int)verticalAlignment,
-            (int)wrapping, (int)trimming), needsLinear);
-
-        if (!_textCache.TryGet(key, text, out var entry))
-        {
-            var bmp = OpenGLTextRasterizer.Rasterize(
-                _frameSession.Hdc, gdiFont, text, widthPx, heightPx, color,
-                horizontalAlignment, verticalAlignment, wrapping, trimming);
-            entry = _textCache.CreateImage(key, text, ref bmp);
-        }
-
-        if (entry.ImageId == 0) return;
-
-        var drawRect = new Rect(drawX, drawY, widthDip, heightDip);
-        var srcRect = new Rect(entry.X, entry.Y, entry.WidthPx, entry.HeightPx);
-        DrawImagePattern(entry.ImageId, drawRect, alpha: 1f, sourceRect: srcRect, entry.AtlasWidthPx, entry.AtlasHeightPx);
-    }
-
     // Off-axis rotation needs linear filtering for smooth glyph edges; axis-aligned and quarter turns (90/180/270)
     // map texels to device pixels 1:1, so nearest stays crisp and avoids softening.
     private bool NeedsLinearFilter()
@@ -260,8 +162,8 @@ internal sealed partial class MewVGWin32GraphicsContext
     public override Size MeasureText(ReadOnlySpan<char> text, IFont font, double maxWidth)
         => MeasureTextCore(text, font, maxWidth);
 
-    public override TextLayout CreateTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, in TextLayoutConstraints constraints)
+    public override BackendTextLayout CreateBackendTextLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, in BackendTextLayoutConstraints constraints)
     {
         var bounds = constraints.Bounds;
         var safeBounds = new Rect(bounds.X, bounds.Y,
@@ -293,7 +195,7 @@ internal sealed partial class MewVGWin32GraphicsContext
         var effectiveBounds = new Rect(safeBounds.X, safeBounds.Y,
             widthPx / DpiScale, heightPx / DpiScale);
 
-        return new TextLayout
+        return new BackendTextLayout
         {
             MeasuredSize = measured,
             EffectiveBounds = effectiveBounds,
@@ -302,8 +204,8 @@ internal sealed partial class MewVGWin32GraphicsContext
         };
     }
 
-    public override void DrawTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, TextLayout layout, Color color)
+    public override void DrawBackendTextLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, BackendTextLayout layout, Color color)
     {
         if (text.IsEmpty) return;
         if (format.Font is not GdiFont gdiFont) return;

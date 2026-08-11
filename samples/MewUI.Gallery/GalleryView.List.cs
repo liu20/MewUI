@@ -95,7 +95,7 @@ partial class GalleryView
                         .Child(new TextBlock()
                             .Register(ctx, "Label")
                             .Center()
-                            .FontSize(11)),
+                            .FontSize(ThemeFontSize.Small)),
                     bind: (view, item, index, ctx) =>
                     {
                         ctx.Get<Border>("Bg").Background(colors[index % colors.Length].WithAlpha(180));
@@ -138,7 +138,7 @@ partial class GalleryView
                         .Child(new TextBlock()
                             .Register(ctx, "Label")
                             .Center()
-                            .FontSize(11)),
+                            .FontSize(ThemeFontSize.Small)),
                     bind: (view, item, index, ctx) =>
                     {
                         ctx.Get<Border>("Bg").Background(colors[index % colors.Length].WithAlpha(120));
@@ -168,7 +168,7 @@ partial class GalleryView
                     new TextBlock()
                         .DockBottom()
                         .Ref(out selectedText)
-                        .FontSize(11)
+                        .FontSize(ThemeFontSize.Small)
                         .Text("Selected: (none)"),
                     listBox
                 );
@@ -215,7 +215,7 @@ partial class GalleryView
                     new TextBlock()
                         .DockBottom()
                         .Ref(out selectedText)
-                        .FontSize(11)
+                        .FontSize(ThemeFontSize.Small)
                         .Text("Selected: (none)"),
                     new ListBox()
                         .Ref(out listBox)
@@ -248,11 +248,10 @@ partial class GalleryView
                                     .Children(
                                         new TextBlock()
                                             .Register(ctx, "Name")
-                                            .FontSize(12)
                                             .Bold(),
                                         new TextBlock()
                                             .Register(ctx, "Role")
-                                            .FontSize(10)
+                                            .FontSize(ThemeFontSize.Small)
                                     ))),
                 bind: (root, u, _, ctx) =>
                 {
@@ -339,7 +338,7 @@ partial class GalleryView
                             new TextBlock()
                                 .DockBottom()
                                 .Ref(out selectedNodeText)
-                                .FontSize(11)
+                                .FontSize(ThemeFontSize.Small)
                                 .Text("Selected: (none)"),
                             treeView
                         );
@@ -571,7 +570,7 @@ partial class GalleryView
 
                             new TextBlock()
                                 .BindText(status)
-                                .FontSize(11)
+                                .FontSize(ThemeFontSize.Small)
                                 .CenterVertical()
                         ),
 
@@ -626,7 +625,7 @@ partial class GalleryView
                                         .Children(
                                             new TextBlock()
                                                 .Register(ctx, "Sender")
-                                                .FontSize(10)
+                                                .FontSize(ThemeFontSize.Small)
                                                 .Bold(),
                                             new TextBlock()
                                                 .Register(ctx, "Text")

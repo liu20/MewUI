@@ -30,7 +30,7 @@ public sealed class LinuxPlatformHost : IPlatformHost
 
     public int GetSystemMetricsForDpi(int nIndex, uint dpi) => 0;
 
-    public void Run(Application app, Window mainWindow)
+    public void Run(Application app, Window? mainWindow)
         => throw new PlatformNotSupportedException("Linux platform host is not implemented yet. (X11/Wayland + rendering backend work pending)");
 
     public void Quit(Application app)

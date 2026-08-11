@@ -70,13 +70,13 @@ partial class GalleryView
                             new TextBlock()
                                 .BindText(countText)
                                 .CenterVertical()
-                                .FontSize(11),
+                                .FontSize(ThemeFontSize.Small),
 
                             new TextBlock()
                                 .Text("Fluent System Icons by Microsoft (MIT License)")
                                 .WithTheme((t, c) => c.Foreground(t.Palette.DisabledText))
                                 .CenterVertical()
-                                .FontSize(11)
+                                .FontSize(ThemeFontSize.Small)
                         ),
 
                     grid

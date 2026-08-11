@@ -243,11 +243,11 @@ public sealed class DockingManager : Panel
     private UIElement? ResolveHeader(TabNode tab) => HeaderFactory?.Invoke(GetOrCreatePane(tab));
 
     // Default menus are built in the view; these raise the public events (per open) with the matching handle.
-    private void ConfigureTabMenuForNode(TabNode tab, ContextMenu menu)
-        => TabMenuOpening?.Invoke(this, new DockTabMenuEventArgs(GetOrCreatePane(tab), menu));
+    private void ConfigureTabMenuForNode(TabNode tab, ContextMenu menu, CommandScope commands)
+        => TabMenuOpening?.Invoke(this, new DockTabMenuEventArgs(GetOrCreatePane(tab), menu, commands));
 
-    private void ConfigureGroupMenuForNode(TabSetNode tabSet, ContextMenu menu)
-        => GroupMenuOpening?.Invoke(this, new DockGroupMenuEventArgs(GetOrCreateGroup(tabSet), menu));
+    private void ConfigureGroupMenuForNode(TabSetNode tabSet, ContextMenu menu, CommandScope commands)
+        => GroupMenuOpening?.Invoke(this, new DockGroupMenuEventArgs(GetOrCreateGroup(tabSet), menu, commands));
 
     private IReadOnlyList<DockPane> CollectPanes(bool documents)
     {
@@ -339,15 +339,19 @@ public sealed class DockingManager : Panel
 /// </summary>
 public sealed class DockTabMenuEventArgs : EventArgs
 {
-    internal DockTabMenuEventArgs(DockPane pane, ContextMenu menu)
+    internal DockTabMenuEventArgs(DockPane pane, ContextMenu menu, CommandScope commands)
     {
         Pane = pane;
         Menu = menu;
+        Commands = commands;
     }
 
     public DockPane Pane { get; }
 
     public ContextMenu Menu { get; }
+
+    /// <summary>Gets the command scope targeted by this menu.</summary>
+    public CommandScope Commands { get; }
 }
 
 /// <summary>
@@ -356,13 +360,17 @@ public sealed class DockTabMenuEventArgs : EventArgs
 /// </summary>
 public sealed class DockGroupMenuEventArgs : EventArgs
 {
-    internal DockGroupMenuEventArgs(DockGroup group, ContextMenu menu)
+    internal DockGroupMenuEventArgs(DockGroup group, ContextMenu menu, CommandScope commands)
     {
         Group = group;
         Menu = menu;
+        Commands = commands;
     }
 
     public DockGroup Group { get; }
 
     public ContextMenu Menu { get; }
+
+    /// <summary>Gets the command scope targeted by this menu.</summary>
+    public CommandScope Commands { get; }
 }

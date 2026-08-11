@@ -44,8 +44,11 @@ public class NavigationList : ScrollableItemsBase, ISelector, IIndexedSelector
     public NavigationList()
     {
         _selection = new SelectionSync(() => _itemsSource,
-            value => SetValue(SelectedIndexProperty, value),
-            value => SetValue(SelectedItemProperty, value));
+            value => SetCurrentValue(SelectedIndexProperty, value),
+            value => SetCurrentValue(SelectedItemProperty, value),
+            null,
+            value => CommitTargetValue(SelectedIndexProperty, value),
+            value => CommitTargetValue(SelectedItemProperty, value));
 
         _itemTemplate = CreateDefaultItemTemplate();
 
@@ -105,7 +108,7 @@ public class NavigationList : ScrollableItemsBase, ISelector, IIndexedSelector
             _kindSelector = value;
             if (SelectedIndex >= 0 && KindAt(SelectedIndex) != NavigationItemKind.Item)
             {
-                SelectedIndex = -1;
+                CommitTargetValue(SelectedIndexProperty, -1);
             }
             InvalidateItemBindings();
             InvalidateVisual();
@@ -370,7 +373,7 @@ public class NavigationList : ScrollableItemsBase, ISelector, IIndexedSelector
 
         if (e.Button == MouseButton.Left && TryGetItemIndexAt(e, out int index) && KindAt(index) == NavigationItemKind.Item)
         {
-            SelectedIndex = index;
+            CommitTargetValue(SelectedIndexProperty, index);
             ItemInvoked?.Invoke(_itemsSource.GetItem(index));
             InvalidateVisual();
             e.Handled = true;
@@ -432,7 +435,7 @@ public class NavigationList : ScrollableItemsBase, ISelector, IIndexedSelector
             }
             if (KindAt(i) == NavigationItemKind.Item)
             {
-                SelectedIndex = i;
+                CommitTargetValue(SelectedIndexProperty, i);
                 ScrollIntoView(i);
                 InvalidateVisual();
                 return;
@@ -447,14 +450,14 @@ public class NavigationList : ScrollableItemsBase, ISelector, IIndexedSelector
         {
             for (int i = 0; i < count; i++)
             {
-                if (KindAt(i) == NavigationItemKind.Item) { SelectedIndex = i; ScrollIntoView(i); InvalidateVisual(); return; }
+                if (KindAt(i) == NavigationItemKind.Item) { CommitTargetValue(SelectedIndexProperty, i); ScrollIntoView(i); InvalidateVisual(); return; }
             }
         }
         else
         {
             for (int i = count - 1; i >= 0; i--)
             {
-                if (KindAt(i) == NavigationItemKind.Item) { SelectedIndex = i; ScrollIntoView(i); InvalidateVisual(); return; }
+                if (KindAt(i) == NavigationItemKind.Item) { CommitTargetValue(SelectedIndexProperty, i); ScrollIntoView(i); InvalidateVisual(); return; }
             }
         }
     }

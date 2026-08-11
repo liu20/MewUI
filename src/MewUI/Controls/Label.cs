@@ -54,7 +54,7 @@ public partial class Label : Control, IVisualTreeHost
         set => _target = value;
     }
 
-    private void OnTextChanged() => _accessText.SetRawText(Text);
+    private void OnTextChanged() => _accessText.RawText = Text;
 
     private void OnTextAlignmentChanged() => _accessText.TextAlignment = TextAlignment;
 

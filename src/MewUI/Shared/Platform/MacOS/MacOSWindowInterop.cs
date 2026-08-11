@@ -1435,24 +1435,24 @@ internal static unsafe class MacOSWindowInterop
                 return new NSRange(NSNotFound, 0);
             }
 
-            if (backend.Window.FocusManager.FocusedElement is Controls.TextBase tb)
+            if (backend.Window.FocusManager.FocusedElement is ITextCompositionEditor editor)
             {
                 // NSTextInputClient expects ranges in the document's coordinates.
-                // TextBase maintains the composition range inside the document.
-                int start = Math.Max(0, tb.CompositionStartIndex);
-                int len = Math.Max(0, tb.CompositionLength);
+                // The editor maintains the composition range inside the document.
+                int start = Math.Max(0, editor.CompositionStartIndex);
+                int len = Math.Max(0, editor.CompositionLength);
                 if (len == 0)
                 {
-                    // Composition started but TextBase may not have received the first update yet.
+                    // Composition started but the editor may not have received the first update yet.
                     // Report the current marked string length so IME treats the range as active.
                     len = backend.ImeMarkedText?.Length ?? 0;
                 }
                 var r = new NSRange((ulong)start, (ulong)len);
-                MacOSWindowBackend.ImeNativeLogger.Write($"objc markedRange view=0x{self:x} -> ({r.location},{r.length}) [TextBase]");
+                MacOSWindowBackend.ImeNativeLogger.Write($"objc markedRange view=0x{self:x} -> ({r.location},{r.length}) [editor]");
                 return r;
             }
 
-            // Fallback to a minimal "active marked range" when there is no focused TextBase.
+            // Fallback to a minimal "active marked range" when there is no focused composition editor.
             var rr = new NSRange(0, (ulong)(backend.ImeMarkedText?.Length ?? 0));
             MacOSWindowBackend.ImeNativeLogger.Write($"objc markedRange view=0x{self:x} -> ({rr.location},{rr.length}) [fallback]");
             return rr;
@@ -1474,13 +1474,13 @@ internal static unsafe class MacOSWindowInterop
         {
             if (TryGetActiveTextInputTarget(self, out var backend))
             {
-                if (backend.Window.FocusManager.FocusedElement is Controls.TextBase tb)
+                if (backend.Window.FocusManager.FocusedElement is ITextCompositionEditor editor)
                 {
-                    var (s, e) = tb.SelectionRange;
-                    int start = Math.Min(s, e);
-                    int end = Math.Max(s, e);
+                    var (selectionStart, selectionEnd) = editor.SelectionRange;
+                    int start = Math.Min(selectionStart, selectionEnd);
+                    int end = Math.Max(selectionStart, selectionEnd);
                     var r = new NSRange((ulong)Math.Max(0, start), (ulong)Math.Max(0, end - start));
-                    MacOSWindowBackend.ImeNativeLogger.Write($"objc selectedRange view=0x{self:x} -> ({r.location},{r.length}) [TextBase]");
+                    MacOSWindowBackend.ImeNativeLogger.Write($"objc selectedRange view=0x{self:x} -> ({r.location},{r.length}) [editor]");
                     return r;
                 }
 
@@ -1555,10 +1555,10 @@ internal static unsafe class MacOSWindowInterop
             MacOSWindowBackend.ImeNativeLogger.Write($"objc attributedSubstringForProposedRange view=0x{self:x} proposed=({proposedRange.location},{proposedRange.length}) actualRangePtr=0x{actualRange:x}");
             string text;
             int textLen;
-            if (backend.Window.FocusManager.FocusedElement is Controls.TextBase tb)
+            if (backend.Window.FocusManager.FocusedElement is ITextCompositionEditor editor)
             {
-                textLen = tb.TextLengthInternal;
-                text = textLen > 0 ? tb.GetTextSubstringInternal(0, textLen) : string.Empty;
+                textLen = editor.TextLength;
+                text = textLen > 0 ? editor.GetTextSubstring(0, textLen) : string.Empty;
             }
             else
             {
@@ -1615,8 +1615,12 @@ internal static unsafe class MacOSWindowInterop
     [UnmanagedCallersOnly]
     private static ulong MewUITextInputView_characterIndexForPoint(nint self, nint _cmd, NSPoint point)
     {
-        MacOSWindowBackend.ImeNativeLogger.Write($"objc characterIndexForPoint view=0x{self:x} pt=({point.x},{point.y}) -> 0");
-        return 0;
+        // Answering 0 here claims every click sits on character 0, which lets the input method
+        // consume/redirect clicks to the wrong place. NSNotFound is the honest "no character" answer
+        // until a real screen-point-to-index hit test is wired through the composition editor seam.
+        // Cocoa defines NSNotFound as NSIntegerMax, not NSUIntegerMax.
+        MacOSWindowBackend.ImeNativeLogger.Write($"objc characterIndexForPoint view=0x{self:x} pt=({point.x},{point.y}) -> NSNotFound");
+        return (ulong)long.MaxValue;
     }
 
     [UnmanagedCallersOnly]
@@ -1636,7 +1640,18 @@ internal static unsafe class MacOSWindowInterop
                     if (TryGetActiveTextInputTarget(self, out var backend) &&
                         backend.Window.FocusManager.FocusedElement is ITextCompositionClient client)
                     {
-                        var caretRect = client.GetCharRectInWindow(client.CompositionStartIndex);
+                        // The caret, not the composition start: this is asked before anything is
+                        // composed - the input source indicator is placed from it - and the
+                        // composition start still holds where the last one began, zero until the
+                        // first. Win32 and X11 choose the same way.
+                        int caretIndex = client is ITextCompositionEditor editor
+                            ? editor.CaretPosition
+                            : client.CompositionStartIndex;
+                        if (client.IsComposing)
+                        {
+                            caretIndex = client.CompositionStartIndex;
+                        }
+                        var caretRect = client.GetCharRectInWindow(caretIndex);
 
                         // frame = window outer frame (includes title bar), screen coords (y-up).
                         // caretRect = content area coords (y-down from top of content).

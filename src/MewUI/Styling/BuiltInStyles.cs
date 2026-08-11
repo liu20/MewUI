@@ -30,20 +30,18 @@ public static class BuiltInStyles
 
     private static Style CreateFlatButtonStyle()
     {
-        return new Style(typeof(Button))
-        {
-            BasedOn = Style.ForType<Button>(),
-            Transitions =
+        return Style.DeriveFromDefault<Button>(
+            transitions:
             [
                 Transition.Create(Control.BackgroundProperty),
                 Transition.Create(TextElement.ForegroundProperty),
             ],
-            Setters =
+            setters:
             [
                 Setter.Create(Control.BackgroundProperty, t => t.Palette.ButtonHoverBackground.WithAlpha(0)),
                 Setter.Create(Control.BorderThicknessProperty, 0.0),
             ],
-            Triggers =
+            triggers:
             [
                 new StateTrigger
                 {
@@ -88,51 +86,42 @@ public static class BuiltInStyles
                         Setter.Create(TextElement.ForegroundProperty, t => t.Palette.DisabledText),
                     ],
                 },
-            ],
-        };
+            ]);
     }
 
     private static Style CreateComboBoxPopupStyle()
     {
-        return new Style(typeof(ListBox))
-        {
-            BasedOn = Style.ForType<ScrollableItemsBase>(),
-            Setters =
+        return Style.DeriveFromDefault<ListBox>(
+            setters:
             [
                 Setter.Create(Control.BorderBrushProperty, t => t.Palette.ControlBorder.Lerp(t.Palette.Accent, 0.5)),
-            ],
-        };
+            ]);
     }
 
     private static Style CreateDatePickerPopupStyle()
     {
-        return new Style(typeof(Calendar))
-        {
-            BasedOn = Style.ForType<Calendar>(),
-            Setters =
+        return Style.DeriveFromDefault<Calendar>(
+            setters:
             [
                 Setter.Create(Control.BorderBrushProperty, t => t.Palette.ControlBorder.Lerp(t.Palette.Accent, 0.5)),
-            ],
-        };
+            ]);
     }
 
     private static Style CreateAccentButtonStyle()
     {
-        return new Style(typeof(Button))
-        {
-            BasedOn = Style.ForType<Button>(),
-            Transitions =
+        return Style.DeriveFromDefault<Button>(
+            transitions:
             [
                 Transition.Create(Control.BackgroundProperty),
                 Transition.Create(TextElement.ForegroundProperty),
             ],
-            Setters =
+            setters:
             [
                 Setter.Create(Control.BackgroundProperty, t => t.Palette.Accent),
                 Setter.Create(TextElement.ForegroundProperty, t => t.Palette.AccentText),
                 Setter.Create(Control.BorderThicknessProperty, 0.0),
             ],
-            Triggers =
+            triggers:
             [
                 new StateTrigger
                 {
@@ -160,7 +149,6 @@ public static class BuiltInStyles
                         Setter.Create(TextElement.ForegroundProperty, t => t.Palette.DisabledText),
                     ],
                 },
-            ],
-        };
+            ]);
     }
 }

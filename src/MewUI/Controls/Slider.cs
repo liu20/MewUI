@@ -55,10 +55,15 @@ public sealed class Slider : RangeBase
         var contentBounds = bounds.Deflate(Padding);
         var state = CurrentVisualState;
 
-        // Track
+        // Track, inset half a thumb on both sides so the thumb at either extreme stays inside
+        // the control bounds; ink past them is cut by any caching or clipping ancestor.
         double trackHeight = 4;
         double trackY = contentBounds.Y + (contentBounds.Height - trackHeight) / 2;
-        var trackRect = new Rect(contentBounds.X, trackY, contentBounds.Width, trackHeight);
+        var trackRect = new Rect(
+            contentBounds.X + ThumbSize / 2,
+            trackY,
+            Math.Max(0, contentBounds.Width - ThumbSize),
+            trackHeight);
 
         var trackBg = Background;
 
@@ -81,7 +86,7 @@ public sealed class Slider : RangeBase
 
         // Thumb
         double thumbX = trackRect.X + trackRect.Width * t - ThumbSize / 2;
-        thumbX = Math.Clamp(thumbX, contentBounds.X - ThumbSize / 2, contentBounds.Right - ThumbSize / 2);
+        thumbX = Math.Clamp(thumbX, contentBounds.X, Math.Max(contentBounds.X, contentBounds.Right - ThumbSize));
 
         double thumbY = contentBounds.Y + (contentBounds.Height - ThumbSize) / 2;
         var thumbRect = new Rect(thumbX, thumbY, ThumbSize, ThumbSize);
@@ -239,9 +244,10 @@ public sealed class Slider : RangeBase
 
     private void SetValueFromPosition(double x)
     {
+        // Mirrors the render-side track inset so a click lands on the value under the pointer.
         var contentBounds = Bounds.Deflate(Padding);
-        double left = contentBounds.X;
-        double width = Math.Max(1e-6, contentBounds.Width);
+        double left = contentBounds.X + ThumbSize / 2;
+        double width = Math.Max(1e-6, contentBounds.Width - ThumbSize);
         double t = Math.Clamp((x - left) / width, 0, 1);
         double range = Maximum - Minimum;
         double value = range <= 0 ? Minimum : Minimum + t * range;
@@ -256,7 +262,10 @@ public sealed class Slider : RangeBase
             return;
         }
 
-        Value = clamped;
+        if (fromInput)
+            CommitValue(clamped);
+        else
+            Value = clamped;
     }
 
     protected override void OnDispose()

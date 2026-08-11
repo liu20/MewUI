@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 
 using Aprillz.MewUI.Native.Structs;
+using Aprillz.MewUI.Native.DirectWrite;
 
 namespace Aprillz.MewUI.Native.Direct2D;
 
@@ -52,6 +53,10 @@ internal static unsafe class D2D1VTable
     private const int CreateDcRenderTargetIndex = 16;
     private const int BindDCIndex = 57; // First method after ID2D1RenderTarget
     private const int DeviceContextPushLayerIndex = 86; // ID2D1DeviceContext::PushLayer (D2D1_LAYER_PARAMETERS1)
+
+    // DWRITE_MEASURING_MODE_GDI_CLASSIC: text is measured on GDI's metrics, matching the GDI-compatible
+    // layouts the text paths build.
+    private const uint DWRITE_MEASURING_MODE_GDI_CLASSIC = 1;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int CreateHwndRenderTarget(
@@ -354,6 +359,15 @@ internal static unsafe class D2D1VTable
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void SetTextRenderingParams(ID2D1RenderTarget* rt, nint textRenderingParams)
+    {
+        // d2d1.h: SetTextRenderingParams (index 36) follows Set/GetTextAntialiasMode (34/35).
+        // A null handle restores the render target's default params.
+        var fn = (delegate* unmanaged[Stdcall]<ID2D1RenderTarget*, nint, void>)(rt->lpVtbl[36]);
+        fn(rt, textRenderingParams);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void DrawText(ID2D1RenderTarget* rt, ReadOnlySpan<char> text, nint textFormat, in D2D1_RECT_F layoutRect, nint brush)
     {
         if (text.IsEmpty)
@@ -365,7 +379,7 @@ internal static unsafe class D2D1VTable
         fixed (D2D1_RECT_F* pRect = &layoutRect)
         {
             var fn = (delegate* unmanaged[Stdcall]<ID2D1RenderTarget*, char*, uint, nint, D2D1_RECT_F*, nint, D2D1_DRAW_TEXT_OPTIONS, uint, void>)(rt->lpVtbl[27]);
-            fn(rt, pText, (uint)text.Length, textFormat, pRect, brush, D2D1_DRAW_TEXT_OPTIONS.NONE, 0);
+            fn(rt, pText, (uint)text.Length, textFormat, pRect, brush, D2D1_DRAW_TEXT_OPTIONS.NONE, DWRITE_MEASURING_MODE_GDI_CLASSIC);
         }
     }
 
@@ -381,7 +395,7 @@ internal static unsafe class D2D1VTable
         fixed (D2D1_RECT_F* pRect = &layoutRect)
         {
             var fn = (delegate* unmanaged[Stdcall]<ID2D1RenderTarget*, char*, uint, nint, D2D1_RECT_F*, nint, D2D1_DRAW_TEXT_OPTIONS, uint, void>)(rt->lpVtbl[27]);
-            fn(rt, pText, (uint)text.Length, textFormat, pRect, brush, options, 0);
+            fn(rt, pText, (uint)text.Length, textFormat, pRect, brush, options, DWRITE_MEASURING_MODE_GDI_CLASSIC);
         }
     }
 
@@ -393,6 +407,19 @@ internal static unsafe class D2D1VTable
     {
         var fn = (delegate* unmanaged[Stdcall]<ID2D1RenderTarget*, D2D1_POINT_2F, nint, nint, D2D1_DRAW_TEXT_OPTIONS, void>)(rt->lpVtbl[28]);
         fn(rt, origin, textLayout, brush, options);
+    }
+
+    /// <summary>ID2D1RenderTarget::DrawGlyphRun (vtable index 29).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void DrawGlyphRun(
+        ID2D1RenderTarget* rt,
+        D2D1_POINT_2F baselineOrigin,
+        DWRITE_GLYPH_RUN* glyphRun,
+        nint brush,
+        DWRITE_MEASURING_MODE measuringMode)
+    {
+        var fn = (delegate* unmanaged[Stdcall]<ID2D1RenderTarget*, D2D1_POINT_2F, DWRITE_GLYPH_RUN*, nint, DWRITE_MEASURING_MODE, void>)(rt->lpVtbl[29]);
+        fn(rt, baselineOrigin, glyphRun, brush, measuringMode);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

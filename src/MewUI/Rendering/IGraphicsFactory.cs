@@ -1,4 +1,5 @@
 using Aprillz.MewUI.Rendering.Filters;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Rendering;
 
@@ -8,6 +9,9 @@ namespace Aprillz.MewUI.Rendering;
 /// </summary>
 public interface IGraphicsFactory : IRenderDevice, IDisposable
 {
+    /// <summary>Gets the retained text layout engine associated with this backend factory.</summary>
+    ITextEngine TextEngine => TextServices.GetEngine(this);
+
     /// <summary>
     /// Backend name matching the package suffix (<c>Aprillz.MewUI.Backend.&lt;Backend&gt;</c>).
     /// Do not branch on this value.
@@ -49,8 +53,6 @@ public interface IGraphicsFactory : IRenderDevice, IDisposable
     /// <summary>
     /// Creates a measurement-only graphics context for text measurement.
     /// </summary>
-    IGraphicsContext CreateMeasurementContext(uint dpi);
-
     /// <summary>
     /// Creates an executor for evaluating <see cref="ImageFilter"/> graphs. The default
     /// returns a CPU reference implementation; backends override to return GPU-accelerated

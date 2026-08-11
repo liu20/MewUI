@@ -103,11 +103,13 @@ public class ContentControl : Control
             return Size.Empty;
         }
 
-        // Subtract padding
-        var contentSize = availableSize.Deflate(Padding);
+        // The border is drawn inside the element box, so it takes space from the content the same way
+        // padding does; leaving it out of the measure let it eat into the padding instead.
+        var borderInset = GetBorderVisualInset();
+        var contentSize = availableSize.Deflate(Padding).Deflate(borderInset);
 
         Content.Measure(contentSize);
-        return Content.DesiredSize.Inflate(Padding);
+        return Content.DesiredSize.Inflate(Padding).Inflate(borderInset);
     }
 
     protected override void ArrangeContent(Rect bounds)
@@ -123,8 +125,7 @@ public class ContentControl : Control
             return;
         }
 
-        // Arrange within padding
-        var contentBounds = bounds.Deflate(Padding);
+        var contentBounds = bounds.Deflate(Padding).Deflate(GetBorderVisualInset());
         Content.Arrange(contentBounds);
     }
 

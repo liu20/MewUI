@@ -93,7 +93,8 @@ public class TransitionContentControl : Control, IVisualTreeHost
 
         if (transition.Delay > TimeSpan.Zero)
         {
-            _delayClock = new AnimationClock(transition.Delay, Easing.Linear);
+            _delayClock = new AnimationClock(transition.Delay, Easing.Linear)
+                .AttachTo(this);
             _delayClock.CompletedCallback = OnDelayCompleted;
             _delayClock.Start();
         }
@@ -111,7 +112,8 @@ public class TransitionContentControl : Control, IVisualTreeHost
 
     private void StartAnimationClock(ContentTransition transition)
     {
-        _clock = new AnimationClock(transition.Duration, transition.Easing);
+        _clock = new AnimationClock(transition.Duration, transition.Easing)
+            .AttachTo(this);
         _clock.TickCallback = OnTransitionTick;
         _clock.CompletedCallback = OnTransitionCompleted;
         _clock.Start();

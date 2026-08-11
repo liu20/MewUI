@@ -1,0 +1,199 @@
+using Aprillz.MewUI.MewvalonEdit.Document;
+using Aprillz.MewUI.Text;
+
+namespace Aprillz.MewUI.MewvalonEdit.Rendering;
+
+/// <summary>
+/// Builds the elements that stand in for single characters: a dot for a space, a guillemet over a
+/// tab, and a box naming a control character. One generator decides all three because a tab is
+/// itself a control character, so which marker wins has to be settled in one place.
+/// </summary>
+internal sealed class SingleCharacterElementGenerator(TextEditorOptions options, TextEditor editor)
+    : VisualLineElementGenerator
+{
+    private const char SPACE_MARKER = '·';
+    private const char TAB_MARKER = '»';
+
+    public override int GetFirstInterestedOffset(int startOffset)
+    {
+        var context = CurrentContext;
+        if (context is null)
+        {
+            return -1;
+        }
+        var line = context.CurrentDocumentLine;
+        int end = line.Offset + line.Length;
+        for (int offset = startOffset; offset < end; offset++)
+        {
+            if (WantsCharacter(context.Document.GetCharAt(offset)))
+            {
+                return offset;
+            }
+        }
+        return -1;
+    }
+
+    public override VisualLineElement? ConstructElement(int offset)
+    {
+        var context = CurrentContext;
+        if (context is null)
+        {
+            return null;
+        }
+        char character = context.Document.GetCharAt(offset);
+        var style = new TextRunStyle(editor.FontFamily, editor.FontSize, editor.FontWeight);
+        if (character == ' ' && options.ShowSpaces)
+        {
+            return new WhitespaceMarkerElement(SPACE_MARKER.ToString(), " ", style)
+            {
+                Foreground = editor.WhitespaceMarkerColor
+            };
+        }
+        if (character == '\t' && options.ShowTabs)
+        {
+            return new TabMarkerElement(TAB_MARKER.ToString(), style)
+            {
+                Foreground = editor.WhitespaceMarkerColor
+            };
+        }
+        if (options.ShowBoxForControlCharacters && char.IsControl(character))
+        {
+            return new ControlCharacterBoxElement(TextUtilities.GetControlCharacterName(character), style);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// A tab is a control character, but the original settles the tab case before the box is
+    /// reached, so a tab is never boxed and turning tab markers off leaves it unmarked.
+    /// </summary>
+    private bool WantsCharacter(char character) => character switch
+    {
+        ' ' => options.ShowSpaces,
+        '\t' => options.ShowTabs,
+        _ => options.ShowBoxForControlCharacters && char.IsControl(character)
+    };
+}
+
+/// <summary>
+/// A character drawn as a marker glyph in its place, as the original's space element does. It takes
+/// the width of the character it stands in for rather than its own: a marker that measured itself
+/// would move the rest of the line whenever it was turned on, by however much the two glyphs round
+/// apart at the current density.
+/// </summary>
+internal sealed class WhitespaceMarkerElement(string glyph, string replaced, TextRunStyle style)
+    : VisualLineElement(1, 1)
+{
+    protected internal override string GetVisualText() => glyph;
+
+    /// <summary>The space it stands in for is where a line breaks, and it still is.</summary>
+    protected internal override bool BreaksLine => replaced == " ";
+
+    public override InlineMetrics Measure(uint dpi)
+    {
+        var layout = MarkerLayout.For(glyph, style, dpi);
+        return new InlineMetrics(
+            MarkerLayout.For(replaced, style, dpi).MeasuredSize.Width,
+            layout.MeasuredSize.Height,
+            layout.Lines[0].Baseline);
+    }
+
+    public override void Draw(ITextRenderContext context, Point origin, uint dpi)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        var layout = MarkerLayout.For(glyph, style, dpi);
+        double cell = MarkerLayout.For(replaced, style, dpi).MeasuredSize.Width;
+        var options = new TextDrawOptions(Foreground ?? Color.FromRgb(0x80, 0x80, 0x80));
+        // Centred in the cell it stands in for, so a narrower glyph does not sit against its left edge.
+        context.Draw(
+            layout,
+            new Point(origin.X + ((cell - layout.MeasuredSize.Width) / 2), origin.Y),
+            in options);
+    }
+}
+
+/// <summary>
+/// A tab shown as a marker glyph that keeps the tab. Two visual columns stand for the one document
+/// character: the first is this element, reporting no width so the tab that follows it starts where
+/// the tab did and still reaches its tab stop; the second is the tab itself. The original arranges
+/// it the same way, as a zero-width glyph run followed by the tab character.
+/// </summary>
+internal sealed class TabMarkerElement(string glyph, TextRunStyle style) : VisualLineElement(2, 1)
+{
+    protected internal override string GetVisualText() => "￼\t";
+
+    protected internal override int PaintedVisualLength => 1;
+
+    public override InlineMetrics Measure(uint dpi)
+    {
+        var layout = MarkerLayout.For(glyph, style, dpi);
+        return new InlineMetrics(0, layout.MeasuredSize.Height, layout.Lines[0].Baseline);
+    }
+
+    public override void Draw(ITextRenderContext context, Point origin, uint dpi)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        var options = new TextDrawOptions(Foreground ?? Color.FromRgb(0x80, 0x80, 0x80));
+        context.Draw(MarkerLayout.For(glyph, style, dpi), origin, in options);
+    }
+}
+
+/// <summary>
+/// A control character drawn as its name inside a rounded box, which is how the original makes an
+/// otherwise invisible character visible without letting it look like ordinary text.
+/// </summary>
+internal sealed class ControlCharacterBoxElement(string name, TextRunStyle style) : VisualLineElement(1, 1)
+{
+    private const double HORIZONTAL_PADDING = 3.0;
+    private const double CORNER_RADIUS = 2.5;
+    private static readonly Color _boxColor = Color.FromArgb(200, 128, 128, 128);
+    private static readonly Color _nameColor = Color.FromRgb(255, 255, 255);
+
+    protected internal override string GetVisualText() => name;
+
+    public override InlineMetrics Measure(uint dpi)
+    {
+        var layout = MarkerLayout.For(name, style, dpi);
+        return new InlineMetrics(
+            layout.MeasuredSize.Width + HORIZONTAL_PADDING,
+            layout.MeasuredSize.Height,
+            layout.Lines[0].Baseline);
+    }
+
+    public override void Draw(ITextRenderContext context, Point origin, uint dpi)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        var layout = MarkerLayout.For(name, style, dpi);
+        var box = new Rect(
+            origin.X,
+            origin.Y,
+            layout.MeasuredSize.Width + HORIZONTAL_PADDING,
+            layout.MeasuredSize.Height);
+        context.Graphics.FillRoundedRectangle(box, CORNER_RADIUS, CORNER_RADIUS, _boxColor);
+        var options = new TextDrawOptions(_nameColor);
+        context.Draw(layout, new Point(origin.X + (HORIZONTAL_PADDING / 2), origin.Y), in options);
+    }
+}
+
+internal static class MarkerLayout
+{
+    private static readonly TextParagraphStyle _paragraph = new()
+    {
+        Wrapping = TextWrapping.NoWrap,
+        MaxWidth = double.PositiveInfinity
+    };
+
+    public static ITextLayout For(string text, TextRunStyle style, uint dpi)
+    {
+        var factory = Application.IsRunning ? Application.Current.GraphicsFactory : Application.DefaultGraphicsFactory;
+        return factory.TextEngine.GetOrCreateLayout(
+            new TextLayoutRequest
+            {
+                Text = text.AsMemory(),
+                Dpi = dpi,
+                DefaultStyle = style,
+                Paragraph = _paragraph
+            },
+            TextLayoutCachePolicy.Content);
+    }
+}

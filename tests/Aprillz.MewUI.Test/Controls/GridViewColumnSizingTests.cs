@@ -716,6 +716,85 @@ public sealed class GridViewColumnSizingTests
     }
 
     [TestMethod]
+    public void GridView_NumericEditModeDoesNotChangeAutoOrAdjacentStarWidth()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Inconclusive("GDI text measurement is Windows-only.");
+            return;
+        }
+
+        var grid = new GridView
+        {
+            BorderThickness = 0,
+            Padding = default,
+            ItemsSource = ItemsView.Create(new[] { 13.37d }),
+        };
+        grid.SetColumns(
+        [
+            new GridViewColumn<double>
+            {
+                Header = "Name",
+                Width = GridLength.Star,
+                MinWidth = 100,
+                CellTemplate = new DelegateTemplate<double>(
+                    build: _ => new TextBlock { Text = "User 01" },
+                    bind: static (_, _, _, _) => { }),
+            },
+            new GridViewColumn<double>
+            {
+                Header = "Amount",
+                Width = GridLength.Auto,
+                CellTemplate = new DelegateTemplate<double>(
+                    build: _ => new NumericUpDown
+                    {
+                        Padding = new Thickness(6, 0),
+                        Minimum = 0,
+                        Maximum = 100,
+                        Step = 0.5,
+                        Format = "0.##",
+                        Value = 13.37,
+                    },
+                    bind: static (_, _, _, _) => { }),
+            },
+        ]);
+
+        var window = HeadlessWindow.Create(500, 200);
+        window.Content = grid;
+        window.PerformLayout();
+
+        var numeric = (NumericUpDown?)VisualTree.Find(grid, static e => e is NumericUpDown);
+        Assert.IsNotNull(numeric);
+        var nameCell = (TextBlock?)VisualTree.Find(grid, static e => e is TextBlock text && text.Text == "User 01");
+        Assert.IsNotNull(nameCell);
+        double initialAutoWidth = numeric.Bounds.Width;
+        double initialStarWidth = nameCell.Bounds.Width;
+
+        numeric.BeginEdit();
+        window.PerformLayout();
+
+        Assert.IsTrue(numeric.IsEditing);
+        Assert.AreEqual(initialAutoWidth, numeric.Bounds.Width, 0.001, "entering edit mode must not grow the Auto column");
+        Assert.AreEqual(initialStarWidth, nameCell.Bounds.Width, 0.001, "the adjacent Star column must keep its share");
+
+        numeric.CommitEdit();
+        window.PerformLayout();
+
+        Assert.IsFalse(numeric.IsEditing);
+        Assert.AreEqual(initialAutoWidth, numeric.Bounds.Width, 0.001, "committing must preserve the Auto column");
+        Assert.AreEqual(initialStarWidth, nameCell.Bounds.Width, 0.001, "committing must preserve the adjacent Star column");
+
+        numeric.BeginEdit();
+        window.PerformLayout();
+        numeric.CancelEdit();
+        window.PerformLayout();
+
+        Assert.IsFalse(numeric.IsEditing);
+        Assert.AreEqual(initialAutoWidth, numeric.Bounds.Width, 0.001, "leaving edit mode must preserve the Auto column");
+        Assert.AreEqual(initialStarWidth, nameCell.Bounds.Width, 0.001, "the adjacent Star column must remain stable");
+    }
+
+    [TestMethod]
     public void GridView_InfiniteMeasureAndFiniteArrange_SettlesWithoutAnotherWindowPass()
     {
         if (!OperatingSystem.IsWindows())

@@ -431,6 +431,18 @@ public sealed class FocusManager
         }
     }
 
+    internal void InvalidateFocusVisualStates()
+    {
+        var chain = _newFocusChainScratch;
+        chain.Clear();
+        CollectFocusWithinChain(FocusedElement, chain);
+
+        for (int i = 0; i < chain.Count; i++)
+        {
+            chain[i].InvalidateVisualState();
+        }
+    }
+
     private void CollectScopeOrdered(Element? root, List<UIElement> output)
     {
         // Order is resolved per traversal scope: direct tab stops and nested scopes (as atomic

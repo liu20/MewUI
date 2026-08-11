@@ -57,10 +57,10 @@ public sealed class NumericUpDown : RangeBase
             : Step;
 
     /// <summary>Increases the value by one effective step.</summary>
-    public void StepUp() => Value += GetEffectiveStep();
+    public void StepUp() => CommitValue(Value + GetEffectiveStep());
 
     /// <summary>Decreases the value by one effective step.</summary>
-    public void StepDown() => Value -= GetEffectiveStep();
+    public void StepDown() => CommitValue(Value - GetEffectiveStep());
 
     private TextBlock? _displayPart;
     private TextBox? _partTextBox;
@@ -129,7 +129,7 @@ public sealed class NumericUpDown : RangeBase
             _suppressTextBoxUpdate = true;
             try
             {
-                Value = parsed;
+                CommitValue(parsed);
             }
             finally
             {
@@ -217,7 +217,7 @@ public sealed class NumericUpDown : RangeBase
             return;
         }
 
-        Value += notches * GetEffectiveStep();
+        CommitValue(Value + notches * GetEffectiveStep());
         e.Handled = true;
     }
 
@@ -392,7 +392,7 @@ public sealed class NumericUpDown : RangeBase
             _suppressTextBoxUpdate = true;
             try
             {
-                Value = parsed;
+                CommitValue(parsed);
             }
             finally
             {
@@ -426,14 +426,14 @@ public sealed class NumericUpDown : RangeBase
 
         if (e.Key == Key.Up)
         {
-            Value += GetEffectiveStep();
+            CommitValue(Value + GetEffectiveStep());
             e.Handled = true;
             return;
         }
 
         if (e.Key == Key.Down)
         {
-            Value -= GetEffectiveStep();
+            CommitValue(Value - GetEffectiveStep());
             e.Handled = true;
         }
     }

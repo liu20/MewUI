@@ -44,8 +44,6 @@ internal static unsafe class FreeTypeText
             lines = 1;
         }
 
-        maxLineWidth = (int)Math.Round(TextMeasurePolicy.ApplyWidthPadding(maxLineWidth));
-
         int heightPx = lines * lineHeightPx;
         return new Size(maxLineWidth, heightPx);
     }
@@ -280,9 +278,12 @@ internal static unsafe class FreeTypeText
     /// Measures the total width of shaped glyphs, substituting fallback face advances
     /// for .notdef glyphs (glyph ID 0) so that measurement matches rendering.
     /// Consecutive .notdef glyphs are re-shaped with the fallback font to handle ZWJ sequences.
+    /// When <paramref name="clusterAdvances26_6"/> is provided, each advance is also recorded
+    /// at its source cluster index so callers can build per-code-unit prefix advances.
     /// </summary>
     private static int MeasureShapedWidth(ShapedGlyph[] glyphs,
-        ReadOnlySpan<char> sourceText, int pixelHeight, FontWeight weight, bool italic)
+        ReadOnlySpan<char> sourceText, int pixelHeight, FontWeight weight, bool italic,
+        long[]? clusterAdvances26_6 = null)
     {
         long total = 0;
 
@@ -317,8 +318,11 @@ internal static unsafe class FreeTypeText
                             if (reshaped != null && reshaped.Length > 0)
                             {
                                 double bitmapScale = fallbackFace.BitmapScale;
+                                long clusterTotal = 0;
                                 for (int j = 0; j < reshaped.Length; j++)
-                                    total += (long)Math.Round(reshaped[j].XAdvance26_6 * bitmapScale);
+                                    clusterTotal += SnapAdvanceToPixels((long)Math.Round(reshaped[j].XAdvance26_6 * bitmapScale));
+                                total += clusterTotal;
+                                RecordClusterAdvance(clusterAdvances26_6, textStart, clusterTotal);
                                 continue;
                             }
                         }
@@ -329,6 +333,7 @@ internal static unsafe class FreeTypeText
                 for (int j = runStart; j <= i; j++)
                 {
                     ref readonly var gg = ref glyphs[j];
+                    long advance = SnapAdvanceToPixels(gg.XAdvance26_6);
                     uint codepoint = GetCodepointFromCluster(sourceText, gg.Cluster);
                     if (codepoint != 0)
                     {
@@ -336,19 +341,29 @@ internal static unsafe class FreeTypeText
                             codepoint, pixelHeight, weight, italic);
                         if (fb != null && fb.GetGlyphIndex(codepoint) != 0)
                         {
-                            total += (long)fb.GetAdvancePx(codepoint) << 6;
-                            continue;
+                            advance = (long)fb.GetAdvancePx(codepoint) << 6;
                         }
                     }
-                    total += gg.XAdvance26_6;
+                    total += advance;
+                    RecordClusterAdvance(clusterAdvances26_6, (int)gg.Cluster, advance);
                 }
                 continue;
             }
 
-            total += g.XAdvance26_6;
+            long snapped = SnapAdvanceToPixels(g.XAdvance26_6);
+            total += snapped;
+            RecordClusterAdvance(clusterAdvances26_6, (int)g.Cluster, snapped);
         }
 
         return (int)Math.Round(total / 64.0, MidpointRounding.AwayFromZero);
+    }
+
+    private static void RecordClusterAdvance(long[]? clusterAdvances26_6, int clusterIndex, long advance26_6)
+    {
+        if (clusterAdvances26_6 != null && (uint)clusterIndex < (uint)clusterAdvances26_6.Length)
+        {
+            clusterAdvances26_6[clusterIndex] += advance26_6;
+        }
     }
 
     private static int MeasureRunWidthPxFallback(ReadOnlySpan<char> text, FreeTypeFaceCache.FaceEntry face,
@@ -405,6 +420,97 @@ internal static unsafe class FreeTypeText
 
         return width;
     }
+
+    /// <summary>
+    /// Computes cumulative prefix advances in pixels per UTF-16 code unit, using the same
+    /// metric path as measurement and rendering (shaped when HarfBuzz is available).
+    /// </summary>
+    public static double[] GetUtf16PrefixAdvancesPx(ReadOnlySpan<char> text, FreeTypeFont font)
+    {
+        var prefix = new double[text.Length];
+        if (text.IsEmpty)
+        {
+            return prefix;
+        }
+
+        var face = FreeTypeFaceCache.Instance.Get(font.FontPath, font.PixelHeight, font.Weight, font.IsItalic);
+
+        if (HarfBuzzAvailability.IsAvailable)
+        {
+            var shaped = HarfBuzzShaper.Shape(text, face);
+            if (shaped != null)
+            {
+                var clusterAdvances = new long[text.Length];
+                MeasureShapedWidth(shaped, text, font.PixelHeight, font.Weight, font.IsItalic, clusterAdvances);
+                long running = 0;
+                for (int index = 0; index < text.Length; index++)
+                {
+                    running += clusterAdvances[index];
+                    prefix[index] = running / 64.0;
+                }
+                return prefix;
+            }
+        }
+
+        // Mirrors MeasureRunWidthPxFallback: same-face kerning plus per-codepoint advances.
+        int width = 0;
+        uint prevGlyph = 0;
+        var prevFace = face;
+        for (int index = 0; index < text.Length; index++)
+        {
+            char ch = text[index];
+            if (ch == '\r' || ch == '\n')
+            {
+                prefix[index] = width;
+                continue;
+            }
+
+            bool isSurrogatePair = char.IsHighSurrogate(ch) && index + 1 < text.Length && char.IsLowSurrogate(text[index + 1]);
+            uint code = isSurrogatePair ? (uint)char.ConvertToUtf32(ch, text[index + 1]) : ch;
+
+            uint glyph = face.GetGlyphIndex(code);
+            var activeFace = face;
+            if (glyph == 0)
+            {
+                var fallbackFace = LinuxFontFallbackResolver.Resolve(code, font.PixelHeight, font.Weight, font.IsItalic);
+                if (fallbackFace != null)
+                {
+                    uint fallbackGlyph = fallbackFace.GetGlyphIndex(code);
+                    if (fallbackGlyph != 0)
+                    {
+                        activeFace = fallbackFace;
+                        glyph = fallbackGlyph;
+                    }
+                }
+            }
+
+            // Only apply kerning within the same face
+            if (activeFace == prevFace)
+            {
+                width += GetKerningPx(activeFace, prevGlyph, glyph);
+            }
+            width += activeFace.GetAdvancePx(code);
+            prefix[index] = width;
+            if (isSurrogatePair)
+            {
+                prefix[index + 1] = width;
+                index++;
+            }
+            prevGlyph = glyph;
+            prevFace = activeFace;
+        }
+
+        return prefix;
+    }
+
+    /// <summary>
+    /// Snaps one 26.6 glyph advance to a whole pixel, as the GDI and DirectWrite paths already
+    /// report. Reported metrics and rasterization both go through this, so a glyph is drawn where
+    /// the layout says it is. Every advance is snapped rather than the running total: the renderer
+    /// draws a run at a whole pixel, and only whole advances make the sum of a run's advances
+    /// independent of where the run was cut, which is what an inline object does to a line.
+    /// </summary>
+    private static long SnapAdvanceToPixels(long advance26_6) => ((advance26_6 + 32) >> 6) << 6;
 
     private static int GetKerningPx(FreeTypeFaceCache.FaceEntry face, uint leftGlyph, uint rightGlyph)
     {
@@ -506,7 +612,7 @@ internal static unsafe class FreeTypeText
                             }
                         }
                     }
-                    penX26_6 += gg.XAdvance26_6;
+                    penX26_6 += SnapAdvanceToPixels(gg.XAdvance26_6);
                 }
                 continue;
             }
@@ -549,7 +655,7 @@ internal static unsafe class FreeTypeText
             }
 
             Advance:
-            penX26_6 += g.XAdvance26_6;
+            penX26_6 += SnapAdvanceToPixels(g.XAdvance26_6);
         }
     }
 

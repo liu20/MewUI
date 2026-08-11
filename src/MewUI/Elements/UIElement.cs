@@ -9,7 +9,6 @@ namespace Aprillz.MewUI.Controls;
 public abstract partial class UIElement : Element
 {
     private bool _suggestedIsEnabled = true;
-    private bool _suggestedIsEnabledInitialized;
     private bool _visualStateDirty;
 
     /// <summary>
@@ -25,6 +24,17 @@ public abstract partial class UIElement : Element
     public static readonly MewProperty<bool> IsEnabledProperty =
         MewProperty<bool>.Register<UIElement>(nameof(IsEnabled), true,
             MewPropertyOptions.AffectsRender | MewPropertyOptions.AffectsVisualState);
+
+    private static readonly MewPropertyKey<bool> IsEffectivelyEnabledPropertyKey =
+        MewProperty<bool>.RegisterReadOnly<UIElement>(nameof(IsEffectivelyEnabled), true,
+            MewPropertyOptions.AffectsRender | MewPropertyOptions.AffectsVisualState);
+
+    /// <summary>
+    /// Whether this element is enabled and so is every ancestor. Read-only; derived from
+    /// <see cref="IsEnabled"/> and the parent chain.
+    /// </summary>
+    public static readonly MewProperty<bool> IsEffectivelyEnabledProperty =
+        IsEffectivelyEnabledPropertyKey.Property;
 
     /// <summary>
     /// Whether the element has keyboard focus. Read-only; set by <see cref="Input.FocusManager"/>.
@@ -54,6 +64,15 @@ public abstract partial class UIElement : Element
     public static readonly MewProperty<bool> IsMouseCapturedProperty =
         MewProperty<bool>.RegisterReadOnly<UIElement>(nameof(IsMouseCaptured), false,
             MewPropertyOptions.AffectsVisualState).Property;
+
+    /// <summary>
+    /// Opacity of the element and everything under it, from 0 (invisible) to 1 (opaque).
+    /// Does not affect layout or hit testing: a fully transparent element still occupies its box
+    /// and still takes the pointer.
+    /// </summary>
+    public static readonly MewProperty<double> OpacityProperty =
+        MewProperty<double>.Register<UIElement>(nameof(Opacity), 1.0,
+            MewPropertyOptions.AffectsRender);
 
     /// <summary>
     /// Controls whether the element participates in hit testing.
@@ -114,18 +133,14 @@ public abstract partial class UIElement : Element
             MewPropertyOptions.None);
 
     /// <summary>
-    /// Re-resolves cached inherited values for the subtree when it is attached to a new parent,
-    /// so layout and observers react to values that changed with the chain. Detach keeps the
-    /// caches; the context-version epoch flushes them lazily on the next read.
+    /// Re-resolves the effective enabled state when the parent chain changes.
     /// </summary>
     protected override void OnParentChanged()
     {
         base.OnParentChanged();
 
-        if (Parent != null)
-        {
-            RefreshInheritedSubtree();
-        }
+        // Both directions matter: attaching may inherit a disabled ancestor, detaching drops one.
+        RefreshEnabledSubtree();
     }
 
     /// <summary>
@@ -156,8 +171,11 @@ public abstract partial class UIElement : Element
         }
         else if (property == IsEnabledProperty)
         {
+            RefreshEnabledSubtree();
+        }
+        else if (property == IsEffectivelyEnabledProperty)
+        {
             OnEnabledChanged();
-            NotifyDescendantEnabledSuggestionChanged();
         }
         else if (property == IsFocusedProperty)
         {
@@ -274,7 +292,20 @@ public abstract partial class UIElement : Element
         set => SetValue(IsEnabledProperty, value);
     }
 
-    public bool IsEffectivelyEnabled => IsEnabled && GetSuggestedIsEnabled();
+    /// <summary>
+    /// Whether this element is enabled and so is every ancestor. Test this, not <see cref="IsEnabled"/>,
+    /// when deciding whether input applies or a disabled appearance should be drawn.
+    /// </summary>
+    public bool IsEffectivelyEnabled => GetValue(IsEffectivelyEnabledProperty);
+
+    /// <summary>
+    /// Gets or sets the opacity of the element and its subtree, from 0 to 1.
+    /// </summary>
+    public double Opacity
+    {
+        get => GetValue(OpacityProperty);
+        set => SetValue(OpacityProperty, value);
+    }
 
     /// <summary>
     /// Gets or sets whether the element participates in hit testing.
@@ -441,6 +472,12 @@ public abstract partial class UIElement : Element
             return;
         }
 
+        double opacity = Opacity;
+        if (opacity <= 0)
+        {
+            return;
+        }
+
         if (!SkipViewportCull && _cacheSnapshotDepth == 0 && this is not Window &&
             _renderCullViewport is Rect cullViewport && !cullViewport.IntersectsWith(Bounds))
         {
@@ -452,15 +489,56 @@ public abstract partial class UIElement : Element
 
         using (PerformanceProfiler.Instance.SampleElement(GetType(), ProfilerSampleCategory.Render, this))
         {
-            if (_hasBitmapCache)
+            // Outside the cache branch: the cached bitmap is the element's own pixels, so fading it
+            // here leaves the cache reusable while the opacity animates.
+            if (opacity < 1)
             {
-                RenderCached(context);
+                context.BeginOpacity(opacity);
+                try
+                {
+                    RenderVisual(context);
+                }
+                finally
+                {
+                    context.EndOpacity();
+                }
             }
             else
+            {
+                RenderVisual(context);
+            }
+        }
+    }
+
+    private void RenderVisual(IGraphicsContext context)
+    {
+        if (_hasBitmapCache)
+        {
+            RenderCached(context);
+            return;
+        }
+
+        // OnRender opens with an opaque fill, so everything after it - text above all - lands on
+        // pixels the backend knows, which is what subpixel antialiasing needs on a surface that
+        // carries per-pixel alpha (a popup). The scope has to start before OnRender: controls
+        // such as ContextMenu and ListBox draw their own text there rather than in the subtree.
+        if (this is Control { Background.A: 255 })
+        {
+            context.BeginOpaqueBackdrop();
+            try
             {
                 OnRender(context);
                 RenderSubtree(context);
             }
+            finally
+            {
+                context.EndOpaqueBackdrop();
+            }
+        }
+        else
+        {
+            OnRender(context);
+            RenderSubtree(context);
         }
     }
 
@@ -658,28 +736,29 @@ public abstract partial class UIElement : Element
         return new Rect(tl.X, tl.Y, br.X - tl.X, br.Y - tl.Y);
     }
 
+    /// <summary>
+    /// Recomputes this element's own effective enabled state. Descendants are left untouched, so
+    /// callers that are not already walking the subtree must use <see cref="RefreshEnabledSubtree"/>.
+    /// </summary>
     internal void ReevaluateSuggestedIsEnabled()
     {
-        bool old = _suggestedIsEnabledInitialized ? _suggestedIsEnabled : true;
         _suggestedIsEnabled = ComputeIsEnabledSuggestionSafe();
-        _suggestedIsEnabledInitialized = true;
-
-        if (old != _suggestedIsEnabled)
-        {
-            OnEnabledChanged();
-            InvalidateVisual();
-            InvalidateVisualState();
-        }
+        SetValue(IsEffectivelyEnabledPropertyKey, IsEnabled && _suggestedIsEnabled);
     }
 
-    private bool GetSuggestedIsEnabled()
+    /// <summary>
+    /// Recomputes the effective enabled state of this element and every descendant.
+    /// </summary>
+    internal void RefreshEnabledSubtree()
     {
-        if (!_suggestedIsEnabledInitialized)
+        // Pre-order: a child reads its parent's effective value, so the parent must settle first.
+        VisualTree.Visit(this, static element =>
         {
-            _suggestedIsEnabled = ComputeIsEnabledSuggestionSafe();
-            _suggestedIsEnabledInitialized = true;
-        }
-        return _suggestedIsEnabled;
+            if (element is UIElement uiElement)
+            {
+                uiElement.ReevaluateSuggestedIsEnabled();
+            }
+        });
     }
 
     protected virtual bool ComputeIsEnabledSuggestion() => true;
@@ -701,22 +780,6 @@ public abstract partial class UIElement : Element
         }
 
         return true;
-    }
-
-    private void NotifyDescendantEnabledSuggestionChanged()
-    {
-        VisualTree.Visit(this, e =>
-        {
-            if (ReferenceEquals(e, this))
-            {
-                return;
-            }
-
-            if (e is UIElement u)
-            {
-                u.ReevaluateSuggestedIsEnabled();
-            }
-        });
     }
 
     internal void DisposeBindings()
@@ -837,12 +900,7 @@ public abstract partial class UIElement : Element
     {
         base.OnVisualRootChanged(oldRoot, newRoot);
 
-        if (newRoot != null)
-        {
-            // Re-evaluate enabled state - parent may already be disabled.
-            ReevaluateSuggestedIsEnabled();
-        }
-        else
+        if (newRoot == null)
         {
             // Stop property animations when detached from the visual tree.
             StopAllPropertyAnimations();
@@ -873,18 +931,7 @@ public abstract partial class UIElement : Element
     /// Used by the style system to drive animated transitions.
     /// </summary>
     internal Animation.PropertyAnimator Animator
-        => _animator ??= new Animation.PropertyAnimator(PropertyStore);
-
-    /// <summary>
-    /// Sets the animation target for a visual property. No-op when target is unchanged.
-    /// </summary>
-    protected void SetTarget<T>(MewProperty<T> property, T value) => PropertyStore.SetTarget(property, value);
-
-    /// <summary>
-    /// Sets a property target value. Used by TargetSetter resolution.
-    /// </summary>
-    internal void SetTargetInternal(MewProperty property, object value)
-        => PropertyStore.SetTarget(property, value);
+        => _animator ??= new Animation.PropertyAnimator(this, PropertyStore);
 
     /// <summary>
     /// Stops all running property animations (e.g. when detached from the visual tree).

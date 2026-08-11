@@ -170,34 +170,30 @@ internal sealed class GraphicsBackendTestCanvas : Control
 
         _tests.Add(new TestCase("Text Align", (g, r) =>
         {
-            using var measure = BeginTextMeasurement();
-            var font = measure.Font;
 
             var box = new Rect(r.X + 10, r.Y + 10, 155, 40);
             g.DrawRectangle(box, Theme.Palette.Accent, 1);
-            g.DrawText("Left", box, font, Theme.Palette.WindowText, TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
+            DrawEngineText(g, "Left", box, Theme.Palette.WindowText, TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
 
             var box2 = new Rect(r.X + 10, r.Y + 55, 155, 40);
             g.DrawRectangle(box2, Theme.Palette.Accent, 1);
-            g.DrawText("Center", box2, font, Theme.Palette.WindowText, TextAlignment.Center, TextAlignment.Center, TextWrapping.NoWrap);
+            DrawEngineText(g, "Center", box2, Theme.Palette.WindowText, TextAlignment.Center, TextAlignment.Center, TextWrapping.NoWrap);
 
             var box3 = new Rect(r.X + 10, r.Y + 100, 155, 40);
             g.DrawRectangle(box3, Theme.Palette.Accent, 1);
-            g.DrawText("Right", box3, font, Theme.Palette.WindowText, TextAlignment.Right, TextAlignment.Center, TextWrapping.NoWrap);
+            DrawEngineText(g, "Right", box3, Theme.Palette.WindowText, TextAlignment.Right, TextAlignment.Center, TextWrapping.NoWrap);
         }));
 
         _tests.Add(new TestCase("Text Wrap/Measure", (g, r) =>
         {
-            using var measure = BeginTextMeasurement();
-            var font = measure.Font;
 
             var box = new Rect(r.X + 10, r.Y + 10, 155, 75);
             g.DrawRectangle(box, Theme.Palette.Accent, 1);
-            g.DrawText("Wrap test: The quick brown fox jumps over the lazy dog.", box, font, Theme.Palette.WindowText,
+            DrawEngineText(g, "Wrap test: The quick brown fox jumps over the lazy dog.", box, Theme.Palette.WindowText,
                 TextAlignment.Left, TextAlignment.Top, TextWrapping.Wrap);
 
-            var m = g.MeasureText("MeasureText()", font);
-            g.DrawText($"Measured: {m.Width:0.0}x{m.Height:0.0}", new Rect(r.X + 10, r.Y + 95, 155, 40), font,
+            var m = MeasureEngineText("MeasureText()");
+            DrawEngineText(g, $"Measured: {m.Width:0.0}x{m.Height:0.0}", new Rect(r.X + 10, r.Y + 95, 155, 40),
                 Theme.Palette.WindowText, TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
         }));
 
@@ -218,7 +214,7 @@ internal sealed class GraphicsBackendTestCanvas : Control
             g.DrawImage(_image, dest2, src);
             g.DrawRectangle(dest2, Theme.Palette.Accent, 1);
 
-            g.DrawText("april.jpg", new Rect(r.X + 10, r.Y + 95, 155, 30), GetFont(), Theme.Palette.WindowText,
+            DrawEngineText(g, "april.jpg", new Rect(r.X + 10, r.Y + 95, 155, 30), Theme.Palette.WindowText,
                 TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
         }));
 
@@ -229,9 +225,6 @@ internal sealed class GraphicsBackendTestCanvas : Control
             {
                 return;
             }
-
-            using var measure = BeginTextMeasurement();
-            var font = measure.Font;
 
             var modes = new[]
             {
@@ -252,8 +245,8 @@ internal sealed class GraphicsBackendTestCanvas : Control
             {
                 var colRect = new Rect(r.X + col * colW, r.Y, colW, r.Height);
 
-                g.DrawText(modes[col].ToString(), new Rect(colRect.X + 2, colRect.Y, colRect.Width - 4, 14),
-                    font, Theme.Palette.WindowText, TextAlignment.Center, TextAlignment.Center, TextWrapping.NoWrap);
+                DrawEngineText(g, modes[col].ToString(), new Rect(colRect.X + 2, colRect.Y, colRect.Width - 4, 14),
+                    Theme.Palette.WindowText, TextAlignment.Center, TextAlignment.Center, TextWrapping.NoWrap);
 
 
                 var cell = new Rect(colRect.X, colRect.Y + 16, colRect.Width, rowH - 16);
@@ -286,9 +279,6 @@ internal sealed class GraphicsBackendTestCanvas : Control
                 return;
             }
 
-            using var measure = BeginTextMeasurement();
-            var font = measure.Font;
-
             var modes = new[]
             {
                 ImageScaleQuality.Fast,
@@ -308,8 +298,8 @@ internal sealed class GraphicsBackendTestCanvas : Control
             {
                 var colRect = new Rect(r.X + col * colW, r.Y, colW, r.Height);
 
-                g.DrawText(modes[col].ToString(), new Rect(colRect.X + 2, colRect.Y, colRect.Width - 4, 14),
-                    font, Theme.Palette.WindowText, TextAlignment.Center, TextAlignment.Center, TextWrapping.NoWrap);
+                DrawEngineText(g, modes[col].ToString(), new Rect(colRect.X + 2, colRect.Y, colRect.Width - 4, 14),
+                    Theme.Palette.WindowText, TextAlignment.Center, TextAlignment.Center, TextWrapping.NoWrap);
 
                 var cell = new Rect(colRect.X, colRect.Y + 16, colRect.Width, rowH - 16);
 
@@ -495,9 +485,6 @@ internal sealed class GraphicsBackendTestCanvas : Control
             var caps = new[] { StrokeLineCap.Flat, StrokeLineCap.Round, StrokeLineCap.Square };
             var labels = new[] { "Flat", "Round", "Square" };
 
-            using var measure = BeginTextMeasurement();
-            var font = measure.Font;
-
             for (int i = 0; i < 3; i++)
             {
                 double y = r.Y + 15 + i * 45;
@@ -505,7 +492,7 @@ internal sealed class GraphicsBackendTestCanvas : Control
                 g.DrawLine(new Point(r.X + 60, y), new Point(r.X + r.Width - 20, y), pen);
                 // Reference line showing exact endpoints
                 g.DrawLine(new Point(r.X + 60, y), new Point(r.X + 60, y), Theme.Palette.ControlBorder, 1);
-                g.DrawText(labels[i], new Rect(r.X + 4, y - 8, 54, 16), font, Theme.Palette.WindowText,
+                DrawEngineText(g, labels[i], new Rect(r.X + 4, y - 8, 54, 16), Theme.Palette.WindowText,
                     TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
             }
         }));
@@ -514,9 +501,6 @@ internal sealed class GraphicsBackendTestCanvas : Control
         {
             var joins = new[] { StrokeLineJoin.Miter, StrokeLineJoin.Round, StrokeLineJoin.Bevel };
             var labels = new[] { "Miter", "Round", "Bevel" };
-
-            using var measure = BeginTextMeasurement();
-            var font = measure.Font;
 
             double colW = (r.Width - 10) / 3;
             for (int i = 0; i < 3; i++)
@@ -529,15 +513,13 @@ internal sealed class GraphicsBackendTestCanvas : Control
                 zigzag.LineTo(cx + 25, r.Y + 100);
                 g.DrawPath(zigzag, pen);
 
-                g.DrawText(labels[i], new Rect(cx - colW / 2, r.Y + 110, colW, 16), font, Theme.Palette.WindowText,
+                DrawEngineText(g, labels[i], new Rect(cx - colW / 2, r.Y + 110, colW, 16), Theme.Palette.WindowText,
                     TextAlignment.Center, TextAlignment.Center, TextWrapping.NoWrap);
             }
         }));
 
         _tests.Add(new TestCase("StrokeStyle: DashArray", (g, r) =>
         {
-            using var measure = BeginTextMeasurement();
-            var font = measure.Font;
 
             var patterns = new (string Label, double[] Dashes)[]
             {
@@ -556,7 +538,7 @@ internal sealed class GraphicsBackendTestCanvas : Control
                     LineCap = StrokeLineCap.Flat,
                 });
                 g.DrawLine(new Point(r.X + 10, y + 14), new Point(r.X + r.Width - 10, y + 14), pen);
-                g.DrawText(patterns[i].Label, new Rect(r.X + 10, y, r.Width - 20, 14), font, Theme.Palette.WindowText,
+                DrawEngineText(g, patterns[i].Label, new Rect(r.X + 10, y, r.Width - 20, 14), Theme.Palette.WindowText,
                     TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
             }
         }));
@@ -787,9 +769,6 @@ internal sealed class GraphicsBackendTestCanvas : Control
             var accent = Theme.Palette.Accent;
             var fill = accent.WithAlpha(0x66);
 
-            using var measure = BeginTextMeasurement();
-            var font = measure.Font;
-
             // Two concentric rects - NonZero fills everything
             var p1 = new PathGeometry();
             p1.FillRule = FillRule.NonZero;
@@ -807,7 +786,7 @@ internal sealed class GraphicsBackendTestCanvas : Control
             p1.Close();
             g.FillPath(p1, fill, FillRule.NonZero);
             g.DrawPath(p1, accent, 1);
-            g.DrawText("NonZero", new Rect(r.X + 10, r.Y + 105, 80, 16), font, Theme.Palette.WindowText,
+            DrawEngineText(g, "NonZero", new Rect(r.X + 10, r.Y + 105, 80, 16), Theme.Palette.WindowText,
                 TextAlignment.Center, TextAlignment.Center, TextWrapping.NoWrap);
 
             // Same paths - EvenOdd cuts a hole
@@ -827,7 +806,7 @@ internal sealed class GraphicsBackendTestCanvas : Control
             p2.Close();
             g.FillPath(p2, fill, FillRule.EvenOdd);
             g.DrawPath(p2, accent, 1);
-            g.DrawText("EvenOdd", new Rect(r.X + 110, r.Y + 105, 80, 16), font, Theme.Palette.WindowText,
+            DrawEngineText(g, "EvenOdd", new Rect(r.X + 110, r.Y + 105, 80, 16), Theme.Palette.WindowText,
                 TextAlignment.Center, TextAlignment.Center, TextWrapping.NoWrap);
         }));
 
@@ -1075,11 +1054,8 @@ internal sealed class GraphicsBackendTestCanvas : Control
         int columns = Math.Max(1, (int)Math.Floor((width + CardGap) / (CardMinWidth + CardGap)));
         double cardWidth = SnapFloor(Math.Max(CardMinWidth, (width - (columns - 1) * CardGap) / columns), dpiScale);
 
-        using var measure = BeginTextMeasurement();
-        var font = measure.Font;
-
         var header = $"Backend: {Application.Current.GraphicsFactory.Backend}  DPI: {GetDpi()}  DpiScale: {dpiScale:0.00}";
-        context.DrawText(header, new Rect(bounds.X, bounds.Y, bounds.Width, HeaderHeight), font, theme.Palette.WindowText,
+        DrawEngineText(context, header, new Rect(bounds.X, bounds.Y, bounds.Width, HeaderHeight), theme.Palette.WindowText,
             TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
 
         double x0 = bounds.X;
@@ -1099,7 +1075,7 @@ internal sealed class GraphicsBackendTestCanvas : Control
             context.DrawRoundedRectangle(card, 8, 8, Theme.Palette.ControlBorder, 1, strokeInset: true);
 
             var nameRect = new Rect(card.X + 10, card.Y + 8, card.Width - 20, 22);
-            context.DrawText(_tests[i].Name, nameRect, font, theme.Palette.WindowText,
+            DrawEngineText(context, _tests[i].Name, nameRect, theme.Palette.WindowText,
                 TextAlignment.Left, TextAlignment.Center, TextWrapping.NoWrap);
 
             var content = new Rect(card.X + 10, card.Y + 34, card.Width - 20, card.Height - 44);

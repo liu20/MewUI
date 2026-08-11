@@ -38,7 +38,7 @@ partial class GalleryView
                 .Children(
                     new TextBlock()
                         .Text(title)
-                        .FontSize(11),
+                        .FontSize(ThemeFontSize.Small),
                     new TabControl()
                         .Height(headerRotation is null ? 140 : 180)
                         .TabPlacement(placement)
@@ -167,7 +167,7 @@ partial class GalleryView
                             .Vertical()
                             .Spacing(4)
                             .Children(
-                                new TextBlock().Text("Text").FontSize(11),
+                                new TextBlock().Text("Text").FontSize(ThemeFontSize.Small),
                                 new SegmentedControl()
                                     .Items("Day", "Week", "Month")
                                     .SelectedIndex(0)),
@@ -177,7 +177,7 @@ partial class GalleryView
                             .Vertical()
                             .Spacing(4)
                             .Children(
-                                new TextBlock().Text("Text + Icon").FontSize(11),
+                                new TextBlock().Text("Text + Icon").FontSize(ThemeFontSize.Small),
                                 new SegmentedControl()
                                     .Items(
                                         new[]
@@ -212,7 +212,7 @@ partial class GalleryView
                             .Vertical()
                             .Spacing(4)
                             .Children(
-                                new TextBlock().Text("Icon").FontSize(11),
+                                new TextBlock().Text("Icon").FontSize(ThemeFontSize.Small),
                                 new SegmentedControl()
                                     .Items(
                                         new[]
@@ -232,7 +232,7 @@ partial class GalleryView
                             .Vertical()
                             .Spacing(4)
                             .Children(
-                                new TextBlock().Text("Disabled segment (bound)").FontSize(11),
+                                new TextBlock().Text("Disabled segment (bound)").FontSize(ThemeFontSize.Small),
                                 new SegmentedControl()
                                     .Items("All", "Active", "Done")
                                     .PrepareContainer<string>((c, item, _) =>
@@ -247,7 +247,7 @@ partial class GalleryView
                             .Vertical()
                             .Spacing(4)
                             .Children(
-                                new TextBlock().Text("Disabled").FontSize(11),
+                                new TextBlock().Text("Disabled").FontSize(ThemeFontSize.Small),
                                 new SegmentedControl()
                                     .Items("Day", "Week", "Month")
                                     .SelectedIndex(0)

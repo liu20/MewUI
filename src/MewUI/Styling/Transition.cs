@@ -17,6 +17,13 @@ public sealed class Transition
 
     public Transition(MewProperty property, TimeSpan duration, Func<double, double>? easing = null)
     {
+        ArgumentNullException.ThrowIfNull(property);
+        if (duration <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(duration), duration, "Transition duration must be greater than zero.");
+        }
+
         Property = property;
         Duration = duration;
         Easing = easing ?? Animation.Easing.Default;

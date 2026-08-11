@@ -77,6 +77,8 @@ internal sealed class DispatcherQueue
 
     public void Process()
     {
+        bool processedAny = false;
+
         // Process highest priority first.
         for (int p = _queues.Length - 1; p >= 0; p--)
         {
@@ -123,6 +125,7 @@ internal sealed class DispatcherQueue
                             ?? throw new InvalidOperationException("Dispatcher work item has no action.");
                     }
 
+                    processedAny = true;
                     action();
                 }
                 catch (Exception ex)
@@ -143,7 +146,7 @@ internal sealed class DispatcherQueue
                     if (Application.IsRunning)
                     {
                         Application.Current.NotifyFatalDispatcherException(ex);
-                        Application.Quit();
+                        Application.Shutdown();
                     }
 
                     return;
@@ -157,6 +160,41 @@ internal sealed class DispatcherQueue
 
                     item.Signal?.Set();
                 }
+            }
+        }
+
+        // Pure-evaluation command model: after a dispatcher turn that ran work (and so may have
+        // mutated UI-facing state), re-query the registered command sources. The pass runs
+        // synchronously here (not as a queued item) so it cannot keep the queue busy by itself.
+        if (processedAny)
+        {
+            NotifyDrainCompleted();
+        }
+    }
+
+    private static void NotifyDrainCompleted()
+    {
+        if (!Application.IsRunning)
+        {
+            return;
+        }
+
+        try
+        {
+            var windows = Application.Current.SnapshotWindows();
+            for (int i = 0; i < windows.Length; i++)
+            {
+                windows[i].EvaluateCommandStates();
+            }
+        }
+        catch (Exception ex)
+        {
+            // A throwing CanExecute is a programming error; route it through the same policy as
+            // dispatcher work items instead of swallowing it.
+            if (Application.IsRunning && !Application.Current.TryHandleDispatcherException(ex))
+            {
+                Application.Current.NotifyFatalDispatcherException(ex);
+                Application.Shutdown();
             }
         }
     }

@@ -8,6 +8,42 @@ namespace MewUI.Test.Controls;
 public sealed class NumericUpDownTemplateTests
 {
     [TestMethod]
+    public void ZeroChromeTextBox_MeasuresLikeTextBlock()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Inconclusive("GDI text measurement is Windows-only.");
+            return;
+        }
+
+        const string text = "13.37";
+        var textBlock = new TextBlock { Text = text };
+        var textBox = new TextBox
+        {
+            Text = text,
+            Padding = Thickness.Zero,
+            BorderThickness = 0,
+            MinWidth = 0,
+            MinHeight = 0,
+        };
+
+        var window = HeadlessWindow.Create();
+        window.Content = new StackPanel().Children(textBlock, textBox);
+        window.PerformLayout();
+
+        Assert.AreEqual(
+            textBlock.DesiredSize.Width,
+            textBox.DesiredSize.Width,
+            0.001,
+            "zero padding and border leave no hidden TextBox width beyond the text itself");
+        Assert.AreEqual(
+            textBlock.DesiredSize.Height,
+            textBox.DesiredSize.Height,
+            0.001,
+            "zero padding and border leave no hidden TextBox height beyond the text itself");
+    }
+
+    [TestMethod]
     public void StepUp_IncreasesValueByEffectiveStep()
     {
         var nud = new NumericUpDown { Minimum = 0, Maximum = 100, Step = 2, Value = 5 };

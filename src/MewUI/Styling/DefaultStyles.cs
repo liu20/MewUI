@@ -38,6 +38,16 @@ public static class DefaultStyles
             Transition.Create(ToggleSwitch.ThumbBrushProperty),
         ];
 
+    private static StateTrigger CreateValidationBorderTrigger() =>
+        new()
+        {
+            Match = VisualStateFlags.Invalid,
+            Setters = [Setter.Create(Control.BorderBrushProperty, t => t.Palette.Error)],
+        };
+
+    private static StateTrigger[] CreateValidationBorderTriggers(bool include)
+        => include ? [CreateValidationBorderTrigger()] : [];
+
     private static IReadOnlyDictionary<Type, Func<Style>> CreateStyleFactories()
     {
         return new Dictionary<Type, Func<Style>>
@@ -52,6 +62,8 @@ public static class DefaultStyles
             [typeof(ButtonGroup)] = CreateButtonGroupStyle,
             [typeof(MenuBar)] = CreateMenuBarStyle,
             [typeof(TextBase)] = CreateTextBaseStyle,
+            [typeof(MultiLineTextBox)] = CreateMultiLineTextBoxStyle,
+            [typeof(SyntaxViewer)] = CreateSyntaxViewerStyle,
             [typeof(CheckBox)] = CreateCheckBoxStyle,
             [typeof(RadioButton)] = CreateRadioButtonStyle,
             [typeof(ToggleSwitch)] = CreateToggleSwitchStyle,
@@ -60,6 +72,7 @@ public static class DefaultStyles
             [typeof(Slider)] = CreateSliderStyle,
             [typeof(ItemsControl)] = CreateItemsControlStyle,
             [typeof(ScrollableItemsBase)] = CreateScrollableItemsBaseStyle,
+            [typeof(ListBox)] = CreateListBoxStyle,
             [typeof(TreeView)] = CreateTreeViewStyle,
             [typeof(GridView)] = CreateGridViewStyle,
             [typeof(NavigationView)] = CreateNavigationViewStyle,
@@ -123,9 +136,19 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateControlBasedStyle(Type targetType, params SetterBase[] extraSetters) =>
+    private static Style CreateControlBasedStyle(Type targetType, params SetterBase[] extraSetters)
+        => CreateControlBasedStyle(targetType, includeValidationBorder: false, extraSetters);
+
+    private static Style CreateValidationControlBasedStyle(Type targetType, params SetterBase[] extraSetters)
+        => CreateControlBasedStyle(targetType, includeValidationBorder: true, extraSetters);
+
+    private static Style CreateControlBasedStyle(
+        Type targetType,
+        bool includeValidationBorder,
+        params SetterBase[] extraSetters) =>
         new(targetType)
         {
+            BasedOn = GetStyle(typeof(Control)),
             Transitions = ColorTransitions,
             Setters =
             [
@@ -156,48 +179,42 @@ public static class DefaultStyles
                         Setter.Create(TextElement.ForegroundProperty, t => t.Palette.DisabledText),
                     ],
                 },
+                ..CreateValidationBorderTriggers(includeValidationBorder),
             ],
         };
 
     private static Style CreateCheckBoxStyle()
-        => CreateControlBasedStyle(typeof(CheckBox),
-            Setter.Create(Control.PaddingProperty, new Thickness(4, 2, 4, 2)),
-            Setter.Create(Control.CornerRadiusProperty, t => t.Metrics.ControlCornerRadius),
-            Setter.Create(Control.BorderThicknessProperty, t => t.Metrics.ControlBorderThickness));
+        => CreateValidationControlBasedStyle(typeof(CheckBox),
+            Setter.Create(Control.PaddingProperty, new Thickness(4, 2, 4, 2)));
 
     private static Style CreateRadioButtonStyle()
-        => CreateControlBasedStyle(typeof(RadioButton),
-            Setter.Create(Control.PaddingProperty, new Thickness(4, 2, 4, 2)),
-            Setter.Create(Control.CornerRadiusProperty, t => t.Metrics.ControlCornerRadius),
-            Setter.Create(Control.BorderThicknessProperty, t => t.Metrics.ControlBorderThickness));
+        => CreateValidationControlBasedStyle(typeof(RadioButton),
+            Setter.Create(Control.PaddingProperty, new Thickness(4, 2, 4, 2)));
 
     private static Style CreateNumericUpDownStyle()
-        => CreateControlBasedStyle(typeof(NumericUpDown),
+        => CreateValidationControlBasedStyle(typeof(NumericUpDown),
             Setter.Create(Control.PaddingProperty, new Thickness(4, 2, 4, 2)),
             Setter.Create(FrameworkElement.MinHeightProperty, t => t.Metrics.BaseControlHeight),
-            Setter.Create(Control.CornerRadiusProperty, t => t.Metrics.ControlCornerRadius),
-            Setter.Create(Control.BorderThicknessProperty, t => t.Metrics.ControlBorderThickness),
             Setter.Create(Control.TemplateProperty, (ControlTemplate?)NumericUpDownTemplate.Instance));
 
     private static Style CreateItemsControlStyle()
-        => CreateControlBasedStyle(typeof(ItemsControl),
-            Setter.Create(Control.CornerRadiusProperty, t => t.Metrics.ControlCornerRadius),
-            Setter.Create(Control.BorderThicknessProperty, t => t.Metrics.ControlBorderThickness));
+        => CreateControlBasedStyle(typeof(ItemsControl));
 
     private static Style CreateScrollableItemsBaseStyle()
-        => CreateControlBasedStyle(typeof(ScrollableItemsBase),
-            Setter.Create(Control.CornerRadiusProperty, t => t.Metrics.ControlCornerRadius),
-            Setter.Create(Control.BorderThicknessProperty, t => t.Metrics.ControlBorderThickness));
+        => CreateControlBasedStyle(typeof(ScrollableItemsBase));
+
+    private static Style CreateListBoxStyle() =>
+        new(typeof(ListBox))
+        {
+            BasedOn = GetStyle(typeof(ScrollableItemsBase)),
+            Triggers = [CreateValidationBorderTrigger()],
+        };
 
     private static Style CreateTreeViewStyle()
-        => CreateControlBasedStyle(typeof(TreeView),
-            Setter.Create(Control.CornerRadiusProperty, t => t.Metrics.ControlCornerRadius),
-            Setter.Create(Control.BorderThicknessProperty, t => t.Metrics.ControlBorderThickness));
+        => CreateControlBasedStyle(typeof(TreeView));
 
     private static Style CreateGridViewStyle()
-        => CreateControlBasedStyle(typeof(GridView),
-            Setter.Create(Control.CornerRadiusProperty, t => t.Metrics.ControlCornerRadius),
-            Setter.Create(Control.BorderThicknessProperty, t => t.Metrics.ControlBorderThickness));
+        => CreateControlBasedStyle(typeof(GridView));
 
     private static Style CreateNavigationViewStyle() =>
         new(typeof(NavigationView))
@@ -240,7 +257,7 @@ public static class DefaultStyles
         => CreateContainerStyle(typeof(GroupBox));
 
     private static Style CreateCalendarStyle()
-        => CreateControlBasedStyle(typeof(Calendar),
+        => CreateValidationControlBasedStyle(typeof(Calendar),
             Setter.Create(Control.CornerRadiusProperty, t => t.Metrics.ControlCornerRadius),
             Setter.Create(Control.BorderThicknessProperty, t => t.Metrics.ControlBorderThickness));
 
@@ -430,6 +447,7 @@ public static class DefaultStyles
                         Setter.Create(ToggleSwitch.ThumbBrushProperty, t => t.Palette.DisabledControlBackground),
                     ],
                 },
+                CreateValidationBorderTrigger(),
             ],
         };
 
@@ -477,6 +495,7 @@ public static class DefaultStyles
                         Setter.Create(Slider.ThumbBorderBrushProperty, t => t.Palette.ControlBorder),
                     ],
                 },
+                CreateValidationBorderTrigger(),
             ],
         };
 
@@ -485,8 +504,8 @@ public static class DefaultStyles
         {
             Setters =
             [
-                Setter.Create(FrameworkElement.HeightProperty, 10.0),
-                Setter.Create(Control.CornerRadiusProperty, 10.0 / 2),
+                Setter.Create(FrameworkElement.HeightProperty, 8.0),
+                Setter.Create(Control.CornerRadiusProperty, 8.0 / 2),
                 Setter.Create(Control.BackgroundProperty, t => t.Palette.ControlBackground),
                 Setter.Create(Control.BorderBrushProperty, t => t.Palette.ControlBorder),
                 Setter.Create(Control.BorderThicknessProperty, t => t.Metrics.ControlBorderThickness),
@@ -562,6 +581,7 @@ public static class DefaultStyles
                     Match = VisualStateFlags.Focused,
                     Setters = [Setter.Create(Control.BorderBrushProperty, t => t.Palette.Accent)],
                 },
+                CreateValidationBorderTrigger(),
             ],
         };
 
@@ -808,11 +828,21 @@ public static class DefaultStyles
                     Exclude = VisualStateFlags.Enabled,
                     Setters = [Setter.Create(Control.BackgroundProperty, t => Color.Composite(t.Palette.ButtonFace, t.Palette.WindowText.WithAlpha(48)))],
                 },
+                CreateValidationBorderTrigger(),
             ],
         };
 
-    private static Style CreateTextBaseStyle() =>
-        new(typeof(TextBase))
+    private static Style CreateTextBaseStyle()
+        => CreateTextInputStyle(typeof(TextBase));
+
+    private static Style CreateMultiLineTextBoxStyle()
+        => CreateTextInputStyle(typeof(MultiLineTextBox));
+
+    private static Style CreateSyntaxViewerStyle()
+        => CreateTextInputStyle(typeof(SyntaxViewer));
+
+    private static Style CreateTextInputStyle(Type targetType) =>
+        new(targetType)
         {
             Transitions = ColorTransitions,
             Setters =
@@ -848,6 +878,7 @@ public static class DefaultStyles
                         Setter.Create(TextElement.ForegroundProperty, t => t.Palette.DisabledText),
                     ],
                 },
+                CreateValidationBorderTrigger(),
             ],
         };
 
@@ -906,6 +937,7 @@ public static class DefaultStyles
                         Setter.Create(TextElement.ForegroundProperty, t => t.Palette.DisabledText),
                     ],
                 },
+                CreateValidationBorderTrigger(),
             ],
         };
 

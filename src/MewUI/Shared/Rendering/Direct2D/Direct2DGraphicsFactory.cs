@@ -5,14 +5,17 @@ using Aprillz.MewUI.Native.DirectWrite;
 using Aprillz.MewUI.Platform;
 using Aprillz.MewUI.Platform.Win32;
 using Aprillz.MewUI.Resources;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Rendering.Direct2D;
 
-public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, IRenderDevice, IGpuInteropInvalidationSource, IWindowResourceReleaser, IWin32TransparencyCapabilities, IWindowSurfacePresenter, IDisposable
+public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, ITextBackendFactory, IRenderDevice, IGpuInteropInvalidationSource, IWindowResourceReleaser, IWin32TransparencyCapabilities, IWindowSurfacePresenter, IDisposable
 {
     public const string BackendIdentifier = "Direct2D";
 
     public string Backend => BackendIdentifier;
+
+    public ITextEngine TextEngine => TextServices.GetEngine(this);
 
     public event EventHandler<GpuInteropInvalidatedEventArgs>? GpuInteropInvalidated;
 
@@ -30,11 +33,11 @@ public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, I
     private bool _initialized;
     private bool _hasFactory1;
     private nint _defaultFixedStrokeStyle;
+    // Tuned IDWriteRenderingParams shared by every render target: the user's monitor calibration with
+    // the text contrast pinned (see TEXT_CONTRAST). 0 until EnsureInitialized runs.
+    private nint _textRenderingParams;
 
-    private readonly TextResourceTracker _textTracker = new()
-    {
-        ReleaseNativeHandle = handle => { if (handle != 0) ComHelpers.Release(handle); }
-    };
+    private readonly BackendTextResourceTracker _textTracker = new();
 
     internal readonly DWriteTextFormatCache TextFormatCache = new();
 
@@ -60,6 +63,7 @@ public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, I
 
     public void Dispose()
     {
+        TextServices.ReleaseEngine(this);
         _renderResourceCache.Dispose();
         DisposeLayeredTargets();
 
@@ -88,6 +92,9 @@ public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, I
 
         ComHelpers.Release(_defaultFixedStrokeStyle);
         _defaultFixedStrokeStyle = 0;
+
+        ComHelpers.Release(_textRenderingParams);
+        _textRenderingParams = 0;
 
         _gpuDeviceState = GpuDeviceState.Disposed;
         ResetGpuDeviceChain();
@@ -136,6 +143,8 @@ public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, I
             throw new InvalidOperationException($"DWriteCreateFactory failed: 0x{hr:X8}");
         }
 
+        _textRenderingParams = BuildTunedTextRenderingParams((IDWriteFactory*)_dwriteFactory);
+
         if (_hasFactory1)
         {
             // NORMAL transform type: stroke width scales with the render target's transform
@@ -157,6 +166,69 @@ public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, I
 
         _initialized = true;
     }
+
+    // Chromium/Skia default (SK_GAMMA_CONTRAST); DirectWrite's grayscale default of 1.0 renders popups
+    // and cached bitmaps noticeably thicker than the window.
+    private const float TEXT_CONTRAST = 0.5f;
+
+    /// <summary>
+    /// Builds the text rendering params: the system defaults with the contrast pinned. 0 on failure.
+    /// </summary>
+    private static nint BuildTunedTextRenderingParams(IDWriteFactory* factory)
+    {
+        if (DWriteVTable.CreateRenderingParams(factory, out nint systemDefault) < 0 || systemDefault == 0)
+        {
+            return 0;
+        }
+
+        try
+        {
+            DWriteVTable.ReadRenderingParams(systemDefault, out float gamma, out float _, out float clearTypeLevel, out DWRITE_PIXEL_GEOMETRY pixelGeometry);
+            // Grayscale antialiasing has its own contrast, which DirectWrite defaults to 1.0 and the
+            // older CreateCustomRenderingParams cannot set - so popups and cached bitmaps, which
+            // cannot use ClearType, would otherwise keep rendering heavier than the window.
+            if (ComHelpers.QueryInterface((nint)factory, in DWrite.IID_IDWriteFactory1, out nint factory1) >= 0 && factory1 != 0)
+            {
+                try
+                {
+                    int hr1 = DWriteVTable.CreateCustomRenderingParams1(
+                        factory1,
+                        gamma,
+                        TEXT_CONTRAST,
+                        TEXT_CONTRAST,
+                        clearTypeLevel,
+                        pixelGeometry,
+                        DWRITE_RENDERING_MODE.GDI_CLASSIC,
+                        out nint tuned1);
+                    if (hr1 >= 0 && tuned1 != 0)
+                    {
+                        return tuned1;
+                    }
+                }
+                finally
+                {
+                    ComHelpers.Release(factory1);
+                }
+            }
+
+            int hr = DWriteVTable.CreateCustomRenderingParams(
+                factory,
+                gamma,
+                TEXT_CONTRAST,
+                clearTypeLevel,
+                pixelGeometry,
+                DWRITE_RENDERING_MODE.GDI_CLASSIC,
+                out nint tuned);
+            return hr >= 0 ? tuned : 0;
+        }
+        finally
+        {
+            ComHelpers.Release(systemDefault);
+        }
+    }
+
+    /// <summary>The tuned text rendering params every render target draws text with; 0 if unavailable.</summary>
+    internal nint TextRenderingParams => _textRenderingParams;
 
     /// <summary>
     /// Returns the cached <c>ID2D1StrokeStyle*</c> for <paramref name="ss"/>, creating it on
@@ -241,7 +313,7 @@ public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, I
     public IFont CreateFont(string family, double size, FontWeight weight = FontWeight.Normal, bool italic = false, bool underline = false, bool strikethrough = false)
     {
         EnsureInitialized();
-        family = ValidateFamilyName(family);
+        family = SelectFamilyCandidate(ValidateFamilyName(family));
         var (resolvedFamily, fontCollection) = ResolveWithCollection(family);
         return new DirectWriteFont(resolvedFamily, size, weight, italic, underline, strikethrough, _dwriteFactory, fontCollection);
     }
@@ -249,9 +321,44 @@ public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, I
     public IFont CreateFont(string family, double size, uint dpi, FontWeight weight = FontWeight.Normal, bool italic = false, bool underline = false, bool strikethrough = false)
     {
         EnsureInitialized();
-        family = ValidateFamilyName(family);
+        family = SelectFamilyCandidate(ValidateFamilyName(family));
         var (resolvedFamily, fontCollection) = ResolveWithCollection(family);
         return new DirectWriteFont(resolvedFamily, size, weight, italic, underline, strikethrough, _dwriteFactory, fontCollection, dpi);
+    }
+
+    /// <summary>Picks the first installed family from a comma-separated list; single names pass through.</summary>
+    private string SelectFamilyCandidate(string family)
+    {
+        if (!FontFamilyList.IsList(family))
+        {
+            return family;
+        }
+
+        string[] candidates = FontFamilyList.Split(family);
+        foreach (string candidate in candidates)
+        {
+            if (FontRegistry.Resolve(candidate) != null || IsSystemFamilyInstalled(candidate))
+            {
+                return candidate;
+            }
+        }
+        return candidates.Length > 0 ? candidates[0] : family;
+    }
+
+    private bool IsSystemFamilyInstalled(string family)
+    {
+        if (DWriteVTable.GetSystemFontCollection((IDWriteFactory*)_dwriteFactory, out nint collection, false) < 0 || collection == 0)
+        {
+            return false;
+        }
+        try
+        {
+            return DWriteVTable.FindFamilyName(collection, family, out _, out int exists) >= 0 && exists != 0;
+        }
+        finally
+        {
+            ComHelpers.Release(collection);
+        }
     }
 
     // Cache: familyName → DWrite custom font collection (nint)
@@ -490,12 +597,10 @@ public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, I
         return ctx;
     }
 
-    public IGraphicsContext CreateMeasurementContext(uint dpi)
+    ITextBackendMeasurementContext ITextBackendFactory.CreateTextMeasurementContext(uint dpi)
     {
         EnsureInitialized();
-        var ctx = new Direct2DMeasurementContext(_dwriteFactory, TextFormatCache);
-        ctx.TextTracker = _textTracker;
-        return ctx;
+        return new Direct2DMeasurementContext(_dwriteFactory, dpi, TextFormatCache);
     }
 
     private IRenderSurface CreateCpuPixelSurface(int pixelWidth, int pixelHeight, double dpiScale, bool hasAlpha)

@@ -335,7 +335,8 @@ internal sealed class BusyIndicatorPresenter : Control, IVisualTreeHost
     internal void FadeIn()
     {
         _fadeClock?.Stop();
-        _fadeClock = new AnimationClock(TimeSpan.FromMilliseconds(FadeDurationMs), Easing.EaseOutCubic);
+        _fadeClock = new AnimationClock(TimeSpan.FromMilliseconds(FadeDurationMs), Easing.EaseOutCubic)
+            .AttachTo(this);
         _fadeClock.TickCallback = progress =>
         {
             _opacity = (float)progress;
@@ -347,7 +348,8 @@ internal sealed class BusyIndicatorPresenter : Control, IVisualTreeHost
     internal void FadeOut(Action onCompleted)
     {
         _fadeClock?.Stop();
-        _fadeClock = new AnimationClock(TimeSpan.FromMilliseconds(FadeDurationMs), Easing.EaseInCubic);
+        _fadeClock = new AnimationClock(TimeSpan.FromMilliseconds(FadeDurationMs), Easing.EaseInCubic)
+            .AttachTo(this);
         _fadeClock.TickCallback = progress =>
         {
             _opacity = 1.0 - progress;

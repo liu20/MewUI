@@ -641,6 +641,16 @@ internal sealed class Win32WindowBackend : IWindowBackend
         return new Point(r.left / dpiScale, r.top / dpiScale);
     }
 
+    public void SetPositionPx(int leftPx, int topPx)
+    {
+        if (Handle == 0)
+        {
+            return;
+        }
+
+        MoveWindowTo(leftPx, topPx);
+    }
+
     public void SetPosition(double leftDip, double topDip)
     {
         if (Handle == 0)
@@ -658,11 +668,16 @@ internal sealed class Win32WindowBackend : IWindowBackend
         int x = (int)Math.Round(leftDip * dpiScale);
         int y = (int)Math.Round(topDip * dpiScale);
 
+        MoveWindowTo(x, y);
+    }
+
+    private void MoveWindowTo(int xPx, int yPx)
+    {
         const uint SWP_NOSIZE = 0x0001;
         const uint SWP_NOZORDER = 0x0004;
         const uint SWP_NOACTIVATE = 0x0010;
 
-        User32.SetWindowPos(Handle, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        User32.SetWindowPos(Handle, 0, xPx, yPx, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
     public void CaptureMouse()
@@ -712,6 +727,12 @@ internal sealed class Win32WindowBackend : IWindowBackend
                 return User32.DefWindowProc(Handle, msg, wParam, lParam);
 
             case WindowMessages.WM_NCHITTEST:
+                if (Window.IsInputTransparentSurface)
+                {
+                    // Taking the pointer would end the owner's hover and close the popup under the cursor.
+                    const int HTTRANSPARENT = -1;
+                    return HTTRANSPARENT;
+                }
                 if (_allowsTransparency)
                 {
                     return HandleNcHitTest(lParam);
@@ -906,17 +927,13 @@ internal sealed class Win32WindowBackend : IWindowBackend
             case WindowMessages.WM_TIMER:
                 if (wParam == 1)
                 {
-                    // AnimationManager.Update runs inside RenderFrameCore, so we must force a
-                    // render every tick while animations are active to advance their clocks.
-                    // Otherwise honor the standard NeedsRender flag - the dispatcher will dispatch
-                    // its own WM_INVOKE inside the modal pump and flip the flag at its own pace.
-                    if (AnimationManager.Instance.HasRenderDemand)
+                    // A native move/size loop blocks the host pump. Advance the shared animation pulse
+                    // here and repaint this window only when one of its clocks consumed the pulse.
+                    using var pulse = AnimationManager.Instance.BeginPulse(
+                        Application.Current.RenderLoopSettings);
+                    if (pulse.ShouldRender(Window, NeedsRender))
                     {
                         RenderNow();
-                    }
-                    else
-                    {
-                        RenderIfNeeded();
                     }
                     return 0;
                 }
@@ -1098,7 +1115,7 @@ internal sealed class Win32WindowBackend : IWindowBackend
             return ClampToWorkArea(x, y, windowWidthPx, windowHeightPx, User32.MonitorFromWindow(ownerWindow.Handle, MonitorDefaultToNearest));
         }
 
-        if (Window.StartupLocation == WindowStartupLocation.CenterScreen)
+        if (Window.EffectiveStartupLocation == WindowStartupLocation.CenterScreen)
         {
             var monitor = GetStartupMonitor();
             if (TryGetMonitorWorkArea(monitor, out var workArea))
@@ -1107,6 +1124,12 @@ internal sealed class Win32WindowBackend : IWindowBackend
                 int y = workArea.top + ((workArea.Height - windowHeightPx) / 2);
                 return (x, y);
             }
+        }
+
+        // Already screen coordinates; scaling would reintroduce the mismatch this avoids.
+        if (Window.StartupPositionPx is { } posPx)
+        {
+            return ClampToWorkArea(posPx.X, posPx.Y, windowWidthPx, windowHeightPx, GetStartupMonitor());
         }
 
         if (Window.ResolvedStartupPosition is { } pos)
@@ -1127,7 +1150,8 @@ internal sealed class Win32WindowBackend : IWindowBackend
             return;
         }
 
-        if (Window.StartupLocation == WindowStartupLocation.Manual && Window.ResolvedStartupPosition is null)
+        if (Window.StartupLocation == WindowStartupLocation.Manual &&
+            Window.ResolvedStartupPosition is null && Window.StartupPositionPx is null)
         {
             return;
         }
@@ -1183,8 +1207,15 @@ internal sealed class Win32WindowBackend : IWindowBackend
             return User32.MonitorFromWindow(ownerWindow.Handle, MonitorDefaultToNearest);
         }
 
+        if (Window.StartupPositionPx is { } posPx)
+        {
+            return User32.MonitorFromPoint(new POINT(posPx.X, posPx.Y), MonitorDefaultToNearest);
+        }
+
         if (Window.ResolvedStartupPosition is { } pos)
         {
+            // The system scale only finds the right monitor when the target shares it; a higher-DPI
+            // secondary is missed, and the window then lands scaled by the wrong monitor's DPI.
             uint systemDpi = Win32DpiApiResolver.GetSystemDpi();
             double scale = Math.Max(1.0, systemDpi / 96.0);
             var point = new POINT((int)Math.Round(pos.X * scale), (int)Math.Round(pos.Y * scale));
@@ -2123,28 +2154,50 @@ internal sealed class Win32WindowBackend : IWindowBackend
         {
             int xPx = (short)(lParam.ToInt64() & 0xFFFF);
             int yPx = (short)((lParam.ToInt64() >> 16) & 0xFFFF);
-            if (User32.GetClientRect(Handle, out var popupClient)
-                && (xPx < 0 || yPx < 0 || xPx >= popupClient.Width || yPx >= popupClient.Height))
+            if (User32.GetClientRect(Handle, out var popupClient))
             {
-                // Capture keeps delivering moves to this surface after the pointer has left it.
-                // Clear its hover chain before forwarding; the later WM_MOUSELEAVE is asynchronous
-                // and may not arrive until after the pointer has already entered another surface.
-                WindowInputRouter.UpdateMouseOver(Window, null);
-
-                const uint GA_ROOT = 2;
-                var screenPt = new POINT(xPx, yPx);
-                User32.ClientToScreen(Handle, ref screenPt);
-                nint hit = User32.WindowFromPoint(screenPt);
-                nint root = hit == 0 ? 0 : User32.GetAncestor(hit, GA_ROOT);
-                if (root != 0 && root != Handle && Window.IsPopupInputForwardTarget(root))
+                bool outside = xPx < 0 || yPx < 0 || xPx >= popupClient.Width || yPx >= popupClient.Height;
+                if (!outside)
                 {
-                    var targetPt = screenPt;
-                    User32.ScreenToClient(root, ref targetPt);
-                    // Keep forwarding synchronous. Posted WM_MOUSEMOVE messages are not coalesced
-                    // with the platform's input messages, so rapid movement can build an unbounded
-                    // owner-window backlog that delays the following click while the popup has capture.
-                    _ = User32.SendMessage(root, WindowMessages.WM_MOUSEMOVE, 0, (targetPt.y << 16) | (targetPt.x & 0xFFFF));
-                    return 0;
+                    // Owner moves forwarded while this popup holds capture deliberately skip
+                    // TrackMouseEvent: the native pointer is not really over the owner, so leave
+                    // tracking would fire immediately and ping-pong. Retire that forwarded hover
+                    // explicitly when the pointer comes back into the popup.
+                    if (Window.Owner is Window ownerWindow)
+                    {
+                        WindowInputRouter.UpdateMouseOver(ownerWindow, null);
+                    }
+                }
+                else
+                {
+                    // Capture keeps delivering moves to this surface after the pointer has left it.
+                    // Clear its hover chain before forwarding; the later WM_MOUSELEAVE is asynchronous
+                    // and may not arrive until after the pointer has already entered another surface.
+                    WindowInputRouter.UpdateMouseOver(Window, null);
+
+                    const uint GA_ROOT = 2;
+                    var screenPt = new POINT(xPx, yPx);
+                    User32.ClientToScreen(Handle, ref screenPt);
+                    nint hit = User32.WindowFromPoint(screenPt);
+                    nint root = hit == 0 ? 0 : User32.GetAncestor(hit, GA_ROOT);
+                    if (root != 0 && root != Handle && Window.IsPopupInputForwardTarget(root))
+                    {
+                        var targetPt = screenPt;
+                        User32.ScreenToClient(root, ref targetPt);
+                        // Keep forwarding synchronous. Posted WM_MOUSEMOVE messages are not coalesced
+                        // with the platform's input messages, so rapid movement can build an unbounded
+                        // owner-window backlog that delays the following click while the popup has capture.
+                        _ = User32.SendMessage(root, WindowMessages.WM_MOUSEMOVE, 0, (targetPt.y << 16) | (targetPt.x & 0xFFFF));
+                        return 0;
+                    }
+
+                    // The pointer is over neither this surface nor a related one. Capture keeps every move
+                    // here, and the owner suppresses its own leave tracking while we hold it, so nothing
+                    // else will retire the owner's hover: do it here.
+                    if (Window.Owner is Window ownerWindow)
+                    {
+                        WindowInputRouter.UpdateMouseOver(ownerWindow, null);
+                    }
                 }
             }
         }
@@ -2165,6 +2218,14 @@ internal sealed class Win32WindowBackend : IWindowBackend
     private void EnsureMouseLeaveTracking()
     {
         if (_isTrackingMouseLeave || Handle == 0)
+            return;
+
+        // While another surface holds capture, the moves arriving here are forwarded by that surface
+        // (a popup handing its owner the moves over it), not moves the system routed to us. The system
+        // still counts the pointer as away from this window, so a leave request fires back at once and
+        // ping-pongs against the next forwarded move. The capture holder drives hover in that mode.
+        nint capture = User32.GetCapture();
+        if (capture != 0 && capture != Handle)
             return;
 
         var tme = new TRACKMOUSEEVENT
@@ -2297,6 +2358,7 @@ internal sealed class Win32WindowBackend : IWindowBackend
     private nint HandleMouseLeave()
     {
         _isTrackingMouseLeave = false;
+
         WindowInputRouter.UpdateMouseOver(Window, null);
         return 0;
     }
@@ -2405,7 +2467,6 @@ internal sealed class Win32WindowBackend : IWindowBackend
         }
 
         WindowInputRouter.KeyDown(Window, args);
-        Window.ProcessKeyBindings(args);
         Window.ProcessAccessKeyDown(args);
 
         // WPF-like Tab behavior:
@@ -2533,7 +2594,7 @@ internal sealed class Win32WindowBackend : IWindowBackend
             double dpiScale = GetDpiForWindow(Handle) / 96.0;
 
             // Composition window follows current caret (end of preedit text).
-            int caretPos = (client is Controls.TextBase tb) ? tb.CaretPosition : client.CompositionStartIndex;
+            int caretPos = (client is ITextCompositionEditor editor) ? editor.CaretPosition : client.CompositionStartIndex;
             var caretRect = client.GetCharRectInWindow(caretPos);
 
             // If layout hasn't been performed yet, use a fallback height to avoid skipping IME positioning entirely.
@@ -2550,21 +2611,24 @@ internal sealed class Win32WindowBackend : IWindowBackend
             };
             Imm32.ImmSetCompositionWindow(himc, ref compForm);
 
-            // Candidate window stays at composition start position.
-            // CFS_EXCLUDE tells the IME to avoid overlapping the text line rect.
+            // Candidate window stays at the column the composition started in, at the top of its
+            // line: the IME drops the list below that point itself, by the composition font it was
+            // handed, so adding the line height here would drop it twice. The offset is clearance
+            // between the list and the line it belongs to, which the drop alone leaves too tight.
             var startRect = client.GetCharRectInWindow(client.CompositionStartIndex);
             int startPx = (int)(startRect.X * dpiScale);
-            int startPy = (int)(startRect.Y * dpiScale);
-            int startLineH = (int)((startRect.Height + COMPOSITION_OFFSET_Y_DIP) * dpiScale);
-
+            int startPy = (int)((startRect.Y + COMPOSITION_OFFSET_Y_DIP) * dpiScale);
 
             // Set composition font so third-party IMEs (e.g. Sogou) can determine
-            // candidate window size and position correctly.
+            // candidate window size and position correctly. The height is the line the preedit
+            // actually occupies, not the size the control asked for: a script that falls back to
+            // another face makes the line taller, and an IME that drops the list by the size it was
+            // told then lands it over the text.
             if (client is Controls.Control ctl)
             {
                 var logFont = new LOGFONT
                 {
-                    lfHeight = -(int)(ctl.FontSize * dpiScale),
+                    lfHeight = -(int)(Math.Max(ctl.FontSize, startRect.Height) * dpiScale),
                     lfWeight = ctl.FontWeight == FontWeight.Bold ? 700 : 400,
                     lfCharSet = 1, // DEFAULT_CHARSET
                 };
@@ -2579,6 +2643,7 @@ internal sealed class Win32WindowBackend : IWindowBackend
                 ptCurrentPos = new Imm32.POINT { x = startPx, y = startPy },
             };
             Imm32.ImmSetCandidateWindow(himc, ref candForm);
+            ImeLogger.Write($"position caret={caretPos} rect=({caretRect.X:F1},{caretRect.Y:F1},{caretRect.Width:F1},{caretRect.Height:F1}) compAt=({caretPx},{caretPy}) candAt=({startPx},{startPy}) dpi={dpiScale:F2}");
         }
         finally
         {

@@ -351,10 +351,7 @@ internal static unsafe partial class CoreTextText
             totalLines = 1;
         }
 
-        // CoreText measures with DPI-scaled fonts, so padding must also scale with DPI
-        // to ensure a consistent 1 DIP padding after the caller divides by dpiScale.
-        double dpiScale = dpi / 96.0;
-        double w = maxLineWidth + TextMeasurePolicy.WidthPaddingPx * dpiScale;
+        double w = maxLineWidth;
 
         double h = totalLines * metrics.LineHeight;
         return new Size(w, h);
@@ -578,6 +575,38 @@ internal static unsafe partial class CoreTextText
         CFRelease(line);
     }
 
+    /// <summary>
+    /// Returns cumulative prefix advances in pixels for each UTF-16 index of the shaped line.
+    /// Uses the same CTLine path as drawing so engine cluster positions match rendered glyphs.
+    /// </summary>
+    public static double[]? GetUtf16PrefixAdvancesPx(CoreTextFont font, ReadOnlySpan<char> text, uint dpi)
+    {
+        var ctFont = font.GetFontRef(dpi);
+        if (text.IsEmpty || ctFont == 0)
+        {
+            return null;
+        }
+
+        nint cfString = CreateCFString(text);
+        if (cfString == 0) return null;
+
+        nint attrStr = CreateFontAttrString(cfString, ctFont);
+        CFRelease(cfString);
+        if (attrStr == 0) return null;
+
+        nint line = CTLineCreateWithAttributedString(attrStr);
+        CFRelease(attrStr);
+        if (line == 0) return null;
+
+        var advances = new double[text.Length];
+        for (int index = 0; index < text.Length; index++)
+        {
+            advances[index] = CTLineGetOffsetForStringIndex(line, index + 1, null);
+        }
+        CFRelease(line);
+        return advances;
+    }
+
     private static double MeasureRunWidthWithFallback(nint baseFont, ReadOnlySpan<char> text)
     {
         nint cfString = CreateCFString(text);
@@ -765,6 +794,9 @@ internal static unsafe partial class CoreTextText
 
     [LibraryImport("/System/Library/Frameworks/CoreText.framework/CoreText")]
     private static partial double CTLineGetTypographicBounds(nint line, double* ascent, double* descent, double* leading);
+
+    [LibraryImport("/System/Library/Frameworks/CoreText.framework/CoreText")]
+    private static partial double CTLineGetOffsetForStringIndex(nint line, nint charIndex, double* secondaryOffset);
 
     [LibraryImport("/System/Library/Frameworks/CoreText.framework/CoreText")]
     private static partial CGRect CTLineGetImageBounds(nint line, nint context);

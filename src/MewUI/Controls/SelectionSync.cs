@@ -13,18 +13,24 @@ internal sealed class SelectionSync
     private readonly Action<int> _setSelectedIndex;
     private readonly Action<object?> _setSelectedItem;
     private readonly Action<IReadOnlyList<object?>>? _setSelectedItems;
+    private readonly Action<int> _commitSelectedIndex;
+    private readonly Action<object?> _commitSelectedItem;
     private bool _syncing;
 
     public SelectionSync(
         Func<ISelectableItemsView> view,
         Action<int> setSelectedIndex,
         Action<object?> setSelectedItem,
-        Action<IReadOnlyList<object?>>? setSelectedItems = null)
+        Action<IReadOnlyList<object?>>? setSelectedItems,
+        Action<int> commitSelectedIndex,
+        Action<object?> commitSelectedItem)
     {
         _view = view;
         _setSelectedIndex = setSelectedIndex;
         _setSelectedItem = setSelectedItem;
         _setSelectedItems = setSelectedItems;
+        _commitSelectedIndex = commitSelectedIndex;
+        _commitSelectedItem = commitSelectedItem;
     }
 
     /// <summary>True while a sync is in progress; property change callbacks should no-op.</summary>
@@ -39,9 +45,12 @@ internal sealed class SelectionSync
     {
         if (_syncing) return;
         _syncing = true;
-        try { _view().SelectedIndex = index; }
+        try
+        {
+            _view().SelectedIndex = index;
+            SyncFromModel();
+        }
         finally { _syncing = false; }
-        SyncFromModel();
     }
 
     /// <summary>Pushes a selected-item set from the bindable property down to the model.</summary>
@@ -49,9 +58,12 @@ internal sealed class SelectionSync
     {
         if (_syncing) return;
         _syncing = true;
-        try { _view().SelectedItem = item; }
+        try
+        {
+            _view().SelectedItem = item;
+            SyncFromModel();
+        }
         finally { _syncing = false; }
-        SyncFromModel();
     }
 
     /// <summary>
@@ -66,8 +78,16 @@ internal sealed class SelectionSync
         _syncing = true;
         try
         {
-            _setSelectedIndex(view.SelectedIndex);
-            _setSelectedItem(view.SelectedItem);
+            if (wasSyncing)
+            {
+                _setSelectedIndex(view.SelectedIndex);
+                _setSelectedItem(view.SelectedItem);
+            }
+            else
+            {
+                _commitSelectedIndex(view.SelectedIndex);
+                _commitSelectedItem(view.SelectedItem);
+            }
         }
         finally { _syncing = wasSyncing; }
         RefreshItems(view);

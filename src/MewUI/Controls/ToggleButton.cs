@@ -81,7 +81,7 @@ public partial class ToggleButton : ToggleBase
 
         if (IsEffectivelyEnabled && Bounds.Contains(e.Position))
         {
-            IsChecked = !IsChecked;
+            CommitIsChecked(!IsChecked);
         }
 
         e.Handled = true;
@@ -124,7 +124,7 @@ public partial class ToggleButton : ToggleBase
 
             if (e.Key == Key.Enter)
             {
-                IsChecked = !IsChecked;
+                CommitIsChecked(!IsChecked);
                 e.Handled = true;
             }
         }

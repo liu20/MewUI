@@ -49,6 +49,27 @@ internal static partial class XI2
 
     [LibraryImport(LibraryName)]
     public static partial void XIFreeDeviceInfo(nint info);
+
+    internal static bool IsButtonDown(ReadOnlySpan<byte> mask, int button)
+    {
+        if (button <= 0)
+        {
+            return false;
+        }
+
+        int byteIndex = button / 8;
+        return byteIndex < mask.Length && (mask[byteIndex] & (1 << (button % 8))) != 0;
+    }
+
+    internal static unsafe bool IsButtonDown(in XIButtonState state, int button)
+    {
+        if (state.mask_len <= 0 || state.mask == 0)
+        {
+            return false;
+        }
+
+        return IsButtonDown(new ReadOnlySpan<byte>((void*)state.mask, state.mask_len), button);
+    }
 }
 
 /// <summary>

@@ -90,6 +90,31 @@ internal enum DWRITE_FONT_SIMULATIONS : uint
     OBLIQUE = 0x0002
 }
 
+internal enum DWRITE_PIXEL_GEOMETRY : uint
+{
+    FLAT = 0,
+    RGB = 1,
+    BGR = 2
+}
+
+internal enum DWRITE_RENDERING_MODE : uint
+{
+    DEFAULT = 0,
+    ALIASED = 1,
+    GDI_CLASSIC = 2,
+    GDI_NATURAL = 3,
+    NATURAL = 4,
+    NATURAL_SYMMETRIC = 5,
+    OUTLINE = 6
+}
+
+internal enum DWRITE_MEASURING_MODE : uint
+{
+    NATURAL = 0,
+    GDI_CLASSIC = 1,
+    GDI_NATURAL = 2
+}
+
 internal struct DWRITE_TRIMMING
 {
     public DWRITE_TRIMMING_GRANULARITY granularity;

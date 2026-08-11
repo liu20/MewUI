@@ -142,10 +142,64 @@ var window = new Window()
 Application.Run(window);
 ```
 
-### 2.2 Theme configuration
+Use the startup overload when initialization must run after dispatcher installation but before the window is shown.
+
+```csharp
+Application.Run(window, () =>
+{
+    // The Dispatcher and UI SynchronizationContext are installed,
+    // and the window has not been shown yet.
+    InitializeServices();
+});
+```
+
+### 2.2 Starting without a main window
+
+`Application.Run(Action)` starts the dispatcher and platform message loop without creating or showing a main window. The required startup callback runs once on the UI thread after dispatcher installation. It may show ordinary windows immediately or from later dispatcher work.
+
+```csharp
+Application.Run(() =>
+{
+    Application.Current.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+    RegisterGlobalHotkey(() =>
+        Application.Current.Dispatcher!.BeginInvoke(
+            () => new PaletteWindow().Show()));
+});
+```
+
+Windowless execution does not set `OnExplicitShutdown` automatically. Set it explicitly when closing the last palette or utility window must leave the process running.
+
+With the builder, configure `OnStartup` and omit the main window factory. `WithShutdownMode` applies the policy before startup runs.
+
+```csharp
+Application.Create()
+    .WithShutdownMode(ShutdownMode.OnExplicitShutdown)
+    .OnStartup(RegisterGlobalHotkey)
+    .Run();
+```
+
+When both `BuildMainWindow(...)` and `OnStartup(...)` are configured, startup runs before the factory-created main window is shown. Calling `OnStartup` again replaces the previous callback.
+
+### 2.3 Startup callback arguments
+
+Every startup entry point has an overload taking `Action<string[]>`. The framework supplies the command-line arguments without the executable path, so startup logic assembled outside the entry point does not have to thread `args` through itself.
+
+```csharp
+Application.Create()
+    .OnStartup(args =>
+    {
+        if (args.Contains("--minimized"))
+            StartMinimized();
+    })
+    .Run<MainWindow>();
+```
+
+### 2.4 Theme configuration
 For ThemeVariant/Accent/ThemeSeed/ThemeMetrics configuration, see:
 
 - [Theme documentation](Theme.md)
+
+The default font family is decided when the platform package registers (`Win32Platform.Register()`, `UseWin32()`, and their X11/macOS equivalents), which precedes `Application.Create()` and window construction. Reading `ThemeMetrics.Default.FontFamily` or `ThemeManager.DefaultMetrics.FontFamily` after that point reports the family that will actually be used. See [Theme documentation](Theme.md) for how an unspecified family follows the system UI font.
 
 ---
 
@@ -229,26 +283,65 @@ window.Closed += () => SaveWindowPlacement();
 ```
 
 ### 5.2 When the application exits
-The message loop exits when the **last window** closes; `Application.Run(...)` then returns.
-Closing the main window alone does not exit the app while other windows are still open.
+`Application.ShutdownMode` decides whether closing a window terminates the message loop.
 
-If closing the main window should quit the app, show secondary windows with the main window as their owner (`tools.Show(main)`) so they close together, or close them from the main window's `Closed` handler.
+- `OnLastWindowClose` (the default): exits when the last window closes. This also applies to a window opened after `Application.Run(Action)` started without one.
+- `OnMainWindowClose`: exits when the main window closes. The window-based `Run` overloads record that identity; a run started without a main window has none until one is assigned (see 5.3).
+- `OnExplicitShutdown`: window closes never exit the loop; the application waits for `Application.Shutdown()`.
 
-### 5.3 Application.Quit
-`Application.Quit()` terminates the message loop immediately:
+The policy is scoped to one run and starts at `OnLastWindowClose` every time. Configure it before the run with the builder, or assign `Application.Current.ShutdownMode` from the startup callback.
+
+```csharp
+Application.Create()
+    .WithShutdownMode(ShutdownMode.OnExplicitShutdown)
+    .OnStartup(StartBackgroundApplication)
+    .Run();
+```
+
+### 5.3 Application.MainWindow
+`Application.Current.MainWindow` is the identity `OnMainWindowClose` watches. The window-based `Run` overloads (`Run(Window)`, `BuildMainWindow(...)`, `Run<TWindow>()`) set it, and it is also assignable while the run is in progress.
+
+Assigning it is the only way a run started without a main window can use `OnMainWindowClose`: promote a window opened later.
+
+```csharp
+Application.Create()
+    .WithShutdownMode(ShutdownMode.OnMainWindowClose)
+    .OnStartup(() =>
+    {
+        var dashboard = new DashboardWindow();
+        dashboard.Show();
+        Application.Current.MainWindow = dashboard;   // closing this one ends the run
+    })
+    .Run();
+```
+
+- The identity is scoped to one run; the next run starts with none.
+- Startup runs after the run window is recorded, so an assignment there overrides the window the builder supplied.
+- Assigning `null` clears the identity, which leaves `OnMainWindowClose` with nothing to trigger on.
+- The builder path bundles identity with "show at start". Assigning the property gives identity alone, so a window can be shown (or not) on your own terms.
+- The preview host captures the main window when the session starts, so a window promoted later is not reflected in preview targets. See [Preview](Preview.md).
+
+### 5.4 Application.Shutdown
+`Application.Shutdown()` terminates the message loop immediately:
 
 - Open windows do **not** get a `Closing` callback, so nothing can cancel the exit
-- The per-window close lifecycle is not guaranteed on this path; do not rely on `Closing`/`Closed` handlers for save prompts or persistence when quitting
+- The per-window close lifecycle is not guaranteed on this path; do not rely on `Closing`/`Closed` handlers for save prompts or persistence when shutting down
 - Platform resources are torn down and `Application.Run(...)` returns
 
-### 5.4 Recommended patterns
+`Shutdown(int exitCode)` also assigns `Environment.ExitCode`. `Run` stays `void`, so the code survives even when a fatal UI-thread exception makes `Run` throw instead of returning.
+
+```csharp
+Application.Shutdown(2);   // loop ends, process exits with 2
+```
+
+### 5.5 Recommended patterns
 - Default: let the user close windows; the app exits with the last one.
 - An "Exit" menu/button that should honor confirmation: call `mainWindow.Close()` so the `Closing` handler can prompt and cancel.
-- Main window ends the application: subscribe `Application.Quit` to the main window's `Closed`.
-- Immediate exit with no prompts (state already saved, watchdog restart, etc.): `Application.Quit()`.
+- Main window ends the application: subscribe `Application.Shutdown` to the main window's `Closed`.
+- Immediate exit with no prompts (state already saved, watchdog restart, etc.): `Application.Shutdown()`.
 
 #### Example: Main window ends the application
-The canonical recipe ties the app lifetime to the main window. Everything routes through `main.Close()`, so the confirmation stays in one place and keeps its veto; Quit only runs after the close actually went through, ending the app even if tool/background windows are still open.
+The canonical recipe ties the app lifetime to the main window. Everything routes through `main.Close()`, so the confirmation stays in one place and keeps its veto; Shutdown only runs after the close actually went through, ending the app even if tool/background windows are still open.
 
 ```csharp
 // 1) Confirmation (optional): one Closing handler guards every exit path.
@@ -262,37 +355,37 @@ main.Closing += args =>
 main.Closed += SaveSession;
 
 // 3) Main window = app lifetime.
-main.Closed += Application.Quit;
+main.Closed += Application.Shutdown;
 
-// 4) Every exit command goes through Close, never straight to Quit.
+// 4) Every exit command goes through Close, never straight to Shutdown.
 new Button().Content("Exit").OnClick(() => main.Close());
 ```
 
-For an unconditional exit (state already saved, watchdog restart), call `Application.Quit()` directly - no `Closing`/`Closed` handlers run.
+For an unconditional exit (state already saved, watchdog restart), call `Application.Shutdown()` directly - no `Closing`/`Closed` handlers run.
 
-#### Sequencing Close and Quit
+#### Sequencing Close and Shutdown
 ```csharp
 main.Close();
-Application.Quit();
+Application.Shutdown();
 ```
 
-This sequence means "close gracefully if allowed, but exit regardless" - useful for logout, fatal-error exit, or restart-after-update flows. `Close()` runs the close lifecycle before `Quit()` takes effect on every platform (synchronously on X11/macOS; on Win32 the posted `WM_CLOSE` is drained before the loop exits).
+This sequence means "close gracefully if allowed, but exit regardless" - useful for logout, fatal-error exit, or restart-after-update flows. `Close()` runs the close lifecycle before `Shutdown()` takes effect on every platform (synchronously on X11/macOS; on Win32 the posted `WM_CLOSE` is drained before the loop exits).
 
 - If `Closing` does not cancel: `Closed` cleanup runs, then the app exits.
-- If `Closing` cancels: the exit still happens, and that window skips its `Closed` cleanup (it is torn down by the Quit path).
+- If `Closing` cancels: the exit still happens, and that window skips its `Closed` cleanup (it is torn down by the Shutdown path).
 
-The synchronous sequence is only safe while no `Closing` handler defers. With a deferral (see [5.5](#55-async-close-closeasync-and-closing-deferrals)), `Close()` returns with the decision still pending and `Quit()` ends the loop before it resolves. `CloseAsync` expresses the same intent and waits for the decision either way:
+The synchronous sequence is only safe while no `Closing` handler defers. With a deferral (see [5.6](#56-async-close-closeasync-and-closing-deferrals)), `Close()` returns with the decision still pending and `Shutdown()` ends the loop before it resolves. `CloseAsync` expresses the same intent and waits for the decision either way:
 
 ```csharp
 await main.CloseAsync();   // full close lifecycle, deferrals included
-Application.Quit();        // exit regardless of the outcome
+Application.Shutdown();        // exit regardless of the outcome
 ```
 
 Prefer this form for the "exit regardless" flows.
 
-Pick by intent: when a confirmation should be able to keep the app running, use `main.Closed += Application.Quit` with `main.Close()`; use the sequence only when the exit must happen regardless.
+Pick by intent: when a confirmation should be able to keep the app running, use `main.Closed += Application.Shutdown` with `main.Close()`; use the sequence only when the exit must happen regardless.
 
-### 5.5 Async close: CloseAsync and Closing deferrals
+### 5.6 Async close: CloseAsync and Closing deferrals
 `Window.CloseAsync()` requests a close and reports the outcome:
 
 ```csharp
@@ -358,4 +451,4 @@ Application.DispatcherUnhandledException += e =>
 - The core flow is: **pre-run configuration → Run → message loop**
 - Theme/RenderLoop should be decided before Run
 - A Window only acquires native resources at Show time
-- The app exits when the last window closes; `Window.Close()` is the graceful (cancellable) path, `Application.Quit()` is the immediate one
+- By default the app exits when the last window closes; select another lifetime with `ShutdownMode`. `Window.Close()` is the graceful (cancellable) path, while `Application.Shutdown()` is immediate

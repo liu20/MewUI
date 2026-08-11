@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<node name="/">
+  <interface name="org.freedesktop.portal.Session">
+    <method name="Close"/>
+    <signal name="Closed"/>
+  </interface>
+</node>

@@ -82,16 +82,16 @@ public class CheckBox : ContentControl
     {
         if (IsThreeState)
         {
-            IsChecked = IsChecked switch
+            CommitTargetValue(IsCheckedProperty, IsChecked switch
             {
                 false => true,
                 true => (bool?)null,
                 _ => false
-            };
+            });
         }
         else
         {
-            IsChecked = IsChecked != true;
+            CommitTargetValue(IsCheckedProperty, IsChecked != true);
         }
     }
 

@@ -28,11 +28,17 @@ internal static class PreviewTargetScanner
         public bool Available => UnavailableReason == null;
     }
 
-    internal static List<TargetDescriptor> Scan()
+    internal static List<TargetDescriptor> Scan(bool mainWindowAvailable = true)
     {
         var targets = new List<TargetDescriptor>
         {
-            new() { Id = MAIN_WINDOW_ID, DisplayName = "Application main window", Kind = "main" },
+            new()
+            {
+                Id = MAIN_WINDOW_ID,
+                DisplayName = "Application main window",
+                Kind = "main",
+                UnavailableReason = mainWindowAvailable ? null : "application started without a main window",
+            },
         };
 
         var mewUiName = typeof(Application).Assembly.GetName().Name;

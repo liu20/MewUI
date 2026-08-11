@@ -131,6 +131,35 @@ public abstract partial class UIElement
         }
     }
 
+    /// <summary>
+    /// The colour an opaque cache can be filled with, or <see langword="null"/> to cache with alpha.
+    /// </summary>
+    private Color? ResolveOpaqueCacheFill()
+    {
+        // Backends can only keep subpixel text antialiasing on a surface with no per-pixel alpha,
+        // because subpixel coverage cannot be resolved against unknown backdrop pixels. The nearest
+        // opaque background in the ancestry is what the cache would have been composited onto, so
+        // priming it with that colour leaves the same pixels and keeps the text subpixel-rendered.
+        for (Element? element = this; element != null; element = element.Parent)
+        {
+            if (element is not Controls.Control control || control.Background.A != 255)
+            {
+                continue;
+            }
+
+            // This element's own background only covers the whole box when it is not rounded; a
+            // rounded one leaves its corners to whatever is behind, which an ancestor colour supplies.
+            if (ReferenceEquals(element, this) && control.CornerRadius > 0)
+            {
+                continue;
+            }
+
+            return control.Background;
+        }
+
+        return null;
+    }
+
     private bool EnsureCache(IGraphicsFactory factory, double dpiScale, int deviceGeneration, BitmapCache bitmapCache)
     {
         var bounds = Bounds;
@@ -144,13 +173,15 @@ public abstract partial class UIElement
         int pixelWidth = Math.Max(1, (int)Math.Ceiling(bounds.Width * effectiveDpiScale));
         int pixelHeight = Math.Max(1, (int)Math.Ceiling(bounds.Height * effectiveDpiScale));
         long version = _contentVersion;
+        Color? opaqueFill = ResolveOpaqueCacheFill();
 
         var entry = _cache;
         bool canReuse = entry != null
             && entry.PixelWidth == pixelWidth
             && entry.PixelHeight == pixelHeight
             && entry.DpiScale == effectiveDpiScale
-            && entry.DeviceGeneration == deviceGeneration;
+            && entry.DeviceGeneration == deviceGeneration
+            && entry.OpaqueFill == opaqueFill;
 
         if (canReuse && entry!.Version == version)
         {
@@ -162,7 +193,8 @@ public abstract partial class UIElement
             DisposeCacheEntry();
 
             IRenderSurface surface = factory.CreateSurface(
-                RenderSurfaceDescriptor.CachedImage(pixelWidth, pixelHeight, effectiveDpiScale));
+                RenderSurfaceDescriptor.CachedImage(
+                    pixelWidth, pixelHeight, effectiveDpiScale, hasAlpha: opaqueFill is null));
             try
             {
                 entry = new CacheEntry
@@ -173,6 +205,7 @@ public abstract partial class UIElement
                     PixelHeight = pixelHeight,
                     DpiScale = effectiveDpiScale,
                     DeviceGeneration = deviceGeneration,
+                    OpaqueFill = opaqueFill,
                 };
                 _cache = entry;
             }
@@ -186,7 +219,7 @@ public abstract partial class UIElement
         using (IGraphicsContext cacheContext = factory.CreateContext(entry!.Surface))
         {
             cacheContext.BeginFrame(entry.Surface);
-            cacheContext.Clear(Color.Transparent);
+            cacheContext.Clear(opaqueFill ?? Color.Transparent);
             cacheContext.Translate(-bounds.Left, -bounds.Top);
 
             _cacheSnapshotDepth++;
@@ -224,6 +257,7 @@ public abstract partial class UIElement
         public required int PixelHeight { get; init; }
         public required double DpiScale { get; init; }
         public required int DeviceGeneration { get; init; }
+        public required Color? OpaqueFill { get; init; }
         public long Version { get; set; }
         public Color InvalidationOverlayColor { get; set; }
 

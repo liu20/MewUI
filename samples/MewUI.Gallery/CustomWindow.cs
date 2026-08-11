@@ -95,9 +95,10 @@ public class CustomWindow : Window
         base.Background = Color.Transparent;
         base.Padding = new Thickness(0);
 
-        StyleSheet = new StyleSheet();
-        StyleSheet.Define("chrome", CreateChromeButtonStyle);
-        StyleSheet.Define("close", CreateCloseButtonStyle);
+        // Assigning to a Window freezes the sheet at once, so define before assigning.
+        StyleSheet = new StyleSheet()
+            .With("chrome", CreateChromeButtonStyle)
+            .With("close", CreateCloseButtonStyle);
 
         // Title text
         var titleText = new TextBlock

@@ -17,6 +17,9 @@ public static class PreviewBootstrap
         }
 
         Design.IsPreviewMode = true;
+        // Preview windows have no OS surface, so natively hosted popups would render into
+        // invisible headless windows; in-surface hosting composites them into the streamed frame.
+        PopupManager.PreferNativePopups = false;
         Application.PlatformHostInterceptor = host => new PreviewPlatformHost(host);
     }
 }

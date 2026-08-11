@@ -20,7 +20,7 @@ internal sealed class DockCaption : ContentControl, IToolHeader
     private readonly Func<string?> _title;
     private readonly Func<Node?> _dragNode;
     private readonly Action<Point> _floatOut;
-    private readonly Action<ContextMenu> _buildMenu;
+    private readonly Action<ContextMenu, CommandScope> _buildMenu;
     private readonly TextBlock _label;
     private readonly Button _menuButton;
 
@@ -32,7 +32,7 @@ internal sealed class DockCaption : ContentControl, IToolHeader
         ObservableValue<string> pinToolTip,
         Action onPin,
         Action onClose,
-        Action<ContextMenu> buildMenu,
+        Action<ContextMenu, CommandScope> buildMenu,
         Action<Point> floatOut)
     {
         _model = model;
@@ -84,11 +84,11 @@ internal sealed class DockCaption : ContentControl, IToolHeader
         MewUIDockString.ToolTipAutoHide,
         () => tabSet.Model.DoAction(DockAction.UnpinTool(tabSet.GetId())),
         () => CloseSelected(tabSet.Model, tabSet.GetSelectedNode()),
-        menu =>
+        (menu, commands) =>
         {
-            menu.AddItem(MewUIDockString.MenuFloat.Value, () => tabSet.Model.DoAction(DockAction.PopoutTabset(tabSet.GetId())));
-            menu.AddItem(MewUIDockString.MenuAutoHide.Value, () => tabSet.Model.DoAction(DockAction.UnpinTool(tabSet.GetId())));
-            menu.AddItem(MewUIDockString.MenuClose.Value, () => CloseSelected(tabSet.Model, tabSet.GetSelectedNode()));
+            DockMenuCommands.Add(menu, commands, "floatGroup", MewUIDockString.MenuFloat.Value, () => tabSet.Model.DoAction(DockAction.PopoutTabset(tabSet.GetId())));
+            DockMenuCommands.Add(menu, commands, "autoHide", MewUIDockString.MenuAutoHide.Value, () => tabSet.Model.DoAction(DockAction.UnpinTool(tabSet.GetId())));
+            DockMenuCommands.Add(menu, commands, "close", MewUIDockString.MenuClose.Value, () => CloseSelected(tabSet.Model, tabSet.GetSelectedNode()));
         },
         pos => tabSet.Model.DoAction(DockAction.PopoutTabset(tabSet.GetId(), position: pos)));
 
@@ -101,11 +101,11 @@ internal sealed class DockCaption : ContentControl, IToolHeader
         MewUIDockString.ToolTipDock,
         () => Pin(border),
         () => CloseSelected(border.Model, border.GetSelectedNode()),
-        menu =>
+        (menu, commands) =>
         {
-            menu.AddItem(MewUIDockString.MemuDock.Value, () => Pin(border));
-            menu.AddItem(MewUIDockString.MenuFloat.Value, () => Float(border));
-            menu.AddItem(MewUIDockString.MenuClose.Value, () => CloseSelected(border.Model, border.GetSelectedNode()));
+            DockMenuCommands.Add(menu, commands, "dock", MewUIDockString.MemuDock.Value, () => Pin(border));
+            DockMenuCommands.Add(menu, commands, "float", MewUIDockString.MenuFloat.Value, () => Float(border));
+            DockMenuCommands.Add(menu, commands, "close", MewUIDockString.MenuClose.Value, () => CloseSelected(border.Model, border.GetSelectedNode()));
         },
         pos => { if (border.GetSelectedNode() is TabNode sel) border.Model.DoAction(DockAction.PopoutTab(sel.GetId(), position: pos)); });
 
@@ -183,7 +183,9 @@ internal sealed class DockCaption : ContentControl, IToolHeader
     private void ShowMenu()
     {
         var menu = new ContextMenu();
-        _buildMenu(menu);
+        var commands = new CommandScope();
+        _buildMenu(menu, commands);
+        menu.SetCommandTarget(CommandTarget.From(commands));
         var bounds = _menuButton.Bounds;
         menu.ShowAt(_menuButton, new Point(bounds.X, bounds.Bottom));
     }

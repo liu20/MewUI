@@ -75,6 +75,7 @@ internal sealed unsafe partial class CoreTextFont : FontBase, IGlyphOutlineFont
         bool underline,
         bool strikethrough)
     {
+        family = SelectFamilyCandidate(family);
         var resolved = FontRegistry.Resolve(family);
         if (resolved != null)
         {
@@ -135,6 +136,67 @@ internal sealed unsafe partial class CoreTextFont : FontBase, IGlyphOutlineFont
         FontWeight.Black => 0.62,
         _ => 0.0
     };
+
+    /// <summary>Picks the first installed family from a comma-separated list; single names pass through.</summary>
+    private static string SelectFamilyCandidate(string family)
+    {
+        if (!FontFamilyList.IsList(family))
+        {
+            return family;
+        }
+
+        string[] candidates = FontFamilyList.Split(family);
+        foreach (string candidate in candidates)
+        {
+            if (FontRegistry.Resolve(candidate) != null || IsInstalled(candidate))
+            {
+                return candidate;
+            }
+        }
+        return candidates.Length > 0 ? candidates[0] : family;
+    }
+
+    private static unsafe bool IsInstalled(string family)
+    {
+        // CoreText substitutes silently, so the created font's own family name is the
+        // availability signal.
+        nint name = 0;
+        nint font = 0;
+        nint reportedName = 0;
+        try
+        {
+            fixed (char* p = family)
+            {
+                name = CoreFoundation.CFStringCreateWithCharacters(0, p, family.Length);
+            }
+            font = CoreText.CTFontCreateWithName(name, 12, 0);
+            if (font == 0)
+            {
+                return false;
+            }
+
+            reportedName = CoreText.CTFontCopyFamilyName(font);
+            if (reportedName == 0)
+            {
+                return false;
+            }
+
+            const uint UTF8 = 0x08000100;
+            byte* buffer = stackalloc byte[256];
+            if (!CoreFoundation.CFStringGetCString(reportedName, buffer, 256, UTF8))
+            {
+                return false;
+            }
+            string reported = Marshal.PtrToStringUTF8((nint)buffer) ?? string.Empty;
+            return string.Equals(reported, family, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            if (reportedName != 0) CoreFoundation.CFRelease(reportedName);
+            if (font != 0) CoreFoundation.CFRelease(font);
+            if (name != 0) CoreFoundation.CFRelease(name);
+        }
+    }
 
     private static unsafe nint CreateStyledCTFont(nint cfFamilyName, double sizePx, FontWeight weight, bool italic)
     {
@@ -474,6 +536,10 @@ internal sealed unsafe partial class CoreTextFont : FontBase, IGlyphOutlineFont
         internal static partial nint CFStringCreateWithCharacters(nint alloc, char* chars, nint numChars);
 
         [LibraryImport("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")]
+        [return: MarshalAs(UnmanagedType.I1)]
+        internal static partial bool CFStringGetCString(nint theString, byte* buffer, nint bufferSize, uint encoding);
+
+        [LibraryImport("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")]
         internal static partial nint CFNumberCreate(nint allocator, int theType, void* valuePtr);
 
         [LibraryImport("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")]
@@ -491,6 +557,9 @@ internal sealed unsafe partial class CoreTextFont : FontBase, IGlyphOutlineFont
     {
         [LibraryImport("/System/Library/Frameworks/CoreText.framework/CoreText")]
         internal static partial nint CTFontCreateWithName(nint name, double size, nint matrix);
+
+        [LibraryImport("/System/Library/Frameworks/CoreText.framework/CoreText")]
+        internal static partial nint CTFontCopyFamilyName(nint font);
 
         [LibraryImport("/System/Library/Frameworks/CoreText.framework/CoreText", EntryPoint = "CTFontCreateWithName")]
         internal static partial nint CTFontCreateWithNameAndMatrix(nint name, double size, CGAffineTransform* matrix);

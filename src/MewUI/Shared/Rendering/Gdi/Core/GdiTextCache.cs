@@ -151,9 +151,10 @@ internal sealed class GdiTextCache : IDisposable
                 byte blueCoverage = row[pixelOffset + 0];
                 byte greenCoverage = row[pixelOffset + 1];
                 byte redCoverage = row[pixelOffset + 2];
-                byte coverage = blueCoverage;
-                if (greenCoverage > coverage) coverage = greenCoverage;
-                if (redCoverage > coverage) coverage = redCoverage;
+
+                // Luminance, not the channel maximum: one bright ClearType subpixel would overstate the
+                // edge, and the darkening curve compensating for that flattens the antialiasing.
+                byte coverage = (byte)(((redCoverage * 30) + (greenCoverage * 59) + (blueCoverage * 11)) / 100);
 
                 if (coverage == 0 || aColor == 0)
                 {
@@ -164,7 +165,6 @@ internal sealed class GdiTextCache : IDisposable
                     continue;
                 }
 
-                coverage = (byte)((coverage * coverage + 127) / 255);
                 byte alpha = (byte)((coverage * aColor + 127) / 255);
                 row[pixelOffset + 0] = (byte)((color.B * alpha + 127) / 255);
                 row[pixelOffset + 1] = (byte)((color.G * alpha + 127) / 255);

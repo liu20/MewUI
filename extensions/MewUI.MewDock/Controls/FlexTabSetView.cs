@@ -162,31 +162,33 @@ internal sealed class FlexTabSetView : Control, IVisualTreeHost
     private void ShowGroupMenu(Point local)
     {
         var menu = new ContextMenu();
-        BuildGroupMenu(menu);
-        _context.ConfigureGroupMenu?.Invoke(_tabSet, menu); // host appends app commands
+        var commands = new CommandScope();
+        BuildGroupMenu(menu, commands);
+        _context.ConfigureGroupMenu?.Invoke(_tabSet, menu, commands); // host appends app commands
+        menu.SetCommandTarget(CommandTarget.From(commands));
         menu.ShowAt(this, new Point(Bounds.X + local.X, Bounds.Y + local.Y));
     }
 
-    private void BuildGroupMenu(ContextMenu menu)
+    private void BuildGroupMenu(ContextMenu menu, CommandScope commands)
     {
         var model = _tabSet.Model;
         string setId = _tabSet.GetId();
-        menu.AddItem(MewUIDockString.MenuFloat.Value, () => model.DoAction(DockAction.PopoutTabset(setId)));
+        DockMenuCommands.Add(menu, commands, "floatGroup", MewUIDockString.MenuFloat.Value, () => model.DoAction(DockAction.PopoutTabset(setId)));
         if (_tabSet.IsDocument)
         {
             if (_tabSet.IsEnableMaximize)
             {
                 var label = _tabSet.IsMaximized ? MewUIDockString.MenuRestore.Value : MewUIDockString.MenuMaximize.Value;
-                menu.AddItem(label, () => model.DoAction(DockAction.MaximizeToggle(setId)));
+                DockMenuCommands.Add(menu, commands, "toggleMaximize", label, () => model.DoAction(DockAction.MaximizeToggle(setId)));
             }
         }
         else
         {
-            menu.AddItem(MewUIDockString.MenuAutoHide.Value, () => model.DoAction(DockAction.UnpinTool(setId)));
+            DockMenuCommands.Add(menu, commands, "autoHide", MewUIDockString.MenuAutoHide.Value, () => model.DoAction(DockAction.UnpinTool(setId)));
         }
         menu.AddSeparator();
         bool anyClosable = _tabSet.Children.Any(c => c is TabNode tab && tab.IsEnableClose);
-        menu.AddItem(MewUIDockString.MenuCloseAll.Value, CloseClosableTabs, anyClosable);
+        DockMenuCommands.Add(menu, commands, "closeAll", MewUIDockString.MenuCloseAll.Value, CloseClosableTabs, anyClosable);
     }
 
     // Close every closable tab in the group; a tab with enableClose=false stays (so the group survives if it holds one).
@@ -514,6 +516,7 @@ internal sealed class FlexTabSetView : Control, IVisualTreeHost
             return;
         }
         var menu = new ContextMenu();
+        var commands = new CommandScope();
         foreach (var tab in _tabs)
         {
             if (!_hiddenTabs.Contains(tab))
@@ -521,8 +524,10 @@ internal sealed class FlexTabSetView : Control, IVisualTreeHost
                 continue;
             }
             var node = tab.Tab;
-            menu.AddItem(node.Name ?? MewUIDockString.TitleUnnamedTab.Value, () => _tabSet.Model.DoAction(DockAction.SelectTab(node.GetId())));
+            DockMenuCommands.Add(menu, commands, "selectTab", node.Name ?? MewUIDockString.TitleUnnamedTab.Value,
+                () => _tabSet.Model.DoAction(DockAction.SelectTab(node.GetId())));
         }
+        menu.SetCommandTarget(CommandTarget.From(commands));
         var buttonBounds = _overflowButton.Bounds;
         menu.ShowAt(_overflowButton, new Point(buttonBounds.X, buttonBounds.Bottom));
     }

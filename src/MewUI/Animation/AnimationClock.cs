@@ -1,5 +1,7 @@
 using System.Diagnostics;
 
+using Aprillz.MewUI.Controls;
+
 namespace Aprillz.MewUI.Animation;
 
 /// <summary>
@@ -7,6 +9,7 @@ namespace Aprillz.MewUI.Animation;
 /// </summary>
 public sealed class AnimationClock
 {
+    private WeakReference<Element>? _owner;
     private long _startTimestamp;
     private long _pauseTimestamp;
     private long _pauseAccumulated;
@@ -80,6 +83,33 @@ public sealed class AnimationClock
     /// Single-owner callback - no multicast, no cleanup needed.
     /// </summary>
     public Action? CompletedCallback { get; set; }
+
+    /// <summary>
+    /// Associates this clock with the element whose visual surface consumes its frames. Framework-owned
+    /// clocks use this to keep animation render demand local to one window. Public clocks that are not
+    /// attached retain the legacy application-wide render demand.
+    /// </summary>
+    internal AnimationClock AttachTo(Element owner)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        _owner = new WeakReference<Element>(owner);
+        return this;
+    }
+
+    internal bool HasOwner => _owner != null;
+
+    internal Window? ResolveOwnerWindow()
+    {
+        if (_owner == null || !_owner.TryGetTarget(out var owner))
+        {
+            return null;
+        }
+
+        // Native popups use a portal: their subtree remains rooted in the owner window, while a
+        // PopupWindow owns the actual render surface. ResolveInputHostWindow already follows that
+        // hosted-surface boundary and falls back to the ordinary visual root.
+        return owner.ResolveInputHostWindow();
+    }
 
     /// <summary>
     /// Starts the animation from the beginning.

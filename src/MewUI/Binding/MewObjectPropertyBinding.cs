@@ -5,16 +5,20 @@ namespace Aprillz.MewUI;
 /// <summary>
 /// Bridges a <see cref="MewProperty{T}"/> on a target <see cref="MewObject"/>
 /// to a <see cref="MewProperty{T}"/> on a source <see cref="MewObject"/>.
-/// When the source property changes, the target is updated at the local tier
-/// (consistent with the converting and observable-value bindings).
+/// When the source property changes, the target's binding value is updated.
 /// </summary>
-internal sealed class MewObjectPropertyBinding<T> : IDisposable
+internal sealed class MewObjectPropertyBinding<T> : IPropertyBinding
 {
+    private static readonly BindingCapabilities _capabilities =
+        BindingCapabilities.FromMode(BindingMode.OneWay);
+
     private readonly MewObject _target;
     private readonly MewProperty<T> _targetProperty;
     private readonly MewObject _source;
     private readonly MewProperty<T> _sourceProperty;
     private readonly PropertyForwardEntry _forwardEntry;
+
+    public BindingCapabilities Capabilities => _capabilities;
 
     public MewObjectPropertyBinding(
         MewObject target,
@@ -32,12 +36,41 @@ internal sealed class MewObjectPropertyBinding<T> : IDisposable
         // forward currently occupies the source property id (another binding may share it).
         _forwardEntry = source.AddPropertyForward(sourceProperty.Id, target, targetProperty);
 
-        // Initial sync.
-        target.PropertyStore.SetLocal(targetProperty, source.PropertyStore.GetBoxedValue(sourceProperty));
+    }
+
+    public void Initialize()
+    {
+        T sourceValue;
+        try
+        {
+            sourceValue = _source.GetBindingValue(_sourceProperty);
+        }
+        catch (Exception ex)
+        {
+            _target.ReportBindingError(
+                _targetProperty,
+                null,
+                BindingStatus.BindingError,
+                BindingErrorStage.SourceReadBack,
+                ex);
+            return;
+        }
+
+        _target.ApplyBindingTargetValue(
+            _targetProperty,
+            sourceValue);
     }
 
     public void Dispose()
     {
         _source.RemovePropertyForward(_sourceProperty.Id, _forwardEntry);
     }
+
+    public void UpdateTargetValue(object? value)
+    {
+        _target.UpdateBindingTarget(_targetProperty, (T)value!);
+    }
+
+    public BindingCommitResult CommitTargetValue(object? value)
+        => BindingCommitResult.Success(value);
 }

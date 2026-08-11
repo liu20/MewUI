@@ -144,6 +144,10 @@ internal static partial class Gdi32
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool GetTextExtentPoint32(nint hdc, string lpString, int c, out SIZE lpSize);
 
+    [LibraryImport(LibraryName, EntryPoint = "GetTextExtentPoint32W")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static unsafe partial bool GetTextExtentPoint32(nint hdc, char* text, int length, SIZE* size);
+
     [LibraryImport(LibraryName, EntryPoint = "AddFontResourceExW", StringMarshalling = StringMarshalling.Utf16)]
     public static partial int AddFontResourceEx(string name, uint flags, nint reserved);
 
@@ -243,6 +247,17 @@ internal static partial class Gdi32
     [LibraryImport(LibraryName, EntryPoint = "ExtTextOutW")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static unsafe partial bool ExtTextOut(nint hdc, int x, int y, uint options, ref RECT lprect, char* lpString, int c, nint lpDx);
+
+    [LibraryImport(LibraryName, EntryPoint = "GetTextExtentExPointW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static unsafe partial bool GetTextExtentExPoint(
+        nint hdc,
+        char* text,
+        int textLength,
+        int maxExtent,
+        int* fit,
+        int* cumulativeWidths,
+        SIZE* size);
 
     [LibraryImport("user32.dll", EntryPoint = "DrawTextW")]
     public static unsafe partial int DrawText(nint hdc, char* lpchText, int cchText, ref RECT lprc, uint format);

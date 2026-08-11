@@ -53,7 +53,7 @@ internal sealed class PreviewPlatformHost : IPlatformHost
 
     public int GetSystemMetricsForDpi(int nIndex, uint dpi) => _inner.GetSystemMetricsForDpi(nIndex, dpi);
 
-    public void Run(Application app, Window mainWindow)
+    public void Run(Application app, Window? mainWindow)
     {
         _running = true;
         _app = app;
@@ -67,7 +67,7 @@ internal sealed class PreviewPlatformHost : IPlatformHost
         try
         {
             _session.Start(app, mainWindow, () => _wake.Set());
-            mainWindow.Show();
+            app.OnHostLoopStarting(mainWindow);
             PumpLoop(null);
         }
         finally

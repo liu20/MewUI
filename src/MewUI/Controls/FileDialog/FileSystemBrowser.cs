@@ -1,8 +1,7 @@
 namespace Aprillz.MewUI.Platform;
 
 /// <summary>
-/// Pure file-system model for the managed dialog. Synchronous enumeration (prototype);
-/// the core port will make this cancellable/async per agent/managed-file-dialog/design.md.
+/// Pure file-system model for the managed dialog; enumeration is synchronous for now.
 /// </summary>
 internal sealed class FileSystemBrowser
 {
@@ -15,8 +14,7 @@ internal sealed class FileSystemBrowser
 
     private int _historyIndex = -1;
 
-    // Each navigation bumps the epoch and cancels the previous one; a completing background load whose epoch is
-    // stale is discarded. See agent/managed-file-dialog/design.md §2.1 / §3.4.
+    // Each navigation bumps the epoch; a background load completing on a stale epoch is discarded.
     private int _epoch;
 
     private CancellationTokenSource? _cts;
@@ -155,6 +153,41 @@ internal sealed class FileSystemBrowser
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Lists the immediate subdirectory names of <paramref name="path"/> (honoring <see cref="ShowHidden"/>),
+    /// sorted case-insensitively. Returns an empty list for an inaccessible path. Runs synchronously on the
+    /// caller's thread; intended for small on-demand lists (breadcrumb dropdown).
+    /// </summary>
+    public IReadOnlyList<string> ListSubdirectories(string path)
+    {
+        var names = new List<string>();
+        try
+        {
+            foreach (var dir in Directory.EnumerateDirectories(path))
+            {
+                try
+                {
+                    if (!ShowHidden && (new DirectoryInfo(dir).Attributes & FileAttributes.Hidden) != 0)
+                    {
+                        continue;
+                    }
+                    names.Add(Path.GetFileName(dir));
+                }
+                catch
+                {
+                    // Skip entries we cannot stat.
+                }
+            }
+        }
+        catch
+        {
+            // Inaccessible directory: return whatever was gathered (possibly empty).
+        }
+
+        names.Sort(static (a, b) => string.Compare(a, b, StringComparison.OrdinalIgnoreCase));
+        return names;
     }
 
     // Background only. Enumerates + stats entries; hidden is filtered here (a hidden toggle re-enumerates).

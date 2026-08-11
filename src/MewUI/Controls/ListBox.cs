@@ -1,6 +1,6 @@
-using Aprillz.MewUI.Controls.Text;
 using Aprillz.MewUI.Input;
 using Aprillz.MewUI.Rendering;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Controls;
 
@@ -31,7 +31,6 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
     public static readonly MewProperty<bool> ZebraStripingProperty =
         MewProperty<bool>.Register<ListBox>(nameof(ZebraStriping), true, MewPropertyOptions.AffectsRender);
 
-    private readonly TextWidthCache _textWidthCache = new(512);
     private IItemsPresenter _presenter;
     private IDataTemplate _itemTemplate;
 
@@ -250,6 +249,15 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
         => TryGetItemIndexAtCore(position, out index);
 
     /// <summary>
+    /// The item's rectangle in this control's coordinate space, spanning the item's full width.
+    /// False when the index is out of range or the list cannot say where the item sits, which a
+    /// variable-height list answers for an item it has not measured yet. The rectangle can fall
+    /// outside the viewport; intersect it with <see cref="UIElement.Bounds"/> for the visible part.
+    /// </summary>
+    public bool TryGetItemBounds(int index, out Rect bounds)
+        => TryMapItemIndexToBounds(index, _presenter, out bounds);
+
+    /// <summary>
     /// Attempts to find the item index for a mouse event routed by the window input router.
     /// </summary>
     public bool TryGetItemIndexAt(MouseEventArgs e, out int index)
@@ -288,9 +296,11 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
     public ListBox()
     {
         _selection = new SelectionSync(() => _itemsSource,
-            value => SetValue(SelectedIndexProperty, value),
-            value => SetValue(SelectedItemProperty, value),
-            value => SetValue(SelectedItemsPropertyKey, value));
+            value => SetCurrentValue(SelectedIndexProperty, value),
+            value => SetCurrentValue(SelectedItemProperty, value),
+            value => SetValue(SelectedItemsPropertyKey, value),
+            value => CommitTargetValue(SelectedIndexProperty, value),
+            value => CommitTargetValue(SelectedItemProperty, value));
 
         // Same policy as TreeView: items wider than the viewport scroll horizontally
         // (the presenter reports its natural width as the scroll extent).
@@ -396,7 +406,8 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
         // Desired width is the natural item width regardless of alignment: stretch is an arrange
         // concern, and echoing the constraint made fit-content sizing impossible (issue #199).
         {
-            using var measure = BeginTextMeasurement();
+            var factory = GetGraphicsFactory();
+            var style = GetTextRunStyle();
 
             maxWidth = 0;
             if (count > 4096)
@@ -409,7 +420,6 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
                 int visibleEstimate = itemHeightEstimate <= 0 ? count : (int)Math.Ceiling(viewportEstimate / itemHeightEstimate) + 1;
                 int sampleCount = Math.Clamp(visibleEstimate, 32, 256);
                 sampleCount = Math.Min(sampleCount, count);
-                _textWidthCache.SetCapacity(Math.Clamp(visibleEstimate * 4, 256, 4096));
                 double itemPadW = ItemPadding.HorizontalThickness;
 
                 for (int i = 0; i < sampleCount; i++)
@@ -420,7 +430,7 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
                         continue;
                     }
 
-                    maxWidth = Math.Max(maxWidth, _textWidthCache.GetOrMeasure(measure.Context, measure.Font, dpi, item) + itemPadW);
+                    maxWidth = Math.Max(maxWidth, TextLayoutOperations.Measure(factory, item, dpi, in style).Width + itemPadW);
                     if (maxWidth >= widthLimit)
                     {
                         // Stop measuring, but keep the uncapped width: the scroll extent must stay
@@ -434,13 +444,12 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
                     var item = ItemsSource.GetText(SelectedIndex);
                     if (!string.IsNullOrEmpty(item))
                     {
-                        maxWidth = Math.Max(maxWidth, _textWidthCache.GetOrMeasure(measure.Context, measure.Font, dpi, item) + itemPadW);
+                        maxWidth = Math.Max(maxWidth, TextLayoutOperations.Measure(factory, item, dpi, in style).Width + itemPadW);
                     }
                 }
             }
             else
             {
-                _textWidthCache.SetCapacity(Math.Clamp(count, 64, 4096));
                 double itemPadW = ItemPadding.HorizontalThickness;
                 for (int i = 0; i < count; i++)
                 {
@@ -450,7 +459,7 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
                         continue;
                     }
 
-                    maxWidth = Math.Max(maxWidth, _textWidthCache.GetOrMeasure(measure.Context, measure.Font, dpi, item) + itemPadW);
+                    maxWidth = Math.Max(maxWidth, TextLayoutOperations.Measure(factory, item, dpi, in style).Width + itemPadW);
                     if (maxWidth >= widthLimit)
                     {
                         // Stop measuring, but keep the uncapped width: the scroll extent must stay
@@ -581,7 +590,7 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
             }
             else
             {
-                SelectedIndex = index;
+                CommitTargetValue(SelectedIndexProperty, index);
             }
 
             ItemActivated?.Invoke(index);
@@ -643,7 +652,7 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
             }
             else
             {
-                SelectedIndex = target;
+                CommitTargetValue(SelectedIndexProperty, target);
             }
 
             ScrollIntoView(target);
@@ -865,7 +874,7 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
             return false;
         }
 
-        SelectedIndex = target;
+        CommitTargetValue(SelectedIndexProperty, target);
         ScrollIntoView(target);
         _tabFocusHelper.Schedule(target, moveForward);
         return true;

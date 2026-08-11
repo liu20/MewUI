@@ -9,8 +9,9 @@ namespace MewUI.Test.Controls;
 [DoNotParallelize]
 public sealed class TextBoxCaretBlinkTests
 {
-    private static readonly FieldInfo CaretVisibleField =
-        typeof(TextBase).GetField("_caretVisible", BindingFlags.Instance | BindingFlags.NonPublic)!;
+    // One tick of the real blink puts it in its hidden phase, which is what these start from.
+    private static readonly MethodInfo BlinkTick =
+        typeof(TextBase).GetMethod("OnCaretBlink", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
     [TestMethod]
     public void ShiftRight_RestartsBlinkWhenSelectionStartDoesNotChange()
@@ -25,7 +26,7 @@ public sealed class TextBoxCaretBlinkTests
         try
         {
             int selectionStart = textBox.SelectionStart;
-            SetCaretVisible(textBox, false);
+            HideCaretForBlink(textBox);
 
             window.SendKeyPress(Key.Right, ModifierKeys.Shift);
 
@@ -52,7 +53,7 @@ public sealed class TextBoxCaretBlinkTests
         var (window, textBox) = CreateFocusedTextBox();
         try
         {
-            SetCaretVisible(textBox, false);
+            HideCaretForBlink(textBox);
 
             window.SendKeyPress(Key.End);
 
@@ -77,7 +78,7 @@ public sealed class TextBoxCaretBlinkTests
         var (window, textBox) = CreateFocusedTextBox();
         try
         {
-            SetCaretVisible(textBox, false);
+            HideCaretForBlink(textBox);
 
             window.SendKeyPress(Key.Left);
 
@@ -101,6 +102,9 @@ public sealed class TextBoxCaretBlinkTests
         return (window, textBox);
     }
 
-    private static void SetCaretVisible(TextBase textBox, bool value)
-        => CaretVisibleField.SetValue(textBox, value);
+    private static void HideCaretForBlink(TextBase textBox)
+    {
+        BlinkTick.Invoke(textBox, null);
+        Assert.IsFalse(textBox.CaretVisible, "The tick left the blink in its visible phase.");
+    }
 }

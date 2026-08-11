@@ -14,7 +14,7 @@ public abstract class TextElement : FrameworkElement
 
     /// <summary>Font family property with inheritance support.</summary>
     public static readonly MewProperty<string> FontFamilyProperty =
-        MewProperty<string>.Register<TextElement>(nameof(FontFamily), "Segoe UI",
+        MewProperty<string>.Register<TextElement>(nameof(FontFamily), ThemeMetrics.SystemFontFamily,
             MewPropertyOptions.AffectsLayout | MewPropertyOptions.Inherits);
 
     /// <summary>Font size property with inheritance support.</summary>
@@ -39,12 +39,16 @@ public abstract class TextElement : FrameworkElement
     }
 
     /// <summary>
-    /// Gets or sets the font family.
+    /// Gets or sets the font family. An empty value follows the theme's font family.
     /// </summary>
     public string FontFamily
     {
-        get => GetValue(FontFamilyProperty);
-        set => SetValue(FontFamilyProperty, value ?? string.Empty);
+        get
+        {
+            var family = GetValue(FontFamilyProperty);
+            return family.Length == 0 ? ThemeInternal.Metrics.FontFamily : family;
+        }
+        set => SetValue(FontFamilyProperty, value ?? ThemeMetrics.SystemFontFamily);
     }
 
     /// <summary>

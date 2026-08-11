@@ -20,5 +20,5 @@ internal sealed record FlexViewContext(
     Func<TabNode, UIElement?>? Header = null,
     Func<BorderNode, FlexViewContext, FlexBorderBar>? BorderView = null,
     Func<TabSetNode, UIElement?>? ToolHeader = null,
-    Action<TabNode, ContextMenu>? ConfigureTabMenu = null,
-    Action<TabSetNode, ContextMenu>? ConfigureGroupMenu = null);
+    Action<TabNode, ContextMenu, CommandScope>? ConfigureTabMenu = null,
+    Action<TabSetNode, ContextMenu, CommandScope>? ConfigureGroupMenu = null);

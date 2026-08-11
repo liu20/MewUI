@@ -141,10 +141,64 @@ var window = new Window()
 Application.Run(window);
 ```
 
-### 2.2 테마 설정 안내
+startup 콜백이 필요하면 창 표시 전에 실행되는 오버로드를 사용한다.
+
+```csharp
+Application.Run(window, () =>
+{
+    // Dispatcher와 UI SynchronizationContext가 설치된 상태이고,
+    // window는 아직 표시되지 않았다.
+    InitializeServices();
+});
+```
+
+### 2.2 메인 창 없이 시작
+
+`Application.Run(Action)`은 메인 창을 만들거나 표시하지 않고 dispatcher와 플랫폼 메시지 루프를 시작한다. startup은 필수이며 dispatcher 설치 후 UI 스레드에서 한 번 호출된다. startup이나 이후 dispatcher 작업에서 일반 `Window.Show()`를 호출해 창을 열 수 있다.
+
+```csharp
+Application.Run(() =>
+{
+    Application.Current.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+    RegisterGlobalHotkey(() =>
+        Application.Current.Dispatcher!.BeginInvoke(
+            () => new PaletteWindow().Show()));
+});
+```
+
+백그라운드 실행에서 `OnExplicitShutdown`은 자동으로 설정되지 않는다. 팔레트 같은 마지막 창을 닫아도 프로세스를 유지해야 한다면 사용자가 위 예제처럼 명시해야 한다.
+
+빌더에서는 `OnStartup`을 설정하고 main window factory를 생략한다. `WithShutdownMode`는 startup 실행 전에 정책을 적용한다.
+
+```csharp
+Application.Create()
+    .WithShutdownMode(ShutdownMode.OnExplicitShutdown)
+    .OnStartup(RegisterGlobalHotkey)
+    .Run();
+```
+
+`BuildMainWindow(...)`와 `OnStartup(...)`을 함께 설정하면 startup 호출 후 factory가 만든 메인 창을 표시한다. `OnStartup`을 여러 번 호출하면 마지막 콜백이 이전 설정을 대체한다.
+
+### 2.3 startup 콜백 인자
+
+startup 진입점에는 모두 `Action<string[]>` 오버로드가 있다. 프레임워크가 실행 파일 경로를 제외한 명령행 인자를 공급하므로, 진입점 바깥에서 조립한 startup 로직도 `args`를 직접 넘겨받을 필요가 없다.
+
+```csharp
+Application.Create()
+    .OnStartup(args =>
+    {
+        if (args.Contains("--minimized"))
+            StartMinimized();
+    })
+    .Run<MainWindow>();
+```
+
+### 2.4 테마 설정 안내
 ThemeVariant/Accent/ThemeSeed/ThemeMetrics 설정은 아래 문서를 참고한다.
 
 - [Theme 문서](Theme.ko.md)
+
+기본 폰트는 플랫폼 패키지 등록 시점(`Win32Platform.Register()`, `UseWin32()` 및 X11/macOS 대응 API)에 확정된다. 이 시점은 `Application.Create()`와 창 생성보다 앞서므로, 그 이후에 `ThemeMetrics.Default.FontFamily`나 `ThemeManager.DefaultMetrics.FontFamily`를 읽으면 실제 적용될 폰트명을 얻는다. 폰트를 지정하지 않았을 때 시스템 UI 폰트를 따르는 규칙은 [Theme 문서](Theme.ko.md)를 참고한다.
 
 ---
 
@@ -228,26 +282,65 @@ window.Closed += () => SaveWindowPlacement();
 ```
 
 ### 5.2 애플리케이션이 종료되는 시점
-메시지 루프는 **마지막 창**이 닫힐 때 종료되고, 이어서 `Application.Run(...)`이 반환된다.
-다른 창이 열려 있는 동안에는 메인 창만 닫아도 앱이 종료되지 않는다.
+창이 닫힐 때 메시지 루프를 종료할지는 `Application.ShutdownMode`가 결정한다.
 
-메인 창을 닫으면 앱이 종료되게 하려면, 보조 창을 메인 창을 owner로 하여 표시(`tools.Show(main)`)해 함께 닫히게 하거나, 메인 창의 `Closed` 핸들러에서 보조 창을 닫는다.
+- `OnLastWindowClose`(기본값): 마지막 창이 닫히면 종료한다. 메인 창 없이 시작했더라도 나중에 연 마지막 창을 닫으면 종료한다.
+- `OnMainWindowClose`: 메인 창이 닫히면 종료한다. 창을 받는 `Run` 오버로드가 그 정체성을 기록하며, 메인 창 없이 시작한 실행은 대입하기 전까지 정체성이 없다(5.3 참고).
+- `OnExplicitShutdown`: 창 닫힘으로 종료하지 않고 `Application.Shutdown()`을 기다린다.
 
-### 5.3 Application.Quit
-`Application.Quit()`는 메시지 루프를 즉시 종료한다:
+이 정책은 실행 하나에만 적용되고 매번 `OnLastWindowClose`에서 시작한다. 실행 전에는 빌더로 지정하고, 실행 중에는 startup 콜백에서 `Application.Current.ShutdownMode`에 대입한다.
+
+```csharp
+Application.Create()
+    .WithShutdownMode(ShutdownMode.OnExplicitShutdown)
+    .OnStartup(StartBackgroundApplication)
+    .Run();
+```
+
+### 5.3 Application.MainWindow
+`OnMainWindowClose`가 지켜보는 정체성이 `Application.Current.MainWindow`다. 창을 받는 `Run` 오버로드(`Run(Window)`, `BuildMainWindow(...)`, `Run<TWindow>()`)가 이 값을 설정하며, 실행 중에도 대입할 수 있다.
+
+메인 창 없이 시작한 실행이 `OnMainWindowClose`를 쓰려면 이 대입이 유일한 방법이다. 나중에 연 창을 메인으로 승격한다.
+
+```csharp
+Application.Create()
+    .WithShutdownMode(ShutdownMode.OnMainWindowClose)
+    .OnStartup(() =>
+    {
+        var dashboard = new DashboardWindow();
+        dashboard.Show();
+        Application.Current.MainWindow = dashboard;   // 이 창을 닫으면 실행이 끝난다
+    })
+    .Run();
+```
+
+- 이 정체성은 실행 하나에만 적용되고 다음 실행은 정체성 없이 시작한다.
+- startup은 실행 창이 기록된 뒤에 돌므로, startup에서 대입하면 빌더가 준 창을 덮어쓴다.
+- `null`을 대입하면 정체성이 해제되고, `OnMainWindowClose`는 발동할 대상을 잃는다.
+- 빌더 경로는 정체성과 "시작 시 표시"를 함께 준다. 속성 대입은 정체성만 주므로 표시 여부를 직접 정할 수 있다.
+- 프리뷰 호스트는 세션 시작 시점의 메인 창을 캡처하므로, 나중에 승격한 창은 프리뷰 대상에 반영되지 않는다. [프리뷰 문서](Preview.ko.md) 참고.
+
+### 5.4 Application.Shutdown
+`Application.Shutdown()`는 메시지 루프를 즉시 종료한다:
 
 - 열린 창에는 `Closing` 콜백이 전달되지 **않으므로** 종료를 취소할 방법이 없다
 - 이 경로에서는 창별 닫기 라이프사이클이 보장되지 않는다. 저장 확인이나 상태 보존을 `Closing`/`Closed` 핸들러에 의존하지 말 것
 - 플랫폼 리소스가 정리되고 `Application.Run(...)`이 반환된다
 
-### 5.4 권장 패턴
+`Shutdown(int exitCode)`는 `Environment.ExitCode`에도 대입한다. `Run`의 반환형은 `void`로 유지되므로, UI 스레드의 치명적 예외로 `Run`이 반환 대신 예외를 던지는 경우에도 종료 코드가 남는다.
+
+```csharp
+Application.Shutdown(2);   // 루프 종료, 프로세스 종료 코드 2
+```
+
+### 5.5 권장 패턴
 - 기본: 사용자가 창을 닫게 두면 마지막 창과 함께 앱이 종료된다.
 - 확인 절차를 존중해야 하는 "종료" 메뉴/버튼: `mainWindow.Close()`를 호출해 `Closing` 핸들러가 확인/취소를 결정하게 한다.
-- 메인 창이 곧 앱 수명인 경우: 메인 창의 `Closed`에 `Application.Quit`를 구독한다.
-- 확인 없이 즉시 종료(이미 저장된 상태, 워치독 재시작 등): `Application.Quit()`.
+- 메인 창이 곧 앱 수명인 경우: 메인 창의 `Closed`에 `Application.Shutdown`를 구독한다.
+- 확인 없이 즉시 종료(이미 저장된 상태, 워치독 재시작 등): `Application.Shutdown()`.
 
 #### 예제: 메인 창 닫힘 = 앱 종료
-앱 수명을 메인 창에 묶는 표준 레시피다. 모든 종료가 `main.Close()`를 거치므로 확인 절차가 한 곳에 모이고 취소가 그대로 존중된다. Quit은 닫기가 실제로 완료된 뒤에만 실행되므로, 도구/백그라운드 창이 남아 있어도 종료가 보장된다.
+앱 수명을 메인 창에 묶는 표준 레시피다. 모든 종료가 `main.Close()`를 거치므로 확인 절차가 한 곳에 모이고 취소가 그대로 존중된다. Shutdown은 닫기가 실제로 완료된 뒤에만 실행되므로, 도구/백그라운드 창이 남아 있어도 종료가 보장된다.
 
 ```csharp
 // 1) 확인(선택): Closing 핸들러 하나가 모든 종료 경로를 지킨다.
@@ -261,37 +354,37 @@ main.Closing += args =>
 main.Closed += SaveSession;
 
 // 3) 메인 창 = 앱 수명.
-main.Closed += Application.Quit;
+main.Closed += Application.Shutdown;
 
-// 4) 모든 종료 명령은 Quit이 아니라 Close를 거친다.
+// 4) 모든 종료 명령은 Shutdown이 아니라 Close를 거친다.
 new Button().Content("Exit").OnClick(() => main.Close());
 ```
 
-조건 없는 즉시 종료(이미 저장된 상태, 워치독 재시작 등)만 `Application.Quit()`를 직접 호출한다. 이때 `Closing`/`Closed` 핸들러는 실행되지 않는다.
+조건 없는 즉시 종료(이미 저장된 상태, 워치독 재시작 등)만 `Application.Shutdown()`를 직접 호출한다. 이때 `Closing`/`Closed` 핸들러는 실행되지 않는다.
 
-#### Close와 Quit의 순차 호출
+#### Close와 Shutdown의 순차 호출
 ```csharp
 main.Close();
-Application.Quit();
+Application.Shutdown();
 ```
 
-이 시퀀스는 "허용되면 곱게 닫되, 어쨌든 종료한다"는 의미다. 로그아웃, 치명 오류 후 종료, 업데이트 후 재시작 같은 흐름에 적합하다. 모든 플랫폼에서 `Close()`의 닫기 라이프사이클이 `Quit()`보다 먼저 실행된다(X11/macOS는 동기 실행, Win32는 post된 `WM_CLOSE`가 루프 종료 전에 드레인됨).
+이 시퀀스는 "허용되면 곱게 닫되, 어쨌든 종료한다"는 의미다. 로그아웃, 치명 오류 후 종료, 업데이트 후 재시작 같은 흐름에 적합하다. 모든 플랫폼에서 `Close()`의 닫기 라이프사이클이 `Shutdown()`보다 먼저 실행된다(X11/macOS는 동기 실행, Win32는 post된 `WM_CLOSE`가 루프 종료 전에 드레인됨).
 
 - `Closing`이 취소하지 않으면: `Closed` 정리가 실행된 뒤 앱이 종료된다.
-- `Closing`이 취소하면: 종료는 그대로 진행되고, 그 창은 `Closed` 정리를 건너뛴 채 Quit 경로로 폐기된다.
+- `Closing`이 취소하면: 종료는 그대로 진행되고, 그 창은 `Closed` 정리를 건너뛴 채 Shutdown 경로로 폐기된다.
 
-동기 시퀀스는 어떤 `Closing` 핸들러도 deferral을 잡지 않을 때만 안전하다. deferral([5.5](#55-비동기-종료-closeasync와-closing-deferral) 참고)이 잡히면 `Close()`는 결정이 미해결인 채 반환되고, `Quit()`이 결정 전에 루프를 끝내버린다. `CloseAsync`는 같은 의도를 표현하면서 결정까지 기다린다:
+동기 시퀀스는 어떤 `Closing` 핸들러도 deferral을 잡지 않을 때만 안전하다. deferral([5.6](#56-비동기-종료-closeasync와-closing-deferral) 참고)이 잡히면 `Close()`는 결정이 미해결인 채 반환되고, `Shutdown()`이 결정 전에 루프를 끝내버린다. `CloseAsync`는 같은 의도를 표현하면서 결정까지 기다린다:
 
 ```csharp
 await main.CloseAsync();   // deferral 포함, 닫기 라이프사이클 완주
-Application.Quit();        // 결과와 무관하게 종료
+Application.Shutdown();        // 결과와 무관하게 종료
 ```
 
 "무조건 종료" 흐름에는 이 형태를 우선한다.
 
-의도에 따라 고른다: 확인 절차가 앱을 계속 살릴 수 있어야 하면 `main.Closed += Application.Quit` + `main.Close()`를, 무조건 종료해야 하면 이 시퀀스를 쓴다.
+의도에 따라 고른다: 확인 절차가 앱을 계속 살릴 수 있어야 하면 `main.Closed += Application.Shutdown` + `main.Close()`를, 무조건 종료해야 하면 이 시퀀스를 쓴다.
 
-### 5.5 비동기 종료: CloseAsync와 Closing deferral
+### 5.6 비동기 종료: CloseAsync와 Closing deferral
 `Window.CloseAsync()`는 닫기를 요청하고 결과를 알려준다:
 
 ```csharp
@@ -357,4 +450,4 @@ Application.DispatcherUnhandledException += e =>
 - **Run 전 설정 → Run → 메시지 루프**가 핵심 흐름
 - Theme/RenderLoop은 Run 전에 결정
 - Window는 Show 시점에만 실제 플랫폼 리소스를 갖는다
-- 앱은 마지막 창이 닫힐 때 종료된다. `Window.Close()`가 정상(취소 가능) 경로, `Application.Quit()`는 즉시 종료 경로
+- 기본적으로 마지막 창이 닫힐 때 종료되며 `ShutdownMode`로 수명을 선택한다. `Window.Close()`가 정상(취소 가능) 경로, `Application.Shutdown()`는 즉시 종료 경로

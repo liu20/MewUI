@@ -550,6 +550,18 @@ internal sealed class X11WindowBackend : IWindowBackend
         NativeX11.XFlush(Display);
     }
 
+    public void SetPositionPx(int leftPx, int topPx)
+    {
+        if (Display == 0 || Handle == 0)
+        {
+            return;
+        }
+
+        // X11 window coordinates are already device pixels, so this is the unscaled form of SetPosition.
+        NativeX11.XMoveWindow(Display, Handle, leftPx, topPx);
+        NativeX11.XFlush(Display);
+    }
+
     public void CaptureMouse()
     {
         if (Display == 0 || Handle == 0)
@@ -969,9 +981,13 @@ internal sealed class X11WindowBackend : IWindowBackend
             return;
 
         var pos = new Point(dev.event_x / Window.DpiScale, dev.event_y / Window.DpiScale);
-        bool leftDown = (dev.mods.effective & (int)X11ModifierMask.Button1) != 0;
-        bool middleDown = (dev.mods.effective & (int)X11ModifierMask.Button2) != 0;
-        bool rightDown = (dev.mods.effective & (int)X11ModifierMask.Button3) != 0;
+        // XI2 keeps pointer buttons separate from keyboard modifiers. Reading Button1Mask from
+        // mods.effective made every XI_Motion look button-up, so controls that require a held
+        // button (ScrollBar, Slider, selection drags) discarded their captured moves while D&D,
+        // which consumes the move before MouseEventArgs is built, continued to work.
+        bool leftDown = XI2.IsButtonDown(dev.buttons, 1);
+        bool middleDown = XI2.IsButtonDown(dev.buttons, 2);
+        bool rightDown = XI2.IsButtonDown(dev.buttons, 3);
 
         WindowInputRouter.MouseMove(Window, pos, ClientToScreen(pos), leftDown: leftDown, rightDown: rightDown, middleDown: middleDown, modifiers: GetModifiers((uint)dev.mods.effective));
 
@@ -1029,7 +1045,7 @@ internal sealed class X11WindowBackend : IWindowBackend
             return;
         }
 
-        Point? targetPosition = Window.StartupLocation switch
+        Point? targetPosition = Window.EffectiveStartupLocation switch
         {
             WindowStartupLocation.Manual => Window.ResolvedStartupPosition,
             WindowStartupLocation.CenterOwner => ResolveCenterOwnerStartupPosition(),
@@ -1631,7 +1647,7 @@ internal sealed class X11WindowBackend : IWindowBackend
 
         try
         {
-            int caretPos = (client is Controls.TextBase tb) ? tb.CaretPosition : client.CompositionStartIndex;
+            int caretPos = (client is ITextCompositionEditor editor) ? editor.CaretPosition : client.CompositionStartIndex;
             var rect = client.GetCharRectInWindow(caretPos);
 
             if (rect.Width <= 0 && rect.Height <= 0)
@@ -1674,7 +1690,6 @@ internal sealed class X11WindowBackend : IWindowBackend
                 WindowInputRouter.KeyDown(Window, args);
             }
 
-            Window.ProcessKeyBindings(args);
             Window.ProcessAccessKeyDown(args);
 
             if (!args.Handled && args.Key == Key.Tab)
@@ -2968,9 +2983,9 @@ internal sealed class X11WindowBackend : IWindowBackend
         // Instead, commit the current composition so text is preserved with undo.
         if (Window.FocusManager.FocusedElement is ITextCompositionClient { IsComposing: true } client)
         {
-            if (client is Controls.TextBase tb)
+            if (client is ITextCompositionEditor editor)
             {
-                tb.CommitTextCompositionInternal();
+                editor.CommitActiveComposition();
             }
             else
             {

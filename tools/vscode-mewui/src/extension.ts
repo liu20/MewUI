@@ -11,6 +11,8 @@ let outputChannel: vscode.OutputChannel;
 let sessionSubscriptions: vscode.Disposable[] = [];
 let lastTargets: PreviewTargetInfo[] = [];
 let activeTargetId = "";
+// A manual dropdown pick wins over auto-match until the user moves to another editor file.
+let manualOverride = false;
 // Sessions kept warm after their panel closed, so reopening the preview reattaches instantly
 // instead of paying the full build-and-launch cost again.
 const keptSessions = new Map<string, { session: PreviewSession; timer: NodeJS.Timeout }>();
@@ -50,10 +52,21 @@ async function startPreview(): Promise<void> {
     };
     const autoSelectTarget = configuration.get<boolean>("autoSelectTarget", true);
 
-    const newPanel = new PreviewPanel(`MewUI Preview: ${path.basename(projectPath, ".csproj")}`, {
+    const newPanel = new PreviewPanel(
+        `MewUI Preview: ${path.basename(projectPath, ".csproj")}`,
+        configuration.get<boolean>("openSourceOnSelect", true),
+        {
         onSelectTarget: (id) => {
             activeTargetId = id;
+            manualOverride = true;
             session?.selectTarget(id);
+            // Reverse sync (opt-in): picking a target jumps the editor to its declaration.
+            if (vscode.workspace.getConfiguration("mewui.preview").get<boolean>("openSourceOnSelect", true)) {
+                const target = lastTargets.find((candidate) => candidate.id === id);
+                if (target?.sourcePath) {
+                    void revealSource(target.sourcePath, target.sourceLine ?? undefined);
+                }
+            }
         },
         onRefresh: () => session?.refreshTarget(),
         onRestart: () => session?.restartProcess(),
@@ -63,6 +76,10 @@ async function startPreview(): Promise<void> {
         }, 250),
         onSetTheme: (mode) => session?.setTheme(mode as "light" | "dark" | "system"),
         onInput: (kind, body) => session?.sendInput(kind, body),
+        onSetNavigate: (value) => {
+            void vscode.workspace.getConfiguration("mewui.preview")
+                .update("openSourceOnSelect", value, vscode.ConfigurationTarget.Global);
+        },
         onDisposed: () => {
             panel = undefined;
             detachPanel();
@@ -109,7 +126,7 @@ async function startPreview(): Promise<void> {
     );
     if (autoSelectTarget) {
         sessionSubscriptions.push(
-            vscode.window.onDidChangeActiveTextEditor((editor) => autoMatchTarget(editor)),
+            vscode.window.onDidChangeActiveTextEditor((editor) => autoMatchTarget(editor, true)),
         );
     }
 
@@ -123,10 +140,18 @@ async function startPreview(): Promise<void> {
     }
 }
 
-/** Selects the preview target declared in the active editor's file (server-provided sourcePath). */
-function autoMatchTarget(editor: vscode.TextEditor | undefined): void {
+/**
+ * Selects the preview target declared in the active editor's file (server-provided sourcePath).
+ * Editor-driven calls (the user moved to another file) override a manual dropdown pick;
+ * refresh-driven calls must not, or a targets rebroadcast would silently revert the pick
+ * while its file is open.
+ */
+function autoMatchTarget(editor: vscode.TextEditor | undefined, fromEditor = false): void {
     const fsPath = editor?.document.uri.fsPath;
     if (!session || !fsPath || !fsPath.toLowerCase().endsWith(".cs")) {
+        return;
+    }
+    if (!fromEditor && manualOverride) {
         return;
     }
 
@@ -136,7 +161,20 @@ function autoMatchTarget(editor: vscode.TextEditor | undefined): void {
     if (match && match.id !== activeTargetId) {
         outputChannel.appendLine(`${timestamp()} [session] auto-selecting ${match.id} for ${path.basename(fsPath)}`);
         activeTargetId = match.id;
+        manualOverride = false;
         session.selectTarget(match.id);
+    }
+}
+
+/** Opens the target's declaring source in the editor (reverse of auto-match). */
+async function revealSource(sourcePath: string, sourceLine: number | undefined): Promise<void> {
+    try {
+        const document = await vscode.workspace.openTextDocument(sourcePath);
+        const line = Math.max(0, (sourceLine ?? 1) - 1);
+        const selection = new vscode.Range(line, 0, line, 0);
+        await vscode.window.showTextDocument(document, { preview: true, preserveFocus: true, selection });
+    } catch {
+        // The scanned path may no longer exist (renamed file); the selection itself still applies.
     }
 }
 
@@ -191,6 +229,7 @@ function stopPreview(): void {
     sessionSubscriptions = [];
     lastTargets = [];
     activeTargetId = "";
+    manualOverride = false;
     for (const kept of keptSessions.values()) {
         clearTimeout(kept.timer);
         kept.session.stop();

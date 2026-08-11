@@ -80,7 +80,7 @@ partial class GalleryView
                         new Button().Content("Open Files...").OnClick(OpenFiles),
                         new Button().Content("Save File...").OnClick(SaveFile),
                         new Button().Content("Select Folder...").OnClick(SelectFolder),
-                        new TextBlock().BindText(status).FontSize(11).TextWrapping(TextWrapping.Wrap)));
+                        new TextBlock().BindText(status).FontSize(ThemeFontSize.Small).TextWrapping(TextWrapping.Wrap)));
         }
 
         return CardGrid(

@@ -3,7 +3,7 @@
 #:property TargetFramework=net10.0
 #:property PublishAot=true
 #:property TrimMode=full
-#:package Aprillz.MewUI@0.19.1
+#:package Aprillz.MewUI@0.20.0
 
 using System.Collections.ObjectModel;
 using System.Numerics;
@@ -595,17 +595,17 @@ FrameworkElement InputsPage()
                 .ToolTip("ToolTip text")
                 .ContextMenu(
                     new ContextMenu()
-                        .Item("Copy", new KeyGesture(Key.C, ModifierKeys.Primary))
-                        .Item("Paste", new KeyGesture(Key.V, ModifierKeys.Primary))
+                        .Item("Copy")
+                        .Item("Paste")
                         .Separator()
                         .SubMenu("Transform", new ContextMenu()
                             .Item("Uppercase").Item("Lowercase")
                             .Separator()
                             .SubMenu("More", new ContextMenu().Item("Trim").Item("Normalize").Item("Sort")))
                         .SubMenu("View", new ContextMenu()
-                            .Item("Zoom In", new KeyGesture(Key.Add, ModifierKeys.Primary))
-                            .Item("Zoom Out", new KeyGesture(Key.Subtract, ModifierKeys.Primary))
-                            .Item("Reset Zoom", new KeyGesture(Key.D0, ModifierKeys.Primary)))
+                            .Item("Zoom In")
+                            .Item("Zoom Out")
+                            .Item("Reset Zoom"))
                         .Separator()
                         .Item("Disabled", isEnabled: false))))
     );
@@ -2340,7 +2340,7 @@ FrameworkElement CustomChromeWindowCard() =>
         {
             Window custom = null!;
             new Window().Ref(out custom).Resizable(640, 420).StartCenterOwner()
-                .OnBuild(x =>
+                .Build(x =>
                 {
                     x.Title = "CustomWindow";
                     x.AllowsTransparency = true;
@@ -2372,7 +2372,7 @@ FrameworkElement WindowShowDialogCard()
         status.Value = "Dialog: opening...";
         Window dialog = null!;
         new Window().Ref(out dialog).Resizable(420, 220).StartCenterScreen()
-            .OnBuild(x => x.Title("ShowDialog sample").Padding(16)
+            .Build(x => x.Title("ShowDialog sample").Padding(16)
                 .Content(new StackPanel().Vertical().Spacing(10).Children(
                     new TextBlock().Text("This is a modal window."),
                     new Button().Content("Close").OnClick(() => dialog.Close()))));
@@ -2444,14 +2444,14 @@ FrameworkElement FileDialogPage()
         new FileFilter("All files", "*.*"),
     };
 
-    FrameworkElement BackendCard(string title, FileDialogBackend backend)
+    FrameworkElement BackendCard(string title, bool preferNative)
     {
         var status = new ObservableValue<string>("Result: -");
         void OpenFile()
         {
             var path = FileDialog.OpenFile(new OpenFileDialogOptions
             {
-                Owner = window, Title = "Open File", Filters = filters, Backend = backend,
+                Owner = window, Title = "Open File", Filters = filters, PreferNative = preferNative,
             });
             status.Value = path is null ? "Result: canceled" : $"Result: {path}";
         }
@@ -2459,7 +2459,7 @@ FrameworkElement FileDialogPage()
         {
             var files = FileDialog.OpenFiles(new OpenFileDialogOptions
             {
-                Owner = window, Title = "Open Files", Filters = filters, Backend = backend,
+                Owner = window, Title = "Open Files", Filters = filters, PreferNative = preferNative,
             });
             status.Value = files is null || files.Length == 0
                 ? "Result: canceled"
@@ -2470,7 +2470,7 @@ FrameworkElement FileDialogPage()
             var path = FileDialog.SaveFile(new SaveFileDialogOptions
             {
                 Owner = window, Title = "Save File", Filters = filters,
-                FileName = "untitled.txt", DefaultExtension = "txt", Backend = backend,
+                FileName = "untitled.txt", DefaultExtension = "txt", PreferNative = preferNative,
             });
             status.Value = path is null ? "Result: canceled" : $"Result: {path}";
         }
@@ -2478,7 +2478,7 @@ FrameworkElement FileDialogPage()
         {
             var folder = FileDialog.SelectFolder(new FolderDialogOptions
             {
-                Owner = window, Title = "Select Folder", Backend = backend,
+                Owner = window, Title = "Select Folder", PreferNative = preferNative,
             });
             status.Value = folder is null ? "Result: canceled" : $"Result: {folder}";
         }
@@ -2492,8 +2492,8 @@ FrameworkElement FileDialogPage()
     }
 
     return CardGrid(
-        BackendCard("Managed", FileDialogBackend.Managed),
-        BackendCard("Native", FileDialogBackend.Native));
+        BackendCard("Managed", preferNative: false),
+        BackendCard("Prefer Native", preferNative: true));
 }
 
 FrameworkElement ShowDialogPage()
@@ -2508,7 +2508,7 @@ FrameworkElement ShowDialogPage()
             .Ref(out dialog)
             .Resizable(420, 220)
             .StartCenterScreen()
-            .OnBuild(x => x
+            .Build(x => x
                 .Title(title)
                 .Padding(16)
                 .Content(new StackPanel().Vertical().Spacing(10).Children(
@@ -2552,7 +2552,7 @@ FrameworkElement TransparentWindowCard()
                 .FitContentHeight(520)
                 .Background(Color.Pink.WithAlpha(64))
                 .StartCenterOwner()
-                .OnBuild(x =>
+                .Build(x =>
                 {
                     x.Title = "Transparent window sample";
                     x.AllowsTransparency = true;
@@ -2588,7 +2588,7 @@ FrameworkElement ManualPositionCard()
             status.Value = "Manual: opening at (120, 140)";
             Window manual = null!;
             new Window().Ref(out manual).Resizable(360, 180).StartManualPosition(120, 140)
-                .OnBuild(x => x.Title("StartupManualPosition sample").Padding(16)
+                .Build(x => x.Title("StartupManualPosition sample").Padding(16)
                     .Content(new StackPanel().Vertical().Spacing(10).Children(
                         new TextBlock().Text("StartupLocation.Manual\nLeft: 120\nTop: 140"),
                         new Button().Content("Close").OnClick(() => x.Close()))));
@@ -2608,14 +2608,18 @@ FrameworkElement PromptDialogCard()
             string? result = null;
             TextBox input = null!;
             Window dialog = null!;
-            await new Window().Ref(out dialog).Title("Input").FitContentHeight(300, 300).Padding(12)
+            var acceptCommand = new Command("gallery.dialog.accept", "OK");
+            await new Window().Ref(out dialog)
+                .Apply(w => w.Commands.Register(acceptCommand,
+                    () => { result = input.Text; dialog.Close(); },
+                    () => !string.IsNullOrWhiteSpace(input.Text)))
+                .Title("Input").FitContentHeight(300, 300).Padding(12)
                 .Content(new StackPanel().Vertical().Spacing(12).Children(
                     new TextBlock().Text("Enter your name:"),
                     new TextBox().Ref(out input).Placeholder("Name..."),
                     new StackPanel().Horizontal().Right().Spacing(6).Children(
                         new Button().Content("OK")
-                            .OnCanClick(() => !string.IsNullOrWhiteSpace(input.Text))
-                            .OnClick(() => { result = input.Text; dialog.Close(); }),
+                            .Command(acceptCommand),
                         new Button().Content("Cancel").OnClick(dialog.Close))))
                 .ShowDialogAsync(window);
             status.Value = result is null ? "Result: canceled" : $"Result: {result}";
@@ -2751,33 +2755,42 @@ void EnableWindowDrag(Window dragWindow, UIElement element)
 MenuBar CreateMenu(Action<string> onShortcut)
 {
     var p = ModifierKeys.Primary;
+    Command MenuCommand(string id, string text, string message, KeyGesture? gesture = null)
+    {
+        var command = new Command($"gallery.menu.{id}", text);
+        window.Commands.Register(command, () => onShortcut(message));
+        if (gesture is KeyGesture keyGesture)
+            window.InputMap.Map(command, keyGesture);
+        return command;
+    }
+
     var fileMenu = new Menu()
-        .Item("_New", () => onShortcut("File > New"), shortcut: new KeyGesture(Key.N, p))
-        .Item("_Open...", () => onShortcut("File > Open"), shortcut: new KeyGesture(Key.O, p))
-        .Item("_Save", () => onShortcut("File > Save"), shortcut: new KeyGesture(Key.S, p))
-        .Item("Save _As...", () => onShortcut("File > Save As"))
+        .Item(MenuCommand("file.new", "_New", "File > New", new KeyGesture(Key.N, p)))
+        .Item(MenuCommand("file.open", "_Open...", "File > Open", new KeyGesture(Key.O, p)))
+        .Item(MenuCommand("file.save", "_Save", "File > Save", new KeyGesture(Key.S, p)))
+        .Item(MenuCommand("file.saveAs", "Save _As...", "File > Save As"))
         .Separator()
         .SubMenu("_Export", new Menu()
-            .Item("_PNG", () => onShortcut("File > Export > PNG"))
-            .Item("_JPEG", () => onShortcut("File > Export > JPEG"))
+            .Item(MenuCommand("file.export.png", "_PNG", "File > Export > PNG"))
+            .Item(MenuCommand("file.export.jpeg", "_JPEG", "File > Export > JPEG"))
             .SubMenu("_Advanced", new Menu()
-                .Item("With _metadata", () => onShortcut("File > Export > Advanced > Include metadata"))
-                .Item("_Optimized", () => onShortcut("File > Export > Advanced > Optimized output"))))
+                .Item(MenuCommand("file.export.metadata", "With _metadata", "File > Export > Advanced > Include metadata"))
+                .Item(MenuCommand("file.export.optimized", "_Optimized", "File > Export > Advanced > Optimized output"))))
         .Separator()
-        .Item("E_xit", () => onShortcut("File > Exit"));
+        .Item(MenuCommand("file.exit", "E_xit", "File > Exit"));
     var editMenu = new Menu()
-        .Item("_Undo", () => onShortcut("Edit > Undo"), shortcut: new KeyGesture(Key.Z, p))
-        .Item("_Redo", () => onShortcut("Edit > Redo"), shortcut: new KeyGesture(Key.Y, p))
+        .Item(MenuCommand("edit.undo", "_Undo", "Edit > Undo", new KeyGesture(Key.Z, p)))
+        .Item(MenuCommand("edit.redo", "_Redo", "Edit > Redo", new KeyGesture(Key.Y, p)))
         .Separator()
-        .Item("Cu_t", () => onShortcut("Edit > Cut"), shortcut: new KeyGesture(Key.X, p))
-        .Item("_Copy", () => onShortcut("Edit > Copy"), shortcut: new KeyGesture(Key.C, p))
-        .Item("_Paste", () => onShortcut("Edit > Paste"), shortcut: new KeyGesture(Key.V, p));
+        .Item(MenuCommand("edit.cut", "Cu_t", "Edit > Cut", new KeyGesture(Key.X, p)))
+        .Item(MenuCommand("edit.copy", "_Copy", "Edit > Copy", new KeyGesture(Key.C, p)))
+        .Item(MenuCommand("edit.paste", "_Paste", "Edit > Paste", new KeyGesture(Key.V, p)));
     var viewMenu = new Menu()
-        .Item("_Toggle Sidebar", () => onShortcut("View > Toggle Sidebar"))
+        .Item(MenuCommand("view.toggleSidebar", "_Toggle Sidebar", "View > Toggle Sidebar"))
         .SubMenu("_Zoom", new Menu()
-            .Item("Zoom _In", () => onShortcut("View > Zoom In"), shortcut: new KeyGesture(Key.Add, p))
-            .Item("Zoom _Out", () => onShortcut("View > Zoom Out"), shortcut: new KeyGesture(Key.Subtract, p))
-            .Item("_Reset", () => onShortcut("View > Zoom Reset"), shortcut: new KeyGesture(Key.D0, p)));
+            .Item(MenuCommand("view.zoomIn", "Zoom _In", "View > Zoom In", new KeyGesture(Key.Add, p)))
+            .Item(MenuCommand("view.zoomOut", "Zoom _Out", "View > Zoom Out", new KeyGesture(Key.Subtract, p)))
+            .Item(MenuCommand("view.zoomReset", "_Reset", "View > Zoom Reset", new KeyGesture(Key.D0, p))));
     return new MenuBar().Height(28).Items(
         new MenuItem("_File").Menu(fileMenu),
         new MenuItem("_Edit").Menu(editMenu),
@@ -3451,46 +3464,55 @@ static partial class IconResource
 
 static class GalleryView
 {
-    public static MenuBar CreateMenu(Action<string> OnShortcut)
+    public static MenuBar CreateMenu(Element commandHost, Action<string> onShortcut)
     {
         var p = ModifierKeys.Primary;
+        Command MenuCommand(string id, string text, string message, KeyGesture? gesture = null)
+        {
+            var command = new Command($"gallery.windowMenu.{id}", text);
+            commandHost.Commands.Register(command, () => onShortcut(message));
+            if (gesture is KeyGesture keyGesture)
+                commandHost.InputMap.Map(command, keyGesture);
+            return command;
+        }
+
         var fileMenu = new Menu()
-            .Item("_New", () => OnShortcut("File > New document created"), shortcut: new KeyGesture(Key.N, p))
-            .Item("_Open...", () => OnShortcut("File > Open file dialog"), shortcut: new KeyGesture(Key.O, p))
-            .Item("_Save", () => OnShortcut("File > Document saved"), shortcut: new KeyGesture(Key.S, p))
-            .Item("Save _As...", () => OnShortcut("File > Save As dialog"))
+            .Item(MenuCommand("file.new", "_New", "File > New document created", new KeyGesture(Key.N, p)))
+            .Item(MenuCommand("file.open", "_Open...", "File > Open file dialog", new KeyGesture(Key.O, p)))
+            .Item(MenuCommand("file.save", "_Save", "File > Document saved", new KeyGesture(Key.S, p)))
+            .Item(MenuCommand("file.saveAs", "Save _As...", "File > Save As dialog"))
             .Separator()
             .SubMenu("_Export", new Menu()
-                .Item("_PNG", () => OnShortcut("File > Export > PNG format"))
-                .Item("_JPEG", () => OnShortcut("File > Export > JPEG format"))
+                .Item(MenuCommand("file.export.png", "_PNG", "File > Export > PNG format"))
+                .Item(MenuCommand("file.export.jpeg", "_JPEG", "File > Export > JPEG format"))
                 .SubMenu("_Advanced", new Menu()
-                    .Item("With _metadata", () => OnShortcut("File > Export > Advanced > Include metadata"))
-                    .Item("_Optimized", () => OnShortcut("File > Export > Advanced > Optimized output"))
+                    .Item(MenuCommand("file.export.metadata", "With _metadata", "File > Export > Advanced > Include metadata"))
+                    .Item(MenuCommand("file.export.optimized", "_Optimized", "File > Export > Advanced > Optimized output"))
                 )
             )
             .Separator()
-            .Item("E_xit", () => OnShortcut("File > Exit application"));
+            .Item(MenuCommand("file.exit", "E_xit", "File > Exit application"));
 
         var editMenu = new Menu()
-            .Item("_Undo", () => OnShortcut("Edit > Undo last action"), shortcut: new KeyGesture(Key.Z, p))
-            .Item("_Redo", () => OnShortcut("Edit > Redo last action"), shortcut: new KeyGesture(Key.Y, p))
+            .Item(MenuCommand("edit.undo", "_Undo", "Edit > Undo last action", new KeyGesture(Key.Z, p)))
+            .Item(MenuCommand("edit.redo", "_Redo", "Edit > Redo last action", new KeyGesture(Key.Y, p)))
             .Separator()
-            .Item("Cu_t", () => OnShortcut("Edit > Cut to clipboard"), shortcut: new KeyGesture(Key.X, p))
-            .Item("_Copy", () => OnShortcut("Edit > Copy to clipboard"), shortcut: new KeyGesture(Key.C, p))
-            .Item("_Paste", () => OnShortcut("Edit > Paste from clipboard"), shortcut: new KeyGesture(Key.V, p))
+            .Item(MenuCommand("edit.cut", "Cu_t", "Edit > Cut to clipboard", new KeyGesture(Key.X, p)))
+            .Item(MenuCommand("edit.copy", "_Copy", "Edit > Copy to clipboard", new KeyGesture(Key.C, p)))
+            .Item(MenuCommand("edit.paste", "_Paste", "Edit > Paste from clipboard", new KeyGesture(Key.V, p)))
             .Separator()
             .SubMenu("_Find", new Menu()
-                .Item("_Find...", () => OnShortcut("Edit > Find > Open find dialog"), shortcut: new KeyGesture(Key.F, p))
-                .Item("Find _Next", () => OnShortcut("Edit > Find > Find next occurrence"), shortcut: new KeyGesture(Key.F3))
-                .Item("_Replace...", () => OnShortcut("Edit > Find > Open replace dialog"), shortcut: new KeyGesture(Key.H, p))
+                .Item(MenuCommand("edit.find", "_Find...", "Edit > Find > Open find dialog", new KeyGesture(Key.F, p)))
+                .Item(MenuCommand("edit.findNext", "Find _Next", "Edit > Find > Find next occurrence", new KeyGesture(Key.F3)))
+                .Item(MenuCommand("edit.replace", "_Replace...", "Edit > Find > Open replace dialog", new KeyGesture(Key.H, p)))
             );
 
         var viewMenu = new Menu()
-            .Item("_Toggle Sidebar", () => OnShortcut("View > Toggle sidebar visibility"))
+            .Item(MenuCommand("view.toggleSidebar", "_Toggle Sidebar", "View > Toggle sidebar visibility"))
             .SubMenu("_Zoom", new Menu()
-                .Item("Zoom _In", () => OnShortcut("View > Zoom > Zoom in"), shortcut: new KeyGesture(Key.Add, p))
-                .Item("Zoom _Out", () => OnShortcut("View > Zoom > Zoom out"), shortcut: new KeyGesture(Key.Subtract, p))
-                .Item("_Reset", () => OnShortcut("View > Zoom > Reset to 100%"), shortcut: new KeyGesture(Key.D0, p))
+                .Item(MenuCommand("view.zoomIn", "Zoom _In", "View > Zoom > Zoom in", new KeyGesture(Key.Add, p)))
+                .Item(MenuCommand("view.zoomOut", "Zoom _Out", "View > Zoom > Zoom out", new KeyGesture(Key.Subtract, p)))
+                .Item(MenuCommand("view.zoomReset", "_Reset", "View > Zoom > Reset to 100%", new KeyGesture(Key.D0, p)))
             );
         var menu = new MenuBar()
                             .Height(28)
@@ -3591,7 +3613,7 @@ internal class NativeCustomWindowSample : NativeCustomWindow
 
     public NativeCustomWindowSample()
     {
-        this.OnBuild(OnBuild)
+        this.Build(OnBuild)
             .Resizable(600, 400, minWidth: 400, minHeight: 250)
             .OnActivated(UpdateStateLabel)
             .OnDeactivated(UpdateStateLabel)
@@ -3606,7 +3628,7 @@ internal class NativeCustomWindowSample : NativeCustomWindow
     void OnBuild(NativeCustomWindowSample window)
     {
         TitleBarLeft.Add(
-            GalleryView.CreateMenu(_ => { })
+            GalleryView.CreateMenu(this, _ => { })
                 .Apply(x => x.DrawBottomSeparator = false)
                 .Background(Color.Transparent));
 
@@ -3633,7 +3655,7 @@ internal class NativeCustomWindowSample : NativeCustomWindow
 
         window
             .Title("Native Chrome Demo")
-            .OnBuild(x => x
+            .Build(x => x
                 .Content(new StackPanel()
                     .Vertical()
                     .Spacing(8)
@@ -3659,14 +3681,14 @@ internal class NativeCustomWindowSample : NativeCustomWindow
                                         .Spacing(6)
                                         .Children(
                                             new Button().Content("Minimize")
-                                                .OnClick(() => Minimize())
-                                                .OnCanClick(() => WindowState == WindowState.Normal || WindowState == WindowState.Maximized),
+                                                .Command(WindowCommand("minimize", Minimize,
+                                                    () => WindowState == WindowState.Normal || WindowState == WindowState.Maximized)),
                                             new Button().Content("Maximize")
-                                                .OnClick(() => Maximize())
-                                                .OnCanClick(() => WindowState == WindowState.Normal),
+                                                .Command(WindowCommand("maximize", Maximize,
+                                                    () => WindowState == WindowState.Normal)),
                                             new Button().Content("Restore")
-                                                .OnClick(() => Restore())
-                                                .OnCanClick(() => WindowState != WindowState.Normal)),
+                                                .Command(WindowCommand("restore", Restore,
+                                                    () => WindowState != WindowState.Normal))),
                                     new TextBlock().BindText(_stateText),
                                     new TextBlock().BindText(_capText))),
                         new TextBox(),
@@ -3677,6 +3699,13 @@ internal class NativeCustomWindowSample : NativeCustomWindow
                                 new Button().Content("OK"),
                                 new Button().Content("Close").OnClick(() => Close())))))
             .OnLoaded(() => _capText.Value = $"ChromeCapabilities: {window.ChromeCapabilities}");
+    }
+
+    Command WindowCommand(string id, Action execute, Func<bool> canExecute)
+    {
+        var command = new Command($"gallery.nativeCustomWindow.{id}");
+        Commands.Register(command, execute, canExecute);
+        return command;
     }
 
     static CheckBox BoolCheckBox(Window target, string label, MewProperty<bool> property)

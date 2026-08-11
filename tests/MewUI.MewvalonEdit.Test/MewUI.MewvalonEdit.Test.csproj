@@ -1,0 +1,24 @@
+<Project Sdk="MSTest.Sdk/4.0.1">
+
+  <PropertyGroup>
+    <!-- Core grants InternalsVisibleTo only to assemblies under the framework prefix. -->
+    <AssemblyName>Aprillz.MewUI.MewvalonEdit.Test</AssemblyName>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UseVSTest>true</UseVSTest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\extensions\MewUI.MewvalonEdit\MewUI.MewvalonEdit.csproj" />
+    <!-- Metrics-dependent tests need a text engine; registered through the backend's public API. -->
+    <ProjectReference Include="..\..\src\MewUI.Backend.Gdi\MewUI.Backend.Gdi.csproj"
+                      Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
+    <!-- The core suite's headless backend, so a window here runs the same pipeline rather than a
+         second copy of it that drifts as IWindowBackend grows. -->
+    <Compile Include="..\Aprillz.MewUI.Test\Infrastructure\HeadlessWindowBackend.cs"
+             Link="Infrastructure\HeadlessWindowBackend.cs" />
+  </ItemGroup>
+
+</Project>

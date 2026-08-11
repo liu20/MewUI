@@ -1,5 +1,6 @@
 using Aprillz.MewUI.Controls;
 using Aprillz.MewUI.Rendering;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Gallery;
 
@@ -10,17 +11,7 @@ partial class GalleryView : UserControl
     // All card borders, so the global "Cached" toggle can flip BitmapCache on every card at once.
     private readonly List<Border> _cardBorders = new();
 
-    // Flip to switch the gallery shell between the single-scroll list and a NavigationView (pane + content).
-    private const bool UseNavigationView = true;
-
-    protected override Element? OnBuild() =>
-        UseNavigationView ? BuildNavigationShell() : BuildScrollShell();
-
-    private Element BuildScrollShell() =>
-        new ScrollViewer()
-            .VerticalScroll(ScrollMode.Auto)
-            .Padding(8)
-            .Content(BuildGalleryContent());
+    protected override Element? OnBuild() => BuildNavigationShell();
 
     private Element BuildNavigationShell()
     {
@@ -28,7 +19,17 @@ partial class GalleryView : UserControl
         var nav = new NavigationView { PaneWidth = 220 };
 
         Element? PageContent(NavEntry e) => e.Page != null
-            ? new ScrollViewer().VerticalScroll(ScrollMode.Auto).Padding(8).Content(e.Page())
+            ? new ScrollViewer().VerticalScroll(ScrollMode.Auto).Padding(24).Content(
+                new StackPanel()
+                    .Vertical()
+                    .Spacing(16)
+                    .Children(
+                        new TextBlock()
+                            .Text(e.Title)
+                            .FontSize(ThemeFontSize.Large)
+                            .SemiBold()
+                            .LineBoxTrim(LineBoxTrim.CapAndBaseline),
+                        e.Page()))
             : null;
 
         nav.Items(entries, e => e.Title, icon: e => e.Icon, content: PageContent, kind: e => e.Kind);
@@ -53,9 +54,7 @@ partial class GalleryView : UserControl
     public FrameworkElement? SettingsContent { get; set; }
 
     private FrameworkElement SettingsPage() =>
-        SettingsContent ?? new StackPanel()
-            .Vertical()
-            .Children(new TextBlock().Text("Settings").FontSize(22).Bold());
+        SettingsContent ?? new StackPanel().Vertical();
 
     private static PathShape Ico(string name)
     {
@@ -85,7 +84,6 @@ partial class GalleryView : UserControl
     {
         var border = new Border()
             .MinWidth(minWidth)
-            .Padding(14)
             .CornerRadius(10)
             .Cached()
             .Child(
@@ -114,40 +112,12 @@ partial class GalleryView : UserControl
 
     private FrameworkElement CardGrid(params FrameworkElement[] cards) => new WrapPanel()
         .Orientation(Orientation.Horizontal)
-        .Spacing(8)
+        .Spacing(24)
         .Children(cards);
-
-    private FrameworkElement BuildGalleryContent()
-    {
-        FrameworkElement Section(string title, FrameworkElement content) =>
-            new StackPanel()
-                .Vertical()
-                .Spacing(8)
-                .Children(
-                    new TextBlock().Text(title).FontSize(18).Bold(),
-                    content
-                );
-
-        var children = new List<FrameworkElement>();
-        foreach (var e in NavEntries())
-        {
-            if (e.Kind == NavigationItemKind.Header)
-            {
-                children.Add(new TextBlock().Text(e.Title).FontSize(22).Bold());
-            }
-            else if (e.Page != null)
-            {
-                children.Add(Section(e.Title, e.Page()));
-            }
-        }
-
-        return new StackPanel().Vertical().Spacing(16).Children(children.ToArray());
-    }
 
     private sealed record NavEntry(NavigationItemKind Kind, string Title, Element? Icon, Func<FrameworkElement>? Page);
 
-    // Single source of navigation entries, shared by both shells. Group headers separate sections;
-    // pages are selectable items with their own icon elements.
+    // Group headers separate sections; pages are selectable items with their own icon elements.
     private NavEntry[] NavEntries()
     {
         NavEntry Group(string title) => new(NavigationItemKind.Header, title, null, null);

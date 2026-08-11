@@ -82,6 +82,24 @@ ThemeManager.DefaultMetrics = ThemeMetrics.Default with
 };
 ```
 
+#### 기본 폰트와 시스템 폰트
+
+`FontFamily`를 지정하지 않으면 플랫폼의 시스템 UI 폰트를 따릅니다. Windows는 시스템 설정의 UI 폰트(한국어 환경은 맑은 고딕), macOS는 `.AppleSystemUIFont`, X11은 `sans-serif`입니다. 이 상태를 명시적으로 쓰려면 `ThemeMetrics.SystemFontFamily`를 대입하고, 현재 시스템 폰트를 따르는 중인지는 `IsSystemFontFamily`로 확인합니다.
+
+폰트명을 지정하면 시스템 폰트 대신 그 폰트가 그대로 쓰입니다. `"Segoe UI"`처럼 특정 플랫폼의 시스템 폰트와 같은 이름을 지정해도 마찬가지입니다.
+
+```csharp
+// 시스템 폰트 대신 Segoe UI 고정
+ThemeManager.DefaultMetrics = ThemeMetrics.Default with { FontFamily = "Segoe UI" };
+
+// 폰트는 시스템 폰트를 따르고 크기만 조정
+ThemeManager.DefaultMetrics = ThemeMetrics.Default with { FontSize = 13 };
+```
+
+`FontFamily`가 읽는 시점에 해석되므로, 플랫폼 패키지 등록(`Win32Platform.Register()` 등) 이후라면 언제 읽어도 실제 적용될 폰트명을 얻습니다. `ThemeMetrics.Default.FontFamily`는 시스템 폰트를, `ThemeManager.DefaultMetrics.FontFamily`는 사용자 지정까지 반영한 최종 폰트를 돌려줍니다.
+
+한글 등 지정한 폰트에 없는 글자는 폰트 폴백 체인이 처리하므로, Segoe UI를 지정해도 한글은 정상적으로 표시됩니다.
+
 ---
 
 ## 2. 시작 시 테마 설정

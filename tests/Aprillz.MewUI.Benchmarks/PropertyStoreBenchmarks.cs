@@ -7,11 +7,10 @@ using BenchmarkDotNet.Attributes;
 namespace MewUI.Benchmarks;
 
 /// <summary>
-/// Baselines the current single-slot <see cref="PropertyValueStore"/> so the multi-slot rewrite
-/// (subplan 06-B) has an old-vs-new comparison for reads, sets and the trigger on/off cycle.
+/// Baselines the multi-slot <see cref="PropertyValueStore"/> for reads, sets and the element-trigger
+/// on/off cycle.
 /// MemoryDiagnoser reports allocations per op: the read and no-change paths must stay at zero, and
-/// the trigger cycle is where a well-designed multi-slot store trades a small shadow allocation for
-/// preserving the shadowed style value (which the current store loses).
+/// the trigger cycle records the cost of preserving and revealing a shadowed style value.
 /// </summary>
 [MemoryDiagnoser]
 public class PropertyStoreBenchmarks
@@ -73,14 +72,13 @@ public class PropertyStoreBenchmarks
         _store.SetLocal(BenchOwner.Fill[2], _toggle ? BrushA : BrushB);
     }
 
-    // Hover cycle at the store level: style present, trigger over it, then clear. Three store ops.
-    // Current store: the trigger overwrites (style value lost), clear drops to default. The multi-slot
-    // store will instead preserve the style value under the trigger and reveal it on clear.
+    // Element-trigger cycle at the store level: style present, trigger over it, then clear.
+    // The style value is preserved under the element-trigger slot and revealed on clear.
     [Benchmark]
-    public void TriggerOverStyle_Cycle()
+    public void ElementTriggerOverStyle_Cycle()
     {
         _store.SetStyle(BenchOwner.Cycle, BrushA);
-        _store.SetTrigger(BenchOwner.Cycle, BrushB);
-        _store.ClearSource(BenchOwner.Cycle.Id, ValueSource.Trigger);
+        _store.SetElementTrigger(BenchOwner.Cycle, BrushB);
+        _store.ClearSource(BenchOwner.Cycle.Id, ValueSource.ElementTrigger);
     }
 }

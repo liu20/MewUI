@@ -7,7 +7,7 @@ namespace Aprillz.MewUI;
 /// to a <see cref="MewProperty{TSource}"/> on a source <see cref="MewObject"/>
 /// with type conversion via convert/convertBack functions.
 /// </summary>
-internal sealed class MewObjectPropertyBinding<TProp, TSource> : IDisposable
+internal sealed class MewObjectPropertyBinding<TProp, TSource> : IPropertyBinding
 {
     private readonly MewObject _target;
     private readonly MewProperty<TProp> _targetProperty;
@@ -15,10 +15,11 @@ internal sealed class MewObjectPropertyBinding<TProp, TSource> : IDisposable
     private readonly MewProperty<TSource> _sourceProperty;
     private readonly Func<TSource, TProp> _convert;
     private readonly Func<TProp, TSource>? _convertBack;
-    private readonly BindingMode _mode;
+    private readonly BindingCapabilities _capabilities;
     private readonly WeakEventKey<MewObject, Action> _sourceChangedEvent;
-    private readonly Action? _onTargetChanged;
     private bool _updating;
+
+    public BindingCapabilities Capabilities => _capabilities;
 
     public MewObjectPropertyBinding(
         MewObject target,
@@ -35,28 +36,30 @@ internal sealed class MewObjectPropertyBinding<TProp, TSource> : IDisposable
         _sourceProperty = sourceProperty;
         _convert = convert;
         _convertBack = convertBack;
-        _mode = mode;
+        _capabilities = BindingCapabilities.FromMode(mode);
         // Source → Target
         _sourceChangedEvent = new WeakEventKey<MewObject, Action>(
             (owner, handler) => owner.AddPropertyBindingCallback(sourceProperty.Id, handler),
             (owner, handler) => owner.RemovePropertyBindingCallback(sourceProperty.Id, handler),
             requireStaticAccessors: false);
 
-        WeakEventManager.AddHandler(
-            _sourceChangedEvent,
-            source,
-            this,
-            static binding => binding.OnSourceChanged());
-
-        // Target → Source (TwoWay)
-        if (mode == BindingMode.TwoWay && convertBack != null)
+        if (_capabilities.ObservesSourceChanges)
         {
-            _onTargetChanged = OnTargetChanged;
-            target.AddPropertyBindingCallback(targetProperty.Id, _onTargetChanged);
+            WeakEventManager.AddHandler(
+                _sourceChangedEvent,
+                source,
+                this,
+                static binding => binding.OnSourceChanged());
         }
 
-        // Initial sync
-        OnSourceChanged();
+    }
+
+    public void Initialize()
+    {
+        if (_capabilities.ProvidesTargetValue)
+        {
+            OnSourceChanged();
+        }
     }
 
     private void OnSourceChanged()
@@ -65,29 +68,105 @@ internal sealed class MewObjectPropertyBinding<TProp, TSource> : IDisposable
         _updating = true;
         try
         {
-            var sourceValue = _source.PropertyStore.GetValue(_sourceProperty);
-            var converted = _convert(sourceValue);
-            if (!EqualityComparer<TProp>.Default.Equals(
-                    _target.PropertyStore.GetValue(_targetProperty), converted))
+            TSource sourceValue = default!;
+            TProp converted;
+            try
             {
-                _target.PropertyStore.SetLocal(_targetProperty, converted);
+                sourceValue = _source.GetBindingValue(_sourceProperty);
             }
+            catch (Exception ex)
+            {
+                _target.ReportBindingError(
+                    _targetProperty,
+                    sourceValue,
+                    BindingStatus.BindingError,
+                    BindingErrorStage.SourceReadBack,
+                    ex);
+                return;
+            }
+
+            try
+            {
+                converted = _convert(sourceValue);
+            }
+            catch (Exception ex)
+            {
+                _target.ReportBindingError(
+                    _targetProperty,
+                    sourceValue,
+                    BindingStatus.BindingError,
+                    BindingErrorStage.Convert,
+                    ex);
+                return;
+            }
+
+            _target.ApplyBindingTargetValue(_targetProperty, converted);
         }
         finally { _updating = false; }
     }
 
-    private void OnTargetChanged()
+    public void UpdateTargetValue(object? value)
     {
-        if (_updating || _convertBack == null) return;
+        _target.UpdateBindingTarget(_targetProperty, (TProp)value!);
+    }
+
+    public BindingCommitResult CommitTargetValue(object? value)
+    {
+        if (_convertBack == null)
+        {
+            return BindingCommitResult.Success(value);
+        }
+
         _updating = true;
         try
         {
-            var targetValue = _target.PropertyStore.GetValue(_targetProperty);
-            var convertedBack = _convertBack(targetValue);
-            if (!EqualityComparer<TSource>.Default.Equals(
-                    _source.PropertyStore.GetValue(_sourceProperty), convertedBack))
+            TSource sourceCandidate;
+            try
             {
-                _source.PropertyStore.SetLocal(_sourceProperty, convertedBack);
+                sourceCandidate = _convertBack((TProp)value!);
+            }
+            catch (Exception ex)
+            {
+                return BindingCommitResult.Failure(
+                    BindingStatus.ValidationError,
+                    BindingErrorStage.ConvertBack,
+                    ex);
+            }
+
+            try
+            {
+                _source.PropertyStore.ValidateValueCandidate(_sourceProperty, sourceCandidate);
+            }
+            catch (Exception ex)
+            {
+                return BindingCommitResult.Failure(
+                    BindingStatus.ValidationError,
+                    BindingErrorStage.SourceValidation,
+                    ex);
+            }
+
+            try
+            {
+                _source.PropertyStore.SetLocalPrevalidated(_sourceProperty, sourceCandidate);
+            }
+            catch (Exception ex)
+            {
+                return BindingCommitResult.Failure(
+                    BindingStatus.BindingError,
+                    BindingErrorStage.SourceWrite,
+                    ex);
+            }
+
+            try
+            {
+                return BindingCommitResult.Success(_convert(_source.GetBindingValue(_sourceProperty)));
+            }
+            catch (Exception ex)
+            {
+                return BindingCommitResult.Failure(
+                    BindingStatus.BindingError,
+                    BindingErrorStage.Consistency,
+                    ex);
             }
         }
         finally { _updating = false; }
@@ -95,10 +174,9 @@ internal sealed class MewObjectPropertyBinding<TProp, TSource> : IDisposable
 
     public void Dispose()
     {
-        WeakEventManager.RemoveHandler(_sourceChangedEvent, _source, this);
-        if (_mode == BindingMode.TwoWay && _onTargetChanged != null)
+        if (_capabilities.ObservesSourceChanges)
         {
-            _target.RemovePropertyBindingCallback(_targetProperty.Id, _onTargetChanged);
+            WeakEventManager.RemoveHandler(_sourceChangedEvent, _source, this);
         }
     }
 }

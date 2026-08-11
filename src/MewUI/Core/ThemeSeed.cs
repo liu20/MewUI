@@ -14,7 +14,8 @@ public record ThemeSeed
         WindowText = Color.FromRgb(30, 30, 30),
         ControlBackground = Color.White,
         ButtonFace = Color.FromRgb(232, 232, 232),
-        ButtonDisabledBackground = Color.FromRgb(204, 204, 204)
+        ButtonDisabledBackground = Color.FromRgb(204, 204, 204),
+        Error = Color.FromRgb(220, 20, 60),
     };
 
     /// <summary>
@@ -26,7 +27,8 @@ public record ThemeSeed
         WindowText = Color.FromRgb(230, 230, 232),
         ControlBackground = Color.FromRgb(26, 26, 27),
         ButtonFace = Color.FromRgb(48, 48, 50),
-        ButtonDisabledBackground = Color.FromRgb(60, 60, 64)
+        ButtonDisabledBackground = Color.FromRgb(60, 60, 64),
+        Error = Color.FromRgb(220, 20, 60),
     };
 
     /// <summary>
@@ -53,4 +55,9 @@ public record ThemeSeed
     /// Gets the background color used for disabled buttons.
     /// </summary>
     public required Color ButtonDisabledBackground { get; init; }
+
+    /// <summary>
+    /// Gets an optional semantic error color. When null, the palette uses #DC143C.
+    /// </summary>
+    public Color? Error { get; init; }
 }

@@ -50,7 +50,7 @@ public sealed class GlyphElement : FrameworkElement
     /// </summary>
     public void ClearForeground()
     {
-        PropertyStore.ClearLocal(TextElement.ForegroundProperty);
+        PropertyStore.ClearLocalValue(TextElement.ForegroundProperty);
     }
 
     protected override Size MeasureContent(Size availableSize)

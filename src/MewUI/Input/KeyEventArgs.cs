@@ -107,10 +107,17 @@ public class KeyEventArgs
 /// </summary>
 public class TextInputEventArgs
 {
+    private string _text;
+
     /// <summary>
-    /// Gets the text that was input.
+    /// The text being input. A subscriber may assign a replacement, which the control then inserts
+    /// in place of what arrived; newlines are normalized the same way as on construction.
     /// </summary>
-    public string Text { get; }
+    public string Text
+    {
+        get => _text;
+        set => _text = NormalizeText(value);
+    }
 
     /// <summary>
     /// Gets or sets whether the event has been handled.
@@ -123,7 +130,7 @@ public class TextInputEventArgs
     /// <param name="text">Input text.</param>
     public TextInputEventArgs(string text)
     {
-        Text = NormalizeText(text);
+        _text = NormalizeText(text);
     }
 
     internal static string NormalizeText(string? text)

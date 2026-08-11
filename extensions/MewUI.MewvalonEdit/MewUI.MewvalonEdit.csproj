@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <Import Project="..\..\build\MewUI.Common.props" />
+
+  <PropertyGroup>
+    <RootNamespace>Aprillz.MewUI.MewvalonEdit</RootNamespace>
+    <AssemblyName>Aprillz.MewUI.MewvalonEdit</AssemblyName>
+    <PackageId>Aprillz.MewUI.MewvalonEdit</PackageId>
+    <Description>AvalonEdit-compatible editing components built on the MewUI text engine.</Description>
+  </PropertyGroup>
+
+  <!-- The original's own syntax definitions and their schemas, read by HighlightingLoader. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Highlighting\Resources\*.xshd" />
+    <EmbeddedResource Include="Highlighting\Resources\*.xsd" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MewUI\MewUI.csproj" />
+    <None Include="LICENSE.AvalonEdit" Pack="true" PackagePath="licenses\" />
+  </ItemGroup>
+
+</Project>

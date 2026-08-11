@@ -132,7 +132,7 @@ internal sealed class TabHeaderButton : ContentControl
             return;
         }
 
-        // Keep the tab label vertically centered.
+        // Re-arrange what the base just placed, to keep the tab label vertically centered.
         var contentBounds = bounds.Deflate(Padding).Deflate(GetBorderVisualInset());
         var desired = Content.DesiredSize;
         if (desired.Height > 0 && contentBounds.Height > desired.Height + 0.5)
@@ -140,22 +140,6 @@ internal sealed class TabHeaderButton : ContentControl
             double y = contentBounds.Y + (contentBounds.Height - desired.Height) / 2;
             Content.Arrange(new Rect(contentBounds.X, y, contentBounds.Width, desired.Height));
         }
-    }
-
-    protected override Size MeasureContent(Size availableSize)
-    {
-        if (Content == null)
-        {
-            return Size.Empty;
-        }
-
-        // Keep measure/arrange symmetric: ArrangeContent deflates border inset (snapped to pixels),
-        // so measurement must include it to avoid text clipping (GDI/OpenGL).
-        var borderInset = GetBorderVisualInset();
-        var contentSize = availableSize.Deflate(Padding).Deflate(borderInset);
-
-        Content.Measure(contentSize);
-        return Content.DesiredSize.Inflate(Padding).Inflate(borderInset);
     }
 
     protected override void OnMouseDown(MouseEventArgs e)

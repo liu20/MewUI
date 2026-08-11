@@ -74,34 +74,3 @@ public sealed class UnsetSetter : SetterBase
 {
     internal UnsetSetter(MewProperty property) : base(property) { }
 }
-
-/// <summary>
-/// Sets a property value on a named child part (resolved via <c>RegisterPart</c>/<c>GetPart</c>).
-/// </summary>
-public sealed class TargetSetter : SetterBase
-{
-    /// <summary>Gets the name of the target part.</summary>
-    public string TargetName { get; }
-
-    private TargetSetter(string targetName, MewProperty property, object value) : base(property, value)
-    {
-        TargetName = targetName;
-    }
-
-    private TargetSetter(string targetName, MewProperty property, Func<Theme, object> themeResolver) : base(property, themeResolver)
-    {
-        TargetName = targetName;
-    }
-
-    /// <summary>
-    /// Creates a type-safe target setter with a static value.
-    /// </summary>
-    public static TargetSetter Create<T>(string targetName, MewProperty<T> property, T value)
-        => new(targetName, property, value!);
-
-    /// <summary>
-    /// Creates a type-safe target setter that resolves its value from the current theme.
-    /// </summary>
-    public static TargetSetter Create<T>(string targetName, MewProperty<T> property, Func<Theme, T> resolve)
-        => new(targetName, property, t => resolve(t)!);
-}

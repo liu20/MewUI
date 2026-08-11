@@ -4,8 +4,7 @@ namespace Aprillz.MewUI.Gallery;
 
 partial class GalleryView
 {
-    // Samples tied to the styling work: issue #198 (popup font isolation) and the
-    // Setter.Unset primitive (subtractive BasedOn).
+    // Popup inheritance samples plus StyleSheet scope, type rules, BasedOn and Unset.
     private FrameworkElement StylingPage()
     {
         var contextMenu = new ContextMenu()
@@ -25,7 +24,7 @@ partial class GalleryView
                         new TextBlock()
                             .Text("The button is 20pt Consolas. Hover it: the tooltip keeps the theme font, not the button's font. A popup no longer inherits the triggering control's font.")
                             .TextWrapping(TextWrapping.Wrap)
-                            .FontSize(11),
+                            .FontSize(ThemeFontSize.Small),
                         new Button()
                             .Content("Hover me (20pt / Consolas)")
                             .FontSize(20)
@@ -44,7 +43,7 @@ partial class GalleryView
                         new TextBlock()
                             .Text("Right-click the button. It renders at 22pt, but the context menu stays in the theme font.")
                             .TextWrapping(TextWrapping.Wrap)
-                            .FontSize(11),
+                            .FontSize(ThemeFontSize.Small),
                         new Button()
                             .Content("Right-click me (22pt)")
                             .FontSize(22)
@@ -54,8 +53,13 @@ partial class GalleryView
             ),
 
             Card(
-                "BasedOn + Setter.Unset",
-                UnsetDemo()
+                "Named StyleSheet + Setter.Unset",
+                NamedStyleUnsetDemo()
+            ),
+
+            Card(
+                "Scoped StyleSheet type rule",
+                TypeRuleDemo()
             ),
 
             Card(
@@ -67,10 +71,10 @@ partial class GalleryView
                         new TextBlock()
                             .Text("Both menu bars are identical. The second sits in a FontSize 16 container. Open the menus: the dropdown follows the ambient font.")
                             .TextWrapping(TextWrapping.Wrap)
-                            .FontSize(11),
-                        new TextBlock().Text("Default (theme font):").FontSize(11),
+                            .FontSize(ThemeFontSize.Small),
+                        new TextBlock().Text("Default (theme font):").FontSize(ThemeFontSize.Small),
                         MenuDemoBar(),
-                        new TextBlock().Text("Inside a FontSize 16 container:").FontSize(11),
+                        new TextBlock().Text("Inside a FontSize 16 container:").FontSize(ThemeFontSize.Small),
                         new Border()
                             .FontSize(16)
                             .Child(MenuDemoBar())
@@ -101,20 +105,18 @@ partial class GalleryView
             );
     }
 
-    private FrameworkElement UnsetDemo()
+    private FrameworkElement NamedStyleUnsetDemo()
     {
-        var ambient = Color.FromRgb(40, 170, 90);
-        var pinnedForeground = Color.FromRgb(210, 60, 60);
+        // This style explicitly extends the default Button chrome and contributes a
+        // Foreground candidate at the Style tier.
+        var pinnedStyle = Style.DeriveFromDefault<Button>(
+            setters: [Setter.Create(TextElement.ForegroundProperty, t => t.Palette.Error)]);
 
-        // Base style pins a red foreground on top of the default Button chrome.
-        var pinnedStyle = new Style(typeof(Button))
-        {
-            BasedOn = Style.ForType<Button>(),
-            Setters = [Setter.Create(TextElement.ForegroundProperty, pinnedForeground)],
-        };
+        // Omitting Foreground does not cancel BasedOn: the Error candidate remains.
+        var noOverrideStyle = new Style(typeof(Button)) { BasedOn = pinnedStyle };
 
-        // Derived style keeps the chrome from BasedOn but unsets the foreground,
-        // so it reverts to the inherited (ambient) value.
+        // Unset removes the final Style candidate for Foreground. With no higher-priority
+        // Local/ElementTrigger/Binding value, the inherited container value is revealed.
         var unsetStyle = new Style(typeof(Button))
         {
             BasedOn = pinnedStyle,
@@ -122,13 +124,12 @@ partial class GalleryView
         };
 
         var sheet = new StyleSheet();
-        sheet.Define("fg-pinned", () => pinnedStyle);
-        sheet.Define("fg-unset", () => unsetStyle);
+        sheet.Define("derived-no-override", () => noOverrideStyle);
+        sheet.Define("derived-unset", () => unsetStyle);
 
-        // The Border (a Control) provides the ambient Foreground that descendants inherit,
-        // and hosts the StyleSheet the named styles resolve against.
+        // The Border provides both the nearest named-style scope and the inherited candidate.
         return new Border()
-            .Foreground(ambient)
+            .WithTheme((t, b) => b.Foreground(t.Palette.Accent))
             .Apply(b => b.StyleSheet = sheet)
             .Child(
                 new StackPanel()
@@ -136,18 +137,81 @@ partial class GalleryView
                     .Spacing(8)
                     .Children(
                         new TextBlock()
-                            .Text("Container Foreground is green. Both buttons derive (BasedOn) from a style that sets red text.")
+                            .Text("This container owns a local StyleSheet and provides an Accent Foreground. Both named styles derive from a default Button style that contributes an Error Foreground.")
                             .TextWrapping(TextWrapping.Wrap)
-                            .FontSize(11),
+                            .FontSize(ThemeFontSize.Small),
                         new Button()
-                            .Content("BasedOn (red text)")
-                            .StyleName("fg-pinned")
+                            .Content("No override: BasedOn Error wins")
+                            .StyleName("derived-no-override")
                             .HorizontalAlignment(HorizontalAlignment.Left),
                         new Button()
-                            .Content("BasedOn + Unset (follows ambient)")
-                            .StyleName("fg-unset")
-                            .HorizontalAlignment(HorizontalAlignment.Left)
+                            .Content("Unset: inherited Accent is revealed")
+                            .StyleName("derived-unset")
+                            .HorizontalAlignment(HorizontalAlignment.Left),
+                        new TextBlock()
+                            .Text("Unset does not assign Accent. It removes the Style candidate, so the resolver exposes the next source in the property precedence chain.")
+                            .TextWrapping(TextWrapping.Wrap)
+                            .FontSize(ThemeFontSize.Small)
                     )
+            );
+    }
+
+    private FrameworkElement TypeRuleDemo()
+    {
+        var sheet = new StyleSheet();
+        sheet.Define<Button>(Style.DeriveFromDefault<Button>(
+            setters:
+            [
+                Setter.Create(Control.CornerRadiusProperty, 0.0),
+                Setter.Create(Control.PaddingProperty, new Thickness(18, 8, 18, 8)),
+                Setter.Create(TextElement.FontWeightProperty, FontWeight.Bold),
+            ]));
+
+        Border scope = null!;
+        var status = new TextBlock()
+            .Text("StyleSheet: applied")
+            .FontSize(ThemeFontSize.Small);
+
+        scope = new Border()
+            .Apply(b => b.StyleSheet = sheet)
+            .Child(
+                new Button()
+                    .Content("Inside scope: Define<Button>")
+                    .HorizontalAlignment(HorizontalAlignment.Left)
+            );
+
+        return new StackPanel()
+            .Vertical()
+            .Spacing(8)
+            .Children(
+                new TextBlock()
+                    .Text("The first button is outside the local sheet. The second is inside a Border that owns a Button type rule, so it receives the square, padded, bold style without a StyleName. Removing the sheet safely returns it to the default Button style.")
+                    .TextWrapping(TextWrapping.Wrap)
+                    .FontSize(ThemeFontSize.Small),
+                new Button()
+                    .Content("Outside scope: default Button")
+                    .HorizontalAlignment(HorizontalAlignment.Left),
+                scope,
+                new StackPanel()
+                    .Horizontal()
+                    .Spacing(8)
+                    .Children(
+                        new Button()
+                            .Content("Remove StyleSheet")
+                            .OnClick(() =>
+                            {
+                                scope.StyleSheet = null;
+                                status.Text = "StyleSheet: removed (inside button uses the default style)";
+                            }),
+                        new Button()
+                            .Content("Apply StyleSheet")
+                            .OnClick(() =>
+                            {
+                                scope.StyleSheet = sheet;
+                                status.Text = "StyleSheet: applied";
+                            })
+                    ),
+                status
             );
     }
 }

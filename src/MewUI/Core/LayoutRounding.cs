@@ -5,6 +5,11 @@ namespace Aprillz.MewUI;
 /// </summary>
 public static class LayoutRounding
 {
+    // Double carries ~2.2e-16 relative error, so a pixel coordinate below ~1e5 accumulates under
+    // 1e-11px of noise, while layout means nothing finer than about 1e-3px. Quantizing at 1e-6 sits
+    // three orders clear of both.
+    private const int MIDPOINT_NOISE_DIGITS = 6;
+
     /// <summary>
     /// Snaps bounds geometry (background/border/layout boxes) to device pixels.
     /// This snapping may shrink/grow by rounding edges, so prefer it for geometry that should be stable.
@@ -176,7 +181,8 @@ public static class LayoutRounding
     }
 
     /// <summary>
-    /// Rounds a rectangle position/size independently (avoids edge-based jitter).
+    /// Rounds a layout rectangle to device pixels by snapping its edges, so boxes that abut in DIPs
+    /// still abut in pixels.
     /// </summary>
     public static Rect RoundRectToPixels(Rect rect, double dpiScale)
     {
@@ -190,17 +196,18 @@ public static class LayoutRounding
             return rect;
         }
 
-        // Round position and size independently (WPF-style) to avoid jitter introduced by
-        // rounding both edges separately (left/right), which can change size by ±1px.
+        // Rounding the size on its own leaves a cell's right edge a pixel short of the next cell's
+        // left edge at fractional scales (a 1px seam at 125%). Deriving the size from the two rounded
+        // edges costs the size up to a pixel of stability but keeps neighbours seamless.
         int leftPx = RoundToPixelInt(rect.X, dpiScale);
         int topPx = RoundToPixelInt(rect.Y, dpiScale);
-        int widthPx = RoundToPixelInt(rect.Width, dpiScale);
-        int heightPx = RoundToPixelInt(rect.Height, dpiScale);
+        int rightPx = RoundToPixelInt(rect.X + rect.Width, dpiScale);
+        int bottomPx = RoundToPixelInt(rect.Y + rect.Height, dpiScale);
 
         double x = leftPx / dpiScale;
         double y = topPx / dpiScale;
-        double w = Math.Max(0, widthPx / dpiScale);
-        double h = Math.Max(0, heightPx / dpiScale);
+        double w = Math.Max(0, (rightPx - leftPx) / dpiScale);
+        double h = Math.Max(0, (bottomPx - topPx) / dpiScale);
 
         return new Rect(x, y, w, h);
     }
@@ -220,7 +227,12 @@ public static class LayoutRounding
             return 0;
         }
 
-        return (int)Math.Round(value * dpiScale, MidpointRounding.AwayFromZero);
+        // Boundaries between siblings land on half pixels whenever a size is a fractional pixel
+        // (26 DIP is 32.5px at 125%), and there the last bits of the two neighbours' arithmetic decide
+        // the direction: one rounds up, the other down, and the shared edge splits. Dropping the noise
+        // first makes both sides of a boundary round the same way.
+        double scaled = Math.Round(value * dpiScale, MIDPOINT_NOISE_DIGITS);
+        return (int)Math.Round(scaled, MidpointRounding.AwayFromZero);
     }
 
     /// <summary>

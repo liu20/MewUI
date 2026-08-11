@@ -3,19 +3,18 @@ using Aprillz.MewUI.Input;
 namespace Aprillz.MewUI;
 
 /// <summary>
-/// Owns the run-scoped mutable state of a single <see cref="Application.Run"/> (the window registry and
+/// Owns the run-scoped mutable state of a single <see cref="Application.Run(Window)"/> (the window registry and
 /// main-window identity) and tears the per-run state down in a fixed order when the run ends, so no
 /// window or drag reference survives into the next run.
 /// </summary>
 internal sealed class ApplicationRuntime : IDisposable
 {
     private readonly List<Window> _windows = new();
-    private Window? _mainWindow;
     private bool _disposed;
 
     internal IReadOnlyList<Window> Windows => _windows;
 
-    internal void SetMainWindow(Window window) => _mainWindow = window;
+    internal Window? MainWindow { get; set; }
 
     internal void Register(Window window)
     {
@@ -25,13 +24,13 @@ internal sealed class ApplicationRuntime : IDisposable
         }
     }
 
-    internal void Unregister(Window window)
+    internal void Unregister(Window window, ShutdownMode shutdownMode)
     {
-        bool wasMainWindow = ReferenceEquals(window, _mainWindow);
+        bool wasMainWindow = ReferenceEquals(window, MainWindow);
         _windows.Remove(window);
-        if (Application.ShouldShutdownAfterClose(Application.ShutdownMode, wasMainWindow, _windows.Count))
+        if (Application.ShouldShutdownAfterClose(shutdownMode, wasMainWindow, _windows.Count))
         {
-            Application.Quit();
+            Application.Shutdown();
         }
     }
 
@@ -52,6 +51,6 @@ internal sealed class ApplicationRuntime : IDisposable
         // registry, so the registry stays populated until the drag session is torn down.
         WindowDragDropRouter.ResetForRuntimeEnd();
         _windows.Clear();
-        _mainWindow = null;
+        MainWindow = null;
     }
 }

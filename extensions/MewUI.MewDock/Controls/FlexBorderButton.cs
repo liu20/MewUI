@@ -134,10 +134,12 @@ internal class FlexBorderButton : Button
         var model = _border.Model;
         string tabId = _tab.GetId();
         var menu = new ContextMenu();
-        menu.AddItem(MewUIDockString.MemuDock.Value, () => model.DoAction(DockAction.PinTool(tabId)));
-        menu.AddItem(MewUIDockString.MenuFloat.Value, () => model.DoAction(DockAction.PopoutTab(tabId)));
-        menu.AddItem(MewUIDockString.MenuClose.Value, () => model.DoAction(DockAction.DeleteTab(tabId)), _tab.IsEnableClose);
-        _context.ConfigureTabMenu?.Invoke(_tab, menu); // host appends app commands
+        var commands = new CommandScope();
+        DockMenuCommands.Add(menu, commands, "dock", MewUIDockString.MemuDock.Value, () => model.DoAction(DockAction.PinTool(tabId)));
+        DockMenuCommands.Add(menu, commands, "float", MewUIDockString.MenuFloat.Value, () => model.DoAction(DockAction.PopoutTab(tabId)));
+        DockMenuCommands.Add(menu, commands, "close", MewUIDockString.MenuClose.Value, () => model.DoAction(DockAction.DeleteTab(tabId)), _tab.IsEnableClose);
+        _context.ConfigureTabMenu?.Invoke(_tab, menu, commands); // host appends app commands
+        menu.SetCommandTarget(CommandTarget.From(commands));
         menu.ShowAt(this, new Point(Bounds.X + localPosition.X, Bounds.Y + localPosition.Y));
     }
 

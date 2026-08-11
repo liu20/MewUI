@@ -254,7 +254,9 @@ internal sealed unsafe class Direct2DPixelRenderSurface : IPixelBufferSource, IC
             _dcRenderTarget = 0;
         }
 
-        var pixelFormat = new D2D1_PIXEL_FORMAT(D2D1.DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE.PREMULTIPLIED);
+        // Opaque surfaces take IGNORE, which is also the only alpha mode D2D renders ClearType on.
+        var alphaMode = HasAlpha ? D2D1_ALPHA_MODE.PREMULTIPLIED : D2D1_ALPHA_MODE.IGNORE;
+        var pixelFormat = new D2D1_PIXEL_FORMAT(D2D1.DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode);
         float dpi = (float)(96.0 * DpiScale);
         var rtProps = new D2D1_RENDER_TARGET_PROPERTIES(D2D1_RENDER_TARGET_TYPE.DEFAULT, pixelFormat, dpi, dpi, 0, 0);
 

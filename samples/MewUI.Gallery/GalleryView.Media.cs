@@ -26,7 +26,7 @@ partial class GalleryView
                             .Center(),
                         new TextBlock()
                             .Text("april.jpg")
-                            .FontSize(11)
+                            .FontSize(ThemeFontSize.Small)
                             .Center()
                     )
             ),
@@ -81,7 +81,7 @@ partial class GalleryView
 
                         new TextBlock()
                             .Text("Left: full image (Uniform). Right: ViewBox (center 50%) + UniformToFill.")
-                            .FontSize(11)
+                            .FontSize(ThemeFontSize.Small)
                     )
             )
         );

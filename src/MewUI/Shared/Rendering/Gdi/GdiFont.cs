@@ -66,6 +66,58 @@ internal sealed partial class GdiFont : FontBase, IGlyphOutlineFont
     /// <summary>Internal leading in pixels (for use by rasterizers operating in pixel space).</summary>
     internal int InternalLeadingPx { get; }
 
+    /// <summary>Picks the first installed family from a comma-separated list; single names pass through.</summary>
+    internal static string SelectFamilyCandidate(string family)
+    {
+        if (!FontFamilyList.IsList(family))
+        {
+            return family;
+        }
+
+        string[] candidates = FontFamilyList.Split(family);
+        foreach (string candidate in candidates)
+        {
+            if (Resources.FontRegistry.Resolve(candidate) != null || IsInstalled(candidate))
+            {
+                return candidate;
+            }
+        }
+        return candidates.Length > 0 ? candidates[0] : family;
+    }
+
+    private static bool IsInstalled(string family)
+    {
+        // GDI substitutes silently, so the face a DC reports back is the availability signal.
+        nint font = Gdi32.CreateFont(
+            -12, 0, 0, 0, 400, 0u, 0u, 0u,
+            GdiConstants.DEFAULT_CHARSET,
+            GdiConstants.OUT_TT_PRECIS,
+            GdiConstants.CLIP_DEFAULT_PRECIS,
+            0,
+            GdiConstants.DEFAULT_PITCH | GdiConstants.FF_DONTCARE,
+            family);
+        if (font == 0)
+        {
+            return false;
+        }
+
+        nint hdc = User32.GetDC(0);
+        nint previous = Gdi32.SelectObject(hdc, font);
+        var face = new char[64];
+        int copied = Gdi32.GetTextFace(hdc, face.Length, face);
+        Gdi32.SelectObject(hdc, previous);
+        User32.ReleaseDC(0, hdc);
+        Gdi32.DeleteObject(font);
+        if (copied <= 0)
+        {
+            return false;
+        }
+
+        int terminator = Array.IndexOf(face, '\0');
+        string reported = new string(face, 0, terminator >= 0 ? terminator : Math.Min(copied, face.Length));
+        return string.Equals(reported, family, StringComparison.OrdinalIgnoreCase);
+    }
+
     private nint CreateFontCore(int height, uint quality)
     {
         return Gdi32.CreateFont(

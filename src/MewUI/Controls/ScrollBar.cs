@@ -153,11 +153,11 @@ public sealed class ScrollBar : RangeBase
         var clickValue = ValueFromPosition(track, Theme, pos);
         if (clickValue < Value)
         {
-            Value -= LargeChange;
+            CommitValue(Value - LargeChange);
         }
         else
         {
-            Value += LargeChange;
+            CommitValue(Value + LargeChange);
         }
 
         e.Handled = true;
@@ -186,7 +186,7 @@ public sealed class ScrollBar : RangeBase
         double usable = Math.Max(1, trackLength - thumbLength);
         double deltaValue = scrollRange <= 0 ? 0 : deltaPx / usable * scrollRange;
 
-        Value = _dragStartValue + deltaValue;
+        CommitValue(_dragStartValue + deltaValue);
         e.Handled = true;
     }
 
@@ -230,7 +230,7 @@ public sealed class ScrollBar : RangeBase
             return;
         }
 
-        Value -= notches * SmallChange;
+        CommitValue(Value - notches * SmallChange);
         e.Handled = true;
     }
 

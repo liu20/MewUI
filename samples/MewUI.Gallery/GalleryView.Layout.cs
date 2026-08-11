@@ -17,7 +17,7 @@ partial class GalleryView
                 .Children(
                     new TextBlock()
                         .Text(title)
-                        .FontSize(11),
+                        .FontSize(ThemeFontSize.Small),
                     new Border()
                         .Width(240)
                         .Height(80)

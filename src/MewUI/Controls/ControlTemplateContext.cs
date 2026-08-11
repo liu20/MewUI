@@ -32,7 +32,11 @@ public sealed class ControlTemplateContext
         ArgumentNullException.ThrowIfNull(sourceProperty);
 
         target.PropertyStore.SetLocal(targetProperty, Owner.PropertyStore.GetValue(sourceProperty));
-        var entry = Owner.AddPropertyForward(sourceProperty.Id, target, targetProperty);
+        var entry = Owner.AddPropertyForward(
+            sourceProperty.Id,
+            target,
+            targetProperty,
+            ValueSource.Local);
         (_bindings ??= new()).Add((sourceProperty.Id, entry));
     }
 

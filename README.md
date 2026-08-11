@@ -129,8 +129,8 @@ https://github.com/user-attachments/assets/fc2d6ad8-3317-4784-a6e5-a00c68e9ed3b
                         .FontSize(18)
                         .Bold(),
                     new Button()
-                        .Content("Quit")
-                        .OnClick(() => Application.Quit())
+                        .Content("Exit")
+                        .OnClick(Application.Shutdown)
                 )
         );
 
@@ -241,7 +241,7 @@ See [Binding](docs/Binding.md) for observed vs snapshot segments, null/fallback,
 Controls (Implemented):
 - `Button`, `ToggleButton`
 - `Label`, `TextBlock`, `Image`
-- `TextBox`, `MultiLineTextBox`, `PasswordBox`
+- `TextBox`, `MultiLineTextBox`, `SyntaxViewer`, `PasswordBox`
 - `CheckBox`, `RadioButton`, `ToggleSwitch`
 - `ComboBox`, `ListBox`, `TreeView`, `GridView`
 - `Slider`, `ProgressBar`, `ProgressRing`, `NumericUpDown`
@@ -350,16 +350,21 @@ Set `PreferNative` to `false` to use the managed dialog directly.
 
 - [Installation & Packages](docs/Installation.md)
 - [C# Markup](docs/CSharpMarkup.md)
+- [Command System](docs/CommandSystem.md)
 - [Binding](docs/Binding.md)
 - [Items and Templates](docs/ItemsAndTemplates.md)
 - [Theme](docs/Theme.md)
 - [Application Lifecycle](docs/ApplicationLifecycle.md)
 - [Layout](docs/Layout.md)
+- [Window Visual Layers](docs/WindowLayers.md)
 - [RenderLoop](docs/RenderLoop.md)
 - [Hot Reload](docs/HotReload.md)
 - [Editor Preview](docs/Preview.md)
 - [Custom Controls](docs/CustomControls.md)
 - [Control Template](docs/ControlTemplate.md)
+- [Text Engine](docs/TextEngine.md)
+- [Text View Extensions](docs/TextViewExtensions.md)
+- [Localization](docs/Localization.md)
 
 ---
 ## 🤝 Community

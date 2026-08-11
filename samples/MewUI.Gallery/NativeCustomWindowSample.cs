@@ -44,7 +44,7 @@ internal class NativeCustomWindowSample : NativeCustomWindow
     {
         // Title bar left: MenuBar
         TitleBarLeft.Add(
-            GalleryView.CreateMenu(_ => { })
+            GalleryView.CreateMenu(this, _ => { })
                 .Apply(x => x.DrawBottomSeparator = false)
                 .Background(Color.Transparent));
 
@@ -99,14 +99,14 @@ internal class NativeCustomWindowSample : NativeCustomWindow
                                         .Spacing(6)
                                         .Children(
                                             new Button().Content("Minimize")
-                                                .OnClick(() => Minimize())
-                                                .OnCanClick(() => WindowState == WindowState.Normal || WindowState == WindowState.Maximized),
+                                                .Command(WindowCommand("minimize", Minimize,
+                                                    () => WindowState == WindowState.Normal || WindowState == WindowState.Maximized)),
                                             new Button().Content("Maximize")
-                                                .OnClick(() => Maximize())
-                                                .OnCanClick(() => WindowState == WindowState.Normal),
+                                                .Command(WindowCommand("maximize", Maximize,
+                                                    () => WindowState == WindowState.Normal)),
                                             new Button().Content("Restore")
-                                                .OnClick(() => Restore())
-                                                .OnCanClick(() => WindowState != WindowState.Normal)
+                                                .Command(WindowCommand("restore", Restore,
+                                                    () => WindowState != WindowState.Normal))
                                         ),
                                     new TextBlock().BindText(_stateText),
                                     new TextBlock().BindText(_capText)
@@ -124,6 +124,13 @@ internal class NativeCustomWindowSample : NativeCustomWindow
                     )
                 )
             ).OnLoaded(() => _capText.Value = $"ChromeCapabilities: {window.ChromeCapabilities}");
+    }
+
+    private Command WindowCommand(string id, Action execute, Func<bool> canExecute)
+    {
+        var command = new Command($"gallery.nativeCustomWindow.{id}");
+        Commands.Register(command, execute, canExecute);
+        return command;
     }
 
     private static CheckBox BoolCheckBox(Window target, string label, MewProperty<bool> property)

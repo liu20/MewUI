@@ -36,7 +36,9 @@ All extension methods return `this` to enable method chaining.
 | Pattern | Description | Example |
 |---------|-------------|---------|
 | `OnEventName(handler)` | Register event handler | `.OnClick(...)`, `.OnTextChanged(...)` |
-| `OnCanEventName(func)` | Conditional execution (Commanding) | `.OnCanClick(() => isValid)` |
+
+Use `Command(...)`, rather than event extensions, for conditional execution and reusable actions. `BindCommand(...)`
+is a data binding for a dynamically supplied semantic Command.
 
 Do not overload the same `On*` method solely by changing the handler delegate's parameter type. Untyped lambdas can match both overloads, including when one extension targets a base class and another targets a derived class. Use a distinct semantic name instead, such as `OnCheckStateChanged` or `OnLayoutSizeChanged`.
 
@@ -48,6 +50,10 @@ Do not overload the same `On*` method solely by changing the handler delegate's 
 | `BindPropertyName(source, convert, convertBack)` | Two-way conversion binding | `.BindValue(vm.Level, x => (double)x, x => (int)x)` |
 
 Converter overloads are available for the `Bind*` convenience methods. For properties that bind two-way by default, omitting `convertBack` intentionally makes the converted binding one-way.
+
+`.BindText(source)` and `.BindIcon(source)` follow the same rule when their receiver is a `Command`: they create real
+one-way bindings to `Command.Presentation.AccessTextProperty` and `IconProperty`. An underscore in the text source is
+an access-key marker; consumers without mnemonic support can use normalized `Command.Text`.
 
 ### Property Name Aliases
 
@@ -308,18 +314,36 @@ new Label()
 
 ```csharp
 new Button()
-    .Content("Click Me")
-    .OnCanClick(() => isFormValid)
-    .OnClick(() => Submit())
+    .Command(submitCommand, presentation: CommandPresentationMode.TextAndIcon)
 ```
 
 | Method | Description |
 |--------|-------------|
 | `Content(string)` | Button text |
 | `OnClick(Action)` | Click handler |
-| `OnCanClick(Func<bool>)` | Click condition (Commanding) |
+| `Command(Command, CommandPresentationMode)` | Semantic command and optional generated command text/icon content |
+| `BindCommand(ObservableValue<Command?>, CommandPresentationMode)` | Semantic Command binding and presentation mode |
 | `BindContent(ObservableValue<string>)` | Content binding |
 | `BindContent(source, convert)` | Converted text or element content binding |
+
+### ButtonGroup segments
+
+```csharp
+new ButtonGroup()
+    .Items(commands, command => command.Text)
+    .PrepareContainer<Command>((segment, command, _) =>
+        segment.Command(command))
+```
+
+| Method | Description |
+|--------|-------------|
+| `PrepareContainer<T>(Action<SegmentButton, T, int>)` | Configure each item container |
+| `SegmentButton.Command(Command)` | Set the semantic Command executed by the segment |
+| `SegmentButton.BindCommand(ObservableValue<Command?>)` | Bind the segment's Command property |
+
+`SegmentedControl` is a selection control rather than a Command consumer. Assign Commands to the individual
+`SegmentButton` containers in a `ButtonGroup` for independent actions; bind a single selected value through the
+selection API of `SegmentedControl`.
 
 ### TextBox
 
@@ -863,7 +887,14 @@ The tables below index the remaining public markup extensions. Some methods have
 | Methods | Purpose |
 |---------|---------|
 | `Add(...)`, `Item(...)`, `SubMenu(...)`, `Separator()` | Build menus |
-| `Menu(...)`, `Shortcut(...)` | Menu item submenu and shortcut |
+| `Item(Command)` | Use the Command's normalized default text and access key |
+| `Item(string, Command)`, `Text(string)` | Override MenuItem text and access key together with `_` markers |
+| `Menu(...)`, `Command(...)`, `Icon(...)` | Menu item submenu, command, and icon placement override |
+| `BindText(...)`, `BindCommand(...)`, `BindIcon(...)`, `BindIsEnabled(...)` | Real bindings to MenuItem MewProperties |
+
+`MenuItem.Text` and `Icon` inherit the Command defaults only while they have no value source. Explicit empty text and
+a null icon suppress those defaults. An `IsEnabled` binding is preserved and ANDed with `CanExecute` for the effective
+state.
 
 ### Shapes and Glyphs
 
@@ -880,42 +911,6 @@ The tables below index the remaining public markup extensions. Some methods have
 | `Interval(...)`, `IntervalMs(...)`, `OnTick(...)`, `Start()`, `Stop()` | DispatcherTimer configuration |
 | `With(...)` | Add styles to a StyleSheet |
 | `HeaderInset(...)` | Header layout inset |
-
----
-
-## Commanding (CanExecute Pattern)
-
-You can implement a pattern similar to WPF ICommand using Button's `OnCanClick`.
-
-```csharp
-var text = new ObservableValue<string>("");
-
-new TextBox()
-    .BindText(text)
-    .OnTextChanged(_ => window.RequerySuggested()),
-
-new Button()
-    .Content("Submit")
-    .OnCanClick(() => !string.IsNullOrWhiteSpace(text.Value))
-    .OnClick(() => Submit(text.Value))
-```
-
-### Automatic Re-evaluation Timing
-
-`CanClick` is automatically re-evaluated at these times:
-- **Focus change** - When focus moves
-- **MouseUp** - When mouse button is released
-- **KeyUp** - When key is released
-
-### Manual Re-evaluation
-
-When manual re-evaluation is needed after state changes:
-
-```csharp
-// After state change in event handler
-counter.Value++;
-window.RequerySuggested();  // Trigger CanClick re-evaluation
-```
 
 ---
 

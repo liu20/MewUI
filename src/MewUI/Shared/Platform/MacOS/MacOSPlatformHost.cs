@@ -1,5 +1,7 @@
 using System.Diagnostics;
 
+using Aprillz.MewUI.Animation;
+
 namespace Aprillz.MewUI.Platform.MacOS;
 
 public sealed class MacOSPlatformHost : IPlatformHost
@@ -8,6 +10,7 @@ public sealed class MacOSPlatformHost : IPlatformHost
 
     private readonly Dictionary<nint, MacOSWindowBackend> _windows = new();
     private readonly List<MacOSWindowBackend> _renderBackends = new();
+    private long _nextInputRoutingOrder;
     private MacOSDispatcher? _dispatcher;
     private Application? _app;
     private bool _running;
@@ -22,7 +25,9 @@ public sealed class MacOSPlatformHost : IPlatformHost
         MacOSInterop.EnsureApplicationInitialized();
     }
 
-    public string DefaultFontFamily => ".AppleSystemUIFont";
+    internal const string SystemFontFamily = ".AppleSystemUIFont";
+
+    public string DefaultFontFamily => SystemFontFamily;
 
     public IReadOnlyList<string> DefaultFontFallbacks { get; } = BuildDefaultFontFallbacks();
 
@@ -103,7 +108,41 @@ public sealed class MacOSPlatformHost : IPlatformHost
     public int GetSystemMetricsForDpi(int nIndex, uint dpi) => 0;
 
     internal void RegisterWindow(nint handle, MacOSWindowBackend backend)
-        => _windows[handle] = backend;
+    {
+        backend.InputRoutingOrder = ++_nextInputRoutingOrder;
+        _windows[handle] = backend;
+    }
+
+    internal MacOSWindowBackend ResolveMouseInputTarget(
+        MacOSWindowBackend eventTarget,
+        Point screenPositionPx)
+    {
+        MacOSWindowBackend? capturedTarget = null;
+        MacOSWindowBackend? popupTarget = null;
+
+        foreach (var candidate in _windows.Values)
+        {
+            if (candidate.Window.HasMouseCapture
+                && (capturedTarget == null
+                    || candidate.InputRoutingOrder > capturedTarget.InputRoutingOrder))
+            {
+                capturedTarget = candidate;
+            }
+
+            if (candidate.IsInteractivePopupAt(eventTarget, screenPositionPx)
+                && (popupTarget == null
+                    || candidate.InputRoutingOrder > popupTarget.InputRoutingOrder))
+            {
+                popupTarget = candidate;
+            }
+        }
+
+        // AppKit has no SetCapture equivalent. Preserve MewUI capture first so a scrollbar receives
+        // its drag/up even when NSEvent.window changes to the key owner. Once managed capture ends,
+        // prefer the frontmost MewUI popup under the pointer: non-key borderless popups can otherwise
+        // leave subsequent mouseMoved events associated with their key owner.
+        return capturedTarget ?? popupTarget ?? eventTarget;
+    }
 
     internal void UnregisterWindow(nint handle)
     {
@@ -233,53 +272,77 @@ public sealed class MacOSPlatformHost : IPlatformHost
         }
     }
 
-    public void Run(Application app, Window mainWindow)
+    private void RenderContinuousWindows(RenderLoopSettings settings)
+    {
+        using var pulse = AnimationManager.Instance.BeginPulse(settings);
+
+        _renderBackends.Clear();
+        foreach (var backend in _windows.Values)
+        {
+            if (pulse.ShouldRender(backend.Window, backend.NeedsRender))
+            {
+                _renderBackends.Add(backend);
+            }
+        }
+
+        for (int i = 0; i < _renderBackends.Count; i++)
+        {
+            _renderBackends[i].RenderNow();
+        }
+    }
+
+    public void Run(Application app, Window? mainWindow)
     {
         ArgumentNullException.ThrowIfNull(app);
-        ArgumentNullException.ThrowIfNull(mainWindow);
 
         _app = app;
         var previousContext = SynchronizationContext.Current;
-        _dispatcher = new MacOSDispatcher();
-
-        // Ensure dispatcher wake can break the event wait.
-        _dispatcher.SetWake(() =>
+        try
         {
-            // Only interrupt the OS wait when the loop is actually parked. A UI-thread post while the loop
-            // is active is picked up by the pre-park recheck below, so no wake event is needed (and posting
-            // one would linger in the event queue and cause a spurious extra wakeup).
-            if (Volatile.Read(ref _parked) != 0)
+            _dispatcher = new MacOSDispatcher();
+
+            // Ensure dispatcher wake can break the event wait.
+            _dispatcher.SetWake(() =>
             {
-                MacOSInterop.PostWakeEvent();
+                // Only interrupt the OS wait when the loop is actually parked. A UI-thread post while the loop
+                // is active is picked up by the pre-park recheck below, so no wake event is needed (and posting
+                // one would linger in the event queue and cause a spurious extra wakeup).
+                if (Volatile.Read(ref _parked) != 0)
+                {
+                    MacOSInterop.PostWakeEvent();
+                }
+            });
+
+            MacOSInterop.EnsureApplicationInitialized();
+            _lastSystemTheme = GetSystemThemeVariant();
+            if (app.ThemeMode == ThemeVariant.System)
+            {
+                MacOSInterop.TrySetThemeChangedCallback(OnSystemThemeChanged);
             }
-        });
+            else
+            {
+                MacOSInterop.TrySetThemeChangedCallback(null);
+            }
 
-        MacOSInterop.EnsureApplicationInitialized();
-        _lastSystemTheme = GetSystemThemeVariant();
-        if (app.ThemeMode == ThemeVariant.System)
-        {
-            MacOSInterop.TrySetThemeChangedCallback(OnSystemThemeChanged);
+            _running = true;
+            app.Dispatcher = _dispatcher;
+            // Install the dispatcher as the SynchronizationContext so await continuations return to the UI thread.
+            SynchronizationContext.SetSynchronizationContext(_dispatcher);
+
+            // Note: Window backend will create NSWindow on Show().
+            app.OnHostLoopStarting(mainWindow);
+
+            // Basic manual event loop (NSApplication without calling [NSApp run]).
+            PumpLoop(null);
         }
-        else
+        finally
         {
+            app.Dispatcher = null;
+            _dispatcher = null;
+            _app = null;
             MacOSInterop.TrySetThemeChangedCallback(null);
+            SynchronizationContext.SetSynchronizationContext(previousContext);
         }
-
-        _running = true;
-        app.Dispatcher = _dispatcher;
-        // Install the dispatcher as the SynchronizationContext so await continuations return to the UI thread.
-        SynchronizationContext.SetSynchronizationContext(_dispatcher);
-
-        // Note: Window backend will create NSWindow on Show().
-        mainWindow.Show();
-
-        // Basic manual event loop (NSApplication without calling [NSApp run]).
-        PumpLoop(null);
-
-        app.Dispatcher = null;
-        _app = null;
-        MacOSInterop.TrySetThemeChangedCallback(null);
-        SynchronizationContext.SetSynchronizationContext(previousContext);
     }
 
     /// <summary>
@@ -331,7 +394,7 @@ public sealed class MacOSPlatformHost : IPlatformHost
             {
                 try
                 {
-                    RenderAllWindows();
+                    RenderContinuousWindows(scheduler);
                 }
                 catch (Exception ex)
                 {
@@ -625,7 +688,8 @@ public sealed class MacOSPlatformHost : IPlatformHost
 
                 _windows.TryGetValue(windowKey, out var backend);
                 var topModalBackend = GetTopModalBackend();
-                if (topModalBackend != null && IsMouseEvent(type) && backend != topModalBackend)
+                if (topModalBackend != null && IsMouseEvent(type) &&
+                    (backend == null || !backend.Window.IsInModalScope(topModalBackend.Window)))
                 {
                     topModalBackend.Activate();
                     continue;
@@ -731,7 +795,8 @@ public sealed class MacOSPlatformHost : IPlatformHost
 
             _windows.TryGetValue(windowKey, out var backend);
             var topModalBackend = GetTopModalBackend();
-            if (topModalBackend != null && IsMouseEvent(type) && backend != topModalBackend)
+            if (topModalBackend != null && IsMouseEvent(type) &&
+                (backend == null || !backend.Window.IsInModalScope(topModalBackend.Window)))
             {
                 topModalBackend.Activate();
                 continue;
@@ -825,7 +890,8 @@ public sealed class MacOSPlatformHost : IPlatformHost
 
         _windows.TryGetValue(windowKey, out var backend);
         var topModalBackend = GetTopModalBackend();
-        if (topModalBackend != null && IsMouseEvent(type) && backend != topModalBackend)
+        if (topModalBackend != null && IsMouseEvent(type) &&
+            (backend == null || !backend.Window.IsInModalScope(topModalBackend.Window)))
         {
             topModalBackend.Activate();
             return;

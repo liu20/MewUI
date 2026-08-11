@@ -15,6 +15,9 @@ public abstract class MewProperty
     /// <summary>Gets the CLR type of the property value.</summary>
     public abstract Type ValueType { get; }
 
+    /// <summary>Gets the type that registered this property.</summary>
+    internal Type OwnerType { get; }
+
     /// <summary>Gets the metadata options.</summary>
     public abstract MewPropertyOptions Options { get; }
 
@@ -77,8 +80,10 @@ public abstract class MewProperty
     /// <summary>Whether value changes should queue visual-state reconciliation.</summary>
     public bool AffectsVisualState => (Options & MewPropertyOptions.AffectsVisualState) != 0;
 
-    internal MewProperty()
+    internal MewProperty(Type ownerType)
     {
+        OwnerType = ownerType;
+
         lock (_lock)
         {
             Id = _registry.Count;
@@ -175,7 +180,8 @@ public sealed class MewProperty<T> : MewProperty
         return GetDefaultForType(ownerType)!;
     }
 
-    private MewProperty(string name, T defaultValue, MewPropertyOptions options)
+    private MewProperty(Type ownerType, string name, T defaultValue, MewPropertyOptions options)
+        : base(ownerType)
     {
         Name = name;
         DefaultValue = defaultValue;
@@ -203,7 +209,7 @@ public sealed class MewProperty<T> : MewProperty
         Func<TOwner, T, T>? coerce = null,
         Action<TOwner, T>? validate = null)
     {
-        var property = new MewProperty<T>(name, defaultValue, options);
+        var property = new MewProperty<T>(typeof(TOwner), name, defaultValue, options);
 
         if (changed is not null)
         {

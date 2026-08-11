@@ -33,6 +33,12 @@ public abstract class FrameworkElement : UIElement, IDisposable
 
     private void InvalidateDescendantStyles()
     {
+        if (FindVisualRoot() is Window window)
+        {
+            window.RefreshStyles(this, animate: true);
+            return;
+        }
+
         // Includes self: a control hosting its own StyleSheet may resolve its
         // StyleName from it (FindNamedStyle walks from the control itself).
         VisualTree.Visit(this, element =>
@@ -260,6 +266,12 @@ public abstract class FrameworkElement : UIElement, IDisposable
 
         OnThemeChanged(oldTheme, newTheme);
         InvokeThemeCallbacks(newTheme);
+
+        // Theme-resolver setters in active element triggers resolve against the new theme.
+        if (!ReferenceEquals(oldTheme, newTheme))
+        {
+            EvaluateElementTriggers();
+        }
 
         // Theme changes should cause a repaint even if no other input/layout happens.
         // This is especially important on platforms where theme notifications are not tied to OS paint messages.

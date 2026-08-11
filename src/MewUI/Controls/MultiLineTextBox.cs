@@ -1,1565 +1,1188 @@
+﻿using Aprillz.MewUI.Input;
+using Aprillz.MewUI.Platform;
 using Aprillz.MewUI.Rendering;
-using Aprillz.MewUI.Controls.Text;
+using Aprillz.MewUI.Text;
+using Aprillz.MewUI.Text.Editing;
+using System.Globalization;
 
 namespace Aprillz.MewUI.Controls;
 
 /// <summary>
-/// A multi-line text input control with thin scrollbars.
+/// Multi-line editor built on the extensible text view engine.
+/// It does not use the legacy Controls.Text formatter, view, or measurement caches.
 /// </summary>
-public sealed class MultiLineTextBox : TextBase
-    , IVisualTreeHost
+public sealed class MultiLineTextBox : TextBase, IVisualTreeHost, ITextViewHost
 {
     public static readonly MewProperty<string> TextProperty =
         MewProperty<string>.Register<MultiLineTextBox>(nameof(Text), string.Empty,
             MewPropertyOptions.BindsTwoWayByDefault,
-            static (self, _, newVal) => self.ApplyExternalTextPropertyChange(newVal));
+            static (self, _, value) => self.ApplyExternalTextCore(value));
 
-    private const int WrapSegmentHardLimit = 4096;
-    private const int WrapLineCountHardLimit = 4096;
-    private const int ExtentWidthLineCountHardLimit = 4096;
+    public static readonly MewProperty<bool> WrapProperty =
+        MewProperty<bool>.Register<MultiLineTextBox>(nameof(Wrap), true,
+            MewPropertyOptions.AffectsLayout | MewPropertyOptions.AffectsRender,
+            static (self, _, value) => self.OnWrapChanged(value));
 
-    private readonly List<int> _lineStarts = [0];
-    private readonly MultiLineTextView _textView;
-    private readonly TextWrapVirtualizer _wrapVirtualizer;
-    private readonly TextLineWidthEstimator _lineWidthEstimator;
-    private readonly ScrollBar _vBar;
-    private readonly ScrollBar _hBar;
+    public static readonly MewProperty<int> TabSizeProperty =
+        MewProperty<int>.Register<MultiLineTextBox>(nameof(TabSize), 4,
+            MewPropertyOptions.AffectsLayout | MewPropertyOptions.AffectsRender,
+            static (self, _, _) => self.ResetView());
 
-    private double _lineHeight;
-    private double _arrangedWrapWidth = -1;
+    // Guard against an offset that oscillates instead of settling. Measured convergence is 2-3
+    // passes and does not grow with the document, since each pass measures the lines it lands on.
+    private const int SCROLL_SETTLE_PASSES = 8;
+    private const int ANCHOR_PIN_PASSES = 4;
 
-    private int _pendingViewAnchorIndex = -1;
-    private double _pendingViewAnchorYOffset;
-    private double _pendingViewAnchorXOffset;
+    // Keeps the caret fully visible at the end of the longest line, whose width is the whole extent.
+    private const double CARET_SLACK = 2;
+    private const double DRAG_EDGE_DIP = 8;
 
-    private int _wrapNavigationDocumentVersion = -1;
-    private int _wrapNavigationCaretPosition = -1;
-    private int _wrapNavigationLine = -1;
-    private double _wrapNavigationWidth;
-    private double _wrapNavigationX;
+    private readonly ScrollBar _verticalScrollBar;
+    private readonly ScrollBar _horizontalScrollBar;
+    private TextViewLayout? _view;
+    private IGraphicsFactory? _viewFactory;
+    private Rect _contentBounds;
+    private double _verticalOffset;
+    private double _horizontalOffset;
+    // Vertical scrolling is anchored to a document position: estimated line heights move as lines
+    // materialize, and a pixel offset over them would let the content drift under a stationary
+    // viewport. The pixel offset is re-derived from the anchor every time the viewport is applied;
+    // pixel-space operations (wheel, scroll bar, caret tracking) re-capture the anchor at their
+    // target. The delta is the anchor row's distance above the viewport top.
+    private int _scrollAnchorOffset;
+    private double _scrollAnchorDelta;
+    // A scroll moved the pixel offset; the row it lands on is read in the next layout pass.
+    private bool _scrollAnchorStale;
+    private readonly TextViewLayerStack _layers;
+    private IGraphicsContext? _graphics;
+    private double _preferredCaretX = double.NaN;
+    private bool _dragSelecting;
+    // True while UpdateScrollBarRanges mirrors the offsets into the bars.
+    private bool _syncingScrollBars;
 
+    static MultiLineTextBox()
+    {
+        FocusableProperty.OverrideDefaultValue<MultiLineTextBox>(true);
+    }
 
     public MultiLineTextBox()
+        : this(new EditableTextDocument())
     {
-        AcceptReturn = true;   
-
-        _textView = new MultiLineTextView(
-            () => DocumentVersion,
-            () => _lineStarts.Count,
-            GetTextSubstringCore,
-            () => FontFamily,
-            () => FontSize,
-            () => FontWeight,
-            GetDpi);
-
-        _wrapVirtualizer = new TextWrapVirtualizer(
-            GetLineSpan,
-            _textView.GetLineText,
-            () => DocumentVersion,
-            () => _lineStarts.Count,
-            GetTextLengthCore,
-            WrapSegmentHardLimit);
-
-        _lineWidthEstimator = new TextLineWidthEstimator(
-            GetLineSpan,
-            Document.CopyTo,
-            () => _lineStarts.Count,
-            GetTextLengthCore);
-
-        _vBar = new ScrollBar { Orientation = Orientation.Vertical, IsVisible = false };
-        _hBar = new ScrollBar { Orientation = Orientation.Horizontal, IsVisible = false };
-        _vBar.Parent = this;
-        _hBar.Parent = this;
-
-        _vBar.ValueChanged += v => SetVerticalOffset(v);
-        _hBar.ValueChanged += v => SetHorizontalOffset(v);
     }
 
-    /// <summary>
-    /// Gets or sets the text content.
-    /// </summary>
+    public MultiLineTextBox(EditableTextDocument document)
+        : base(document)
+    {
+        Extensions = new TextViewExtensionPipeline();
+        _layers = new TextViewLayerStack(CreateBuiltInLayer);
+        _document.Changed += OnDocumentChanged;
+        _editor.StateChanged += OnEditorStateChanged;
+
+        _verticalScrollBar = new ScrollBar { Orientation = Orientation.Vertical, IsVisible = false };
+        _horizontalScrollBar = new ScrollBar { Orientation = Orientation.Horizontal, IsVisible = false };
+        _verticalScrollBar.Parent = this;
+        _horizontalScrollBar.Parent = this;
+        _verticalScrollBar.ValueChanged += value =>
+        {
+            if (!_syncingScrollBars) SetVerticalOffset(value);
+        };
+        _horizontalScrollBar.ValueChanged += value =>
+        {
+            if (!_syncingScrollBars) SetHorizontalOffset(value);
+        };
+    }
+
     public string Text
     {
-        get => GetTextCore();
-        set => SetMirroredTextProperty(TextProperty, value);
+        get => GetTextSnapshot();
+        set => SetValue(TextProperty, value ?? string.Empty);
     }
 
-    /// <summary>
-    /// Enables hard-wrapping at the available width. When enabled, horizontal scrolling is disabled.
-    /// </summary>
+    private protected override MewProperty<string>? TextSyncProperty => TextProperty;
+
+    public string SelectedText => GetSelectedDocumentText();
+
+    private protected override string? GetClipboardCopyText() => SelectedText;
+
     public bool Wrap
     {
-        get => WrapEnabled;
-        set
-        {
-            if (WrapEnabled == value)
-            {
-                return;
-            }
-
-            if (value && _lineStarts.Count > WrapLineCountHardLimit)
-            {
-                // Cannot re-enable for very large documents.
-                NotifyWrapChanged(false);
-                return;
-            }
-
-            SetWrapEnabled(value);
-        }
+        get => GetValue(WrapProperty);
+        set => SetValue(WrapProperty, value);
     }
 
-    protected override bool SupportsWrap => true;
+    /// <summary>Tab width in space characters.</summary>
+    public int TabSize
+    {
+        get => GetValue(TabSizeProperty);
+        set => SetValue(TabSizeProperty, value);
+    }
 
-    protected override TextAlignment PlaceholderVerticalAlignment => TextAlignment.Top;
+    public double HorizontalOffset => _horizontalOffset;
+    public double VerticalOffset => _verticalOffset;
+    /// <summary>Backing document. Assigning a new one keeps the view and extension registrations while caret, selection, scroll, and undo history reset.</summary>
+    public EditableTextDocument Document
+    {
+        get => _document;
+        set => ReplaceDocument(value);
+    }
+
+    IReadOnlyTextDocument ITextViewHost.Document => _document;
+    public TextViewExtensionPipeline Extensions { get; }
+
+    /// <summary>Raised after the document content changed or the document was replaced.</summary>
+    public event Action<ITextViewHost>? DocumentChanged;
+    public IReadOnlyList<TextLineLayout> VisibleTextLines
+        => _view?.MaterializedLines ?? Array.Empty<TextLineLayout>();
+    public Rect TextViewportBounds => _contentBounds;
+
+    internal int MaterializedLineCount => _view?.MaterializedLines.Count ?? 0;
+    internal int MaterializedCharacterCount
+        => _view?.MaterializedLines.Sum(static line => line.LogicalLine.Length) ?? 0;
+    internal int MaterializedVisualLineCount
+        => _view?.MaterializedLines.Sum(static line => line.VisualLines.Count) ?? 0;
+    internal bool IsVerticalScrollBarVisible => _verticalScrollBar.IsVisible;
+    internal (double Value, double Maximum) VerticalScrollBarRange
+        => (_verticalScrollBar.Value, _verticalScrollBar.Maximum);
+    internal bool IsHorizontalScrollBarVisible => _horizontalScrollBar.IsVisible;
+
+    public event Action? EditingStateChanged;
+    public event Action<bool>? WrapChanged;
+
+    /// <summary>Re-runs registered classifiers, generators, projections, and layers.</summary>
+    public void InvalidateTextView()
+    {
+        // Rebuild instead of reset: extensions re-run against unchanged text, so the reader
+        // must stay where they were reading. Only document or metric changes reset scrolling.
+        Extensions.Revision++;
+        RebuildView();
+    }
 
     public override Rect GetCharRectInWindow(int charIndex)
     {
-        var contentBounds = GetViewportContentBounds();
-        using var measure = BeginTextMeasurement();
-        var font = measure.Font;
-
-        int idx = Math.Clamp(charIndex, 0, Document.Length);
-        GetLineFromIndex(idx, out int line, out int lineStart, out int lineEnd);
-        double lineHeight = GetLineHeight();
-
-        double charY;
-        double charX;
-
-        if (!WrapEnabled)
+        EnsureView();
+        if (_view is null)
         {
-            charY = line * lineHeight - VerticalOffset;
-            if (idx <= lineStart)
-                charX = 0;
-            else
-            {
-                var cache = _textView.EnsureLineMeasureCache(line, lineStart, lineEnd, measure.Context, font);
-                charX = MultiLineTextView.GetPrefixWidthCached(cache, idx - lineStart, measure.Context, font) - HorizontalOffset;
-            }
+            return Rect.Empty;
         }
-        else
-        {
-            double wrapWidth = Math.Max(1, contentBounds.Width);
-            GetLineSpan(line, out _, out int wrapLineEnd);
-
-            var lineMeasure = _textView.EnsureLineMeasureCache(line, lineStart, wrapLineEnd, measure.Context, font);
-            string fullLine = lineMeasure.Text;
-            var layout = _wrapVirtualizer.GetWrapLayout(line, fullLine, wrapWidth, measure.Context, font);
-            int col = Math.Clamp(idx - lineStart, 0, fullLine.Length);
-            int row = TextWrapVirtualizer.GetWrapRowFromColumn(layout, col);
-            int lineStartRow = _wrapVirtualizer.GetVisualRowStartForLine(line, wrapWidth, measure.Context, font);
-            charY = (lineStartRow + row) * lineHeight - VerticalOffset;
-
-            int segStart = layout.SegmentStarts[row];
-            charX = MultiLineTextView.GetPrefixWidthCached(lineMeasure, col, measure.Context, font) -
-                     MultiLineTextView.GetPrefixWidthCached(lineMeasure, segStart, measure.Context, font);
-        }
-
-        return new Rect(contentBounds.X + charX, contentBounds.Y + charY, 1, lineHeight);
-    }
-
-    bool IVisualTreeHost.VisitChildren(Func<Element, bool> visitor)
-        => visitor(_vBar) && visitor(_hBar);
-
-    protected override void NotifyTextChanged()
-    {
-        SyncTextPropertyFromDocument(TextProperty);
-        base.NotifyTextChanged();
-    }
-
-    protected override Rect GetInteractionContentBounds()
-        => GetViewportContentBounds();
-
-    protected override Rect AdjustViewportBoundsForScrollbars(Rect innerBounds, Theme theme)
-    {
-        // Overlay scrollbars: viewport does not reserve space for bars.
-        return innerBounds;
-    }
-
-    protected override void SetCaretFromPoint(Point point, Rect contentBounds) => SetCaretFromPointCore(point, contentBounds);
-
-    protected override void AutoScrollForSelectionDrag(Point point, Rect contentBounds)
-    {
-        const double edgeDip = 10;
-        if (point.Y < contentBounds.Y + edgeDip)
-        {
-            SetVerticalOffset(VerticalOffset + point.Y - (contentBounds.Y + edgeDip), false);
-        }
-        else if (point.Y > contentBounds.Bottom - edgeDip)
-        {
-            SetVerticalOffset(VerticalOffset + point.Y - (contentBounds.Bottom - edgeDip), false);
-        }
-
-        if (point.X < contentBounds.X + edgeDip)
-        {
-            SetHorizontalOffset(HorizontalOffset + point.X - (contentBounds.X + edgeDip), false);
-        }
-        else if (point.X > contentBounds.Right - edgeDip)
-        {
-            SetHorizontalOffset(HorizontalOffset + point.X - (contentBounds.Right - edgeDip), false);
-        }
-
-        ClampOffsets(contentBounds);
-    }
-
-    protected override void EnsureCaretVisibleCore(Rect contentBounds) => EnsureCaretVisible(contentBounds);
-
-    protected override void OnWrapChanged(bool oldValue, bool newValue)
-    {
-        ResetWrapNavigationX();
-
-        if (FindVisualRoot() != null)
-        {
-            CaptureViewAnchor();
-        }
-
-        _wrapVirtualizer.Reset();
-        _lineWidthEstimator.Reset();
-        SetHorizontalOffset(0);
-        InvalidateMeasure();
-        InvalidateVisual();
-    }
-
-    protected override void OnTextChanged(string oldText, string newText)
-    {
-        base.OnTextChanged(oldText, newText);
-        InvalidateMeasure();
-    }
-
-    protected override void SetTextCore(string normalizedText)
-    {
-        _textView.Reset();
-        _wrapVirtualizer.Reset();
-        _lineWidthEstimator.Reset();
-        base.SetTextCore(normalizedText);
-        RebuildLineStartsFromDocument();
-        EnforceWrapLineLimit();
-    }
-
-    protected override void ApplyInsertForEdit(int index, string text) => ApplyInsert(index, text);
-
-    protected override void ApplyRemoveForEdit(int index, int length) => ApplyRemove(index, length);
-
-    protected override void OnEditCommitted()
-    {
-        EnforceWrapLineLimit();
-        InvalidateMeasure();
-        InvalidateVisual();
-        NotifyTextChanged();
+        var caret = _view.GetCaretBounds(Math.Clamp(charIndex, 0, _document.TextLength));
+        return new Rect(
+            GetTextOriginX() + caret.X,
+            _contentBounds.Y + caret.Y - _verticalOffset,
+            caret.Width,
+            caret.Height);
     }
 
     protected override Size MeasureContent(Size availableSize)
     {
-        var borderInset = GetBorderVisualInset();
-
-        using var measure = BeginTextMeasurement();
-        // Include descenders so line height is sufficient for characters like q/y/g.
-        var metrics = measure.Context.MeasureText("Mgqy", measure.Font);
-        _lineHeight = Math.Max(Math.Max(16, FontSize * 1.4), metrics.Height);
-
-        // Measure actual content width from document lines (capped at 2048 to avoid
-        // pathological sizes). This allows FitContent windows to expand horizontally.
-        // Measure content width from document lines. Capped at 2048px.
-        // Skip expensive measurement for large documents (same threshold as wrap/extent limits).
-        double textWidth = 16;
-        int docLines = Document.LineCount;
-        if (docLines > 0 && Document.Length > 0 && docLines <= ExtentWidthLineCountHardLimit)
-        {
-            const int maxBuf = 512;
-            Span<char> lineBuf = stackalloc char[maxBuf];
-            int sampleLines = Math.Min(docLines, 64);
-            for (int i = 0; i < sampleLines; i++)
-            {
-                int lineLen = Document.GetLineLength(i);
-                if (lineLen <= 0) continue;
-
-                if (lineLen > maxBuf)
-                {
-                    textWidth = 2048;
-                }
-                else
-                {
-                    var lineSpan = Document.GetLineSpan(i, lineBuf);
-                    textWidth = Math.Max(textWidth, measure.Context.MeasureText(lineSpan, measure.Font).Width);
-                }
-
-                if (textWidth >= 2048) break;
-            }
-        }
-        textWidth = Math.Min(textWidth, 2048);
-
-        double chromeW = Padding.HorizontalThickness + borderInset * 2;
-        double chromeH = Padding.VerticalThickness + borderInset * 2;
-
-        double desiredW = textWidth + chromeW + 4;
-
-        // Use wrap-aware line count (_lineStarts) when available, otherwise document raw lines.
-        // _lineStarts reflects the previous arrange pass; FitContent layout loops allow convergence.
-        int lineCount = Math.Max(3, Math.Max(Document.LineCount, _lineStarts.Count));
-        double contentH = _lineHeight * lineCount;
-        double desiredH = Math.Min(contentH, 2048) + chromeH + 4;
-
-        // When a finite size is available (e.g. inside a TabControl, Grid, or WrapPanel),
-        // don't request more than available - the internal scroll handles overflow.
-        if (!double.IsPositiveInfinity(availableSize.Width) && desiredW > availableSize.Width)
-        {
-            desiredW = availableSize.Width;
-        }
-
-        if (!double.IsPositiveInfinity(availableSize.Height) && desiredH > availableSize.Height)
-        {
-            desiredH = availableSize.Height;
-        }
-
-        return new Size(desiredW, desiredH);
+        double lineHeight = Math.Max(16, FontSize * 1.4);
+        double width = double.IsPositiveInfinity(availableSize.Width) ? 240 : availableSize.Width;
+        double height = double.IsPositiveInfinity(availableSize.Height)
+            ? Math.Min(400, Math.Max(3, _document.LineCount) * lineHeight + Padding.VerticalThickness)
+            : availableSize.Height;
+        return new Size(Math.Max(40, width), Math.Max(lineHeight, height));
     }
 
     protected override void ArrangeContent(Rect bounds)
     {
         base.ArrangeContent(bounds);
-
-        var snapped = GetSnappedBorderBounds(Bounds);
-        var borderInset = GetBorderVisualInset();
-        var innerBounds = snapped.Deflate(new Thickness(borderInset));
-        var dpiScale = GetDpi() / 96.0;
-
-        const double inset = 0;
-        double t = Theme.Metrics.ScrollBarHitThickness;
-
-        using var measure = BeginTextMeasurement();
-
-        // Overlay scrollbars: viewport does not shrink when bars appear/disappear.
-        // Viewport/clip rect should not shrink due to edge rounding; snap outward.
-        var finalViewportContent = LayoutRounding.SnapViewportRectToPixels(innerBounds.Deflate(Padding), dpiScale);
-        double finalViewportH = Math.Max(0, finalViewportContent.Height);
-        double finalViewportW = Math.Max(0, finalViewportContent.Width);
-
-        // Warm the wrap cache for the lines about to be visible so the extent below reflects
-        // this frame's viewport instead of whatever happened to be cached from a previous one.
-        // This settles the extent here instead of discovering drift after OnRender and re-arranging.
-        if (WrapEnabled)
-        {
-            WarmWrapCacheForViewport(measure.Context, measure.Font, finalViewportW, finalViewportH);
-        }
-
-        double finalExtentH = GetExtentHeight(Math.Max(1, finalViewportW), bypassCache: true);
-        double finalExtentW = WrapEnabled ? 0 : GetExtentWidthForViewport(measure.Context, measure.Font, finalViewportH);
-        _arrangedWrapWidth = finalViewportW;
-
-        bool needV = finalExtentH > finalViewportH + 0.5;
-        bool needH = !WrapEnabled && finalExtentW > finalViewportW + 0.5;
-
-        _vBar.IsVisible = needV;
-        _hBar.IsVisible = needH;
-
-        SetVerticalOffset(ClampOffset(VerticalOffset, finalExtentH, finalViewportH, dpiScale), false);
-        SetHorizontalOffset(needH ? ClampOffset(HorizontalOffset, finalExtentW, finalViewportW, dpiScale) : 0, false);
-
-        if (needV)
-        {
-            _vBar.Minimum = 0;
-            _vBar.Maximum = Math.Max(0, finalExtentH - finalViewportH);
-            _vBar.ViewportSize = finalViewportH;
-            _vBar.SmallChange = Theme.Metrics.ScrollBarSmallChange;
-            _vBar.LargeChange = Theme.Metrics.ScrollBarLargeChange;
-            _vBar.Value = VerticalOffset;
-            _vBar.Arrange(new Rect(
-                innerBounds.Right - t - inset,
-                innerBounds.Y + inset,
-                t,
-                Math.Max(0, innerBounds.Height - (needH ? t : 0) - inset * 2)));
-        }
-        else
-        {
-            // Ensure stale bounds from a previous visible pass do not affect nested layout/hit-testing.
-            _vBar.Value = 0;
-            _vBar.Arrange(Rect.Empty);
-        }
-
-        if (needH)
-        {
-            _hBar.Minimum = 0;
-            _hBar.Maximum = Math.Max(0, finalExtentW - finalViewportW);
-            _hBar.ViewportSize = finalViewportW;
-            _hBar.SmallChange = Theme.Metrics.ScrollBarSmallChange;
-            _hBar.LargeChange = Theme.Metrics.ScrollBarLargeChange;
-            _hBar.Value = HorizontalOffset;
-            _hBar.Arrange(new Rect(
-                innerBounds.X + inset,
-                innerBounds.Bottom - t - inset,
-                Math.Max(0, innerBounds.Width - (needV ? t : 0) - inset * 2),
-                t));
-        }
-        else
-        {
-            _hBar.Value = 0;
-            _hBar.Arrange(Rect.Empty);
-        }
-
-        ApplyViewAnchorIfPending();
+        _contentBounds = GetEditorContentBounds();
+        UpdateViewport();
+        ArrangeScrollBars();
     }
 
-    protected override void RenderTextContent(IGraphicsContext context, Rect contentBounds, IFont font, Theme theme, in VisualState state)
+    protected override void OnRender(IGraphicsContext context)
     {
-        RenderText(context, contentBounds, font, theme);
+        var bounds = GetSnappedBorderBounds(Bounds);
+        DrawBackgroundAndBorder(context, bounds, Background, BorderBrush, BorderThickness, CornerRadius);
+        _contentBounds = GetEditorContentBounds();
 
-        // The wrap extent is settled in ArrangeContent (wrap cache warmed for the arranged viewport there),
-        // so steady-state render does not need to recompute or invalidate. Fallback only for the rare case
-        // where the rendered width disagrees with what arrange assumed (e.g. a bounds change without a
-        // matching arrange pass in between), in which case one re-arrange resettles it.
-        if (WrapEnabled && Math.Abs(contentBounds.Width - _arrangedWrapWidth) > 0.5)
+        context.Save();
+        try
         {
-            InvalidateArrange();
+            context.SetClip(LayoutRounding.MakeClipRect(_contentBounds, GetDpi() / 96.0));
+            if (_document.TextLength == 0 && !string.IsNullOrEmpty(Placeholder) && !IsFocused)
+            {
+                DrawPlaceholder(context);
+            }
+            else
+            {
+                DrawDocument(context);
+            }
+        }
+        finally
+        {
+            context.Restore();
         }
     }
 
-    protected override void RenderAfterContent(IGraphicsContext context, Theme theme, in VisualState state)
+    protected override void RenderSubtree(IGraphicsContext context)
     {
-        if (_vBar.IsVisible)
+        if (_verticalScrollBar.IsVisible)
         {
-            _vBar.Render(context);
+            _verticalScrollBar.Render(context);
         }
-
-        if (_hBar.IsVisible)
+        if (_horizontalScrollBar.IsVisible)
         {
-            _hBar.Render(context);
+            _horizontalScrollBar.Render(context);
         }
     }
 
-    protected override UIElement? HitTestOverride(Point point)
+    protected override UIElement? OnHitTest(Point point)
     {
-        if (!IsEffectivelyEnabled)
+        if (!IsVisible || !IsHitTestVisible || !IsEffectivelyEnabled)
         {
             return null;
         }
-
-        if (_vBar.IsVisible && _vBar.Bounds.Contains(point))
+        if (_verticalScrollBar.IsVisible && _verticalScrollBar.Bounds.Contains(point))
         {
-            return _vBar;
+            return _verticalScrollBar;
+        }
+        if (_horizontalScrollBar.IsVisible && _horizontalScrollBar.Bounds.Contains(point))
+        {
+            return _horizontalScrollBar;
+        }
+        return Bounds.Contains(point) ? this : null;
+    }
+
+    private void DrawDocument(IGraphicsContext context)
+    {
+        if (_view is null)
+        {
+            return;
+        }
+        // A layer inserted below an anchor paints under that anchor's content, and the four
+        // built-ins are entries like any other, so the order alone decides the result.
+        _graphics = context;
+        _layers.Draw(context.Text, _contentBounds);
+    }
+
+    private ITextViewLayer CreateBuiltInLayer(TextViewLayerAnchor anchor) => anchor switch
+    {
+        TextViewLayerAnchor.Background => new BuiltInLayer(this, DrawLineBackgrounds),
+        TextViewLayerAnchor.Selection => new BuiltInLayer(this, DrawSelection),
+        TextViewLayerAnchor.Text => new BuiltInLayer(this, DrawGlyphs),
+        _ => new BuiltInLayer(this, DrawCaret)
+    };
+
+    private void DrawLineBackgrounds(ITextRenderContext text)
+    {
+        foreach (var line in _view!.MaterializedLines)
+        {
+            var options = new TextDrawOptions(Foreground, CreateCompositionSpans(line), Owner: line);
+            line.DrawBackground(text, GetLineOrigin(line), in options);
+        }
+    }
+
+    private void DrawSelection(ITextRenderContext text)
+    {
+        var selection = _editor.Selection;
+        foreach (var line in _view!.MaterializedLines)
+        {
+            var spans = CreateSelectionSpans(line, selection);
+            if (spans.Length == 0)
+            {
+                continue;
+            }
+            var options = new TextDrawOptions(Foreground, spans, Owner: line);
+            line.DrawBackground(text, GetLineOrigin(line), in options);
+        }
+    }
+
+    private void DrawGlyphs(ITextRenderContext text)
+    {
+        var selection = _editor.Selection;
+        foreach (var line in _view!.MaterializedLines)
+        {
+            var options = new TextDrawOptions(Foreground, CreateGlyphSpans(line, selection), Owner: line);
+            line.DrawForeground(text, GetLineOrigin(line), in options);
+        }
+        DrawCompositionUnderlines(_graphics!, _contentBounds.Right);
+    }
+
+    /// <summary>
+    /// Composition spans plus the selection recolor. Recoloring re-segments the runs on every drag
+    /// frame, so it happens only where <see cref="TextBase.SelectionForeground"/> asks for it.
+    /// </summary>
+    private TextPaintSpan[] CreateGlyphSpans(TextLineLayout line, TextRange selection)
+    {
+        var composition = CreateCompositionSpans(line);
+        if (SelectionForeground is not Color foreground ||
+            !TextSelectionPresentation.TryCreateSpan(
+                line, selection, foreground, default, out var span))
+        {
+            return composition;
+        }
+        var spans = new TextPaintSpan[composition.Length + 1];
+        spans[0] = span with { Background = null };
+        composition.CopyTo(spans, 1);
+        return spans;
+    }
+
+    /// <inheritdoc/>
+    private protected override void InvalidateCaret() => InvalidateLayer(TextViewLayerAnchor.Caret);
+
+    private void DrawCaret(ITextRenderContext text)
+    {
+        if (!IsFocused || !CaretVisible)
+        {
+            return;
+        }
+        var caret = GetCharRectInWindow(_editor.CaretPosition);
+        _graphics!.FillRectangle(
+            new Rect(caret.X, caret.Y, 1, Math.Max(1, caret.Height)), Theme.Palette.WindowText);
+    }
+
+    /// <summary>
+    /// One of the host's own drawing passes as a layer entry. It draws nothing before the view
+    /// exists, which is the same guard the single draw method used to carry.
+    /// </summary>
+    private sealed class BuiltInLayer(MultiLineTextBox owner, Action<ITextRenderContext> draw) : ITextViewLayer
+    {
+        public void Draw(ITextRenderContext context, Rect viewportBounds)
+        {
+            if (owner._view is not null)
+            {
+                draw(context);
+            }
+        }
+    }
+
+    private Point GetLineOrigin(TextLineLayout line)
+    {
+        double documentY = line.VisualLines.Count == 0 ? 0 : line.VisualLines[0].Bounds.Y;
+        return new Point(
+            GetTextOriginX(),
+            _contentBounds.Y + documentY - _verticalOffset);
+    }
+
+    /// <summary>
+    /// Left edge the text is drawn from, on a whole device pixel. The engine lays a line out on the
+    /// pixel grid and every backend draws a run at a whole pixel, so an origin between pixels lets
+    /// each run round on its own and the glyphs shift whenever an inline object splits a line. The
+    /// scroll offset itself keeps its exact value: caret tracking over virtualized lines converges
+    /// on it, and quantizing it there strands the caret outside the viewport.
+    /// </summary>
+    private double GetTextOriginX()
+        => LayoutRounding.RoundToPixel(_contentBounds.X - _horizontalOffset, GetDpi() / 96.0);
+
+    private TextPaintSpan[] CreateSelectionSpans(TextLineLayout line, TextRange selection)
+    {
+        if (!TextSelectionPresentation.TryCreateSpan(
+                line,
+                selection,
+                Theme.Palette.SelectionText,
+                Theme.Palette.SelectionBackground,
+                out var selectionSpan))
+        {
+            return [];
         }
 
-        if (_hBar.IsVisible && _hBar.Bounds.Contains(point))
+        // This pass paints the background; the recolor belongs to the glyph pass, which is the
+        // only one that reads a span foreground.
+        return [selectionSpan with { Foreground = null }];
+    }
+
+    private TextPaintSpan[] CreateCompositionSpans(TextLineLayout line)
+    {
+        var spans = new List<TextPaintSpan>(1);
+        int lineStart = line.LogicalLine.Offset;
+        int lineEnd = lineStart + line.LogicalLine.Length;
+        if (_editor.IsComposing)
         {
-            return _hBar;
+            int compositionEnd = _compositionStart + _compositionLength;
+            int start = Math.Max(_compositionStart, lineStart);
+            int end = Math.Min(compositionEnd, lineEnd);
+            if (end > start)
+            {
+                spans.Add(new TextPaintSpan(
+                    new TextRange(start - lineStart, end - start),
+                    Decoration: TextDecoration.Underline));
+            }
+        }
+        return spans.ToArray();
+    }
+
+    private void DrawPlaceholder(IGraphicsContext context)
+    {
+        var request = CreateTextRequest(Placeholder, TextWrapping.NoWrap, _contentBounds.Width);
+        var layout = GetGraphicsFactory().TextEngine.GetOrCreateLayout(request, TextLayoutCachePolicy.Owner, this);
+        var options = new TextDrawOptions(Theme.Palette.PlaceholderText, Owner: this);
+        context.Text.Draw(layout, _contentBounds.Position, in options);
+    }
+
+    private void EnsureView()
+    {
+        var factory = GetGraphicsFactory();
+        if (_view is not null && ReferenceEquals(_viewFactory, factory))
+        {
+            return;
+        }
+        _view?.Dispose();
+        _viewFactory = factory;
+        _view = new TextViewLayout(
+            factory.TextEngine,
+            _document,
+            new TextRunStyle(FontFamily, FontSize, FontWeight),
+            new TextParagraphStyle
+            {
+                Wrapping = Wrap ? TextWrapping.Wrap : TextWrapping.NoWrap,
+                TabSize = TabSize,
+                Culture = System.Globalization.CultureInfo.CurrentUICulture
+            },
+            Extensions,
+            dpi: GetDpi());
+        _view.LineConstructionStarting += (_, firstLine) => LineConstructionStarting?.Invoke(this, firstLine);
+        _view.LinesChanged += _ => LinesChanged?.Invoke(this);
+    }
+
+    /// <inheritdoc/>
+    public event Action<ITextViewHost, int>? LineConstructionStarting;
+
+    /// <inheritdoc/>
+    public event Action<ITextViewHost>? LinesChanged;
+
+    /// <inheritdoc/>
+    public void InvalidateTextRange(int offset, int length)
+    {
+        EnsureView();
+        _view?.InvalidateRange(offset, length);
+        InvalidateVisual();
+    }
+
+    /// <inheritdoc/>
+    public double ExtentHeight
+    {
+        get
+        {
+            EnsureView();
+            return _view?.ExtentHeight ?? 0;
+        }
+    }
+
+    /// <inheritdoc/>
+    public double ExtentWidth
+    {
+        get
+        {
+            EnsureView();
+            return _view?.ExtentWidth ?? 0;
+        }
+    }
+
+    /// <inheritdoc/>
+    public TextLineLayout? GetLineLayout(int documentOffset)
+    {
+        EnsureView();
+        return _view?.GetLineLayout(documentOffset);
+    }
+
+    /// <inheritdoc/>
+    public double DefaultLineHeight
+    {
+        get
+        {
+            EnsureView();
+            return _view?.DefaultLineHeight ?? 0;
+        }
+    }
+
+    /// <inheritdoc/>
+    public double DefaultBaseline
+    {
+        get
+        {
+            EnsureView();
+            return _view?.DefaultBaseline ?? 0;
+        }
+    }
+
+    /// <inheritdoc/>
+    public int FindLineByY(double documentY)
+    {
+        EnsureView();
+        return _view?.FindLineByY(documentY) ?? 0;
+    }
+
+    /// <inheritdoc/>
+    public double GetLineY(int lineNumber)
+    {
+        EnsureView();
+        return _view?.GetLineY(lineNumber) ?? 0;
+    }
+
+    private void UpdateViewport()
+    {
+        EnsureView();
+        if (_view is null || _contentBounds.Width <= 0 || _contentBounds.Height <= 0)
+        {
+            return;
+        }
+        // A scroll moved the pixel offset without standing any lines up; the row it landed on is
+        // read here, before the anchor below resolves the offset back from it.
+        if (_scrollAnchorStale)
+        {
+            _scrollAnchorStale = false;
+            CaptureAnchor();
+        }
+        // Pin the anchor: materializing the viewport may replace estimated heights above it with
+        // measured ones, which moves the anchor's document Y; the derived offset follows until the
+        // anchor row no longer moves. The viewport is applied before the anchor is read so slice
+        // virtualization sees real dimensions; when the offset settles the applied viewport is
+        // already the derived one.
+        for (int pass = 0; pass < ANCHOR_PIN_PASSES; pass++)
+        {
+            _view.SetViewport(new TextViewport(
+                _contentBounds.Width,
+                _contentBounds.Height,
+                _horizontalOffset,
+                _verticalOffset));
+            bool settled = ApplyDerivedVerticalOffset(GetAnchorDocumentY() + _scrollAnchorDelta);
+            SetHorizontalOffset(_horizontalOffset, false);
+            if (settled)
+            {
+                break;
+            }
+        }
+        UpdateScrollBarRanges();
+    }
+
+    /// <summary>
+    /// Document Y of the anchor's visual row, in the same coordinate system the renderer draws
+    /// with. Without wrapping this is a pure metrics-tree read; a caret query would re-cut a
+    /// virtualized line's slice and fight the horizontal axis over it.
+    /// </summary>
+    private double GetAnchorDocumentY()
+    {
+        if (_view is null)
+        {
+            return 0;
+        }
+        if (!Wrap)
+        {
+            int lineNumber = _document.LineCount == 0
+                ? 0
+                : _document.GetLineByOffset(Math.Clamp(_scrollAnchorOffset, 0, _document.TextLength)).LineNumber;
+            return _view.GetLineY(lineNumber);
+        }
+        return _view.GetCaretBounds(_scrollAnchorOffset).Y;
+    }
+
+    /// <summary>
+    /// Applies the pixel offset derived from the anchor. Returns true when it did not move, i.e.
+    /// the anchor is pinned. Never re-captures the anchor.
+    /// </summary>
+    private bool ApplyDerivedVerticalOffset(double value)
+    {
+        double extent = _view?.ExtentHeight ?? 0;
+        // Near the document end both the anchor Y and the extent carry the same estimated heights
+        // above the viewport, so this clamp compares measured quantities and cannot drift content.
+        double maximum = Math.Max(0, extent - _contentBounds.Height);
+        value = Math.Clamp(double.IsFinite(value) ? value : 0, 0, maximum);
+        if (Math.Abs(_verticalOffset - value) < 0.001)
+        {
+            return true;
+        }
+        _verticalOffset = value;
+        UpdateScrollBarRanges();
+        ScrollOffsetChanged?.Invoke(this);
+        return false;
+    }
+
+    /// <summary>
+    /// Re-anchors to the row at the top of the viewport, materializing at the current pixel offset
+    /// first. The one place estimates decide content, which is why only pixel-space jumps call it.
+    /// </summary>
+    private void CaptureAnchor()
+    {
+        if (_view is null || _contentBounds.Width <= 0 || _contentBounds.Height <= 0)
+        {
+            _scrollAnchorOffset = 0;
+            _scrollAnchorDelta = _verticalOffset;
+            return;
+        }
+        _view.SetViewport(new TextViewport(
+            _contentBounds.Width,
+            _contentBounds.Height,
+            _horizontalOffset,
+            _verticalOffset));
+        var hit = _view.HitTest(new Point(0, 0));
+        _scrollAnchorOffset = hit.DocumentOffset;
+        _scrollAnchorDelta = _verticalOffset - _view.GetCaretBounds(hit.DocumentOffset).Y;
+    }
+
+    private void ArrangeScrollBars()
+    {
+        if (_view is null)
+        {
+            return;
+        }
+        double thickness = Theme.Metrics.ScrollBarHitThickness;
+        double extentHeight = _view.ExtentHeight;
+        double extentWidth = _view.ExtentWidth;
+        bool vertical = extentHeight > _contentBounds.Height + 0.5;
+        bool horizontal = !Wrap && extentWidth > _contentBounds.Width + 0.5;
+        _verticalScrollBar.IsVisible = vertical;
+        _horizontalScrollBar.IsVisible = horizontal;
+
+        UpdateScrollBarRanges();
+        if (vertical)
+        {
+            _verticalScrollBar.Arrange(new Rect(Bounds.Right - thickness, Bounds.Y, thickness, Bounds.Height));
+        }
+        else
+        {
+            _verticalScrollBar.Arrange(Rect.Empty);
+        }
+        if (horizontal)
+        {
+            _horizontalScrollBar.Arrange(new Rect(Bounds.X, Bounds.Bottom - thickness, Bounds.Width, thickness));
+        }
+        else
+        {
+            _horizontalScrollBar.Arrange(Rect.Empty);
+        }
+    }
+
+    /// <summary>
+    /// Aligns the scroll bars with the current extent. Separate from arranging them because
+    /// materializing lines replaces estimated heights with measured ones between arranges, and a
+    /// thumb ranged against the estimate sits away from where the viewport actually is.
+    /// </summary>
+    private void UpdateScrollBarRanges()
+    {
+        if (_view is null)
+        {
+            return;
+        }
+        // Shrinking Maximum below the bar's standing Value coerces it and fires ValueChanged,
+        // which would re-enter SetVertical/HorizontalOffset and clobber a freshly set offset.
+        // The bars only mirror state here; the offsets are already authoritative.
+        _syncingScrollBars = true;
+        try
+        {
+            if (_verticalScrollBar.IsVisible)
+            {
+                _verticalScrollBar.Minimum = 0;
+                _verticalScrollBar.Maximum = Math.Max(0, _view.ExtentHeight - _contentBounds.Height);
+                _verticalScrollBar.ViewportSize = _contentBounds.Height;
+                _verticalScrollBar.Value = _verticalOffset;
+            }
+            if (_horizontalScrollBar.IsVisible)
+            {
+                _horizontalScrollBar.Minimum = 0;
+                _horizontalScrollBar.Maximum = Math.Max(0, _view.ExtentWidth - _contentBounds.Width + CARET_SLACK);
+                _horizontalScrollBar.ViewportSize = _contentBounds.Width;
+                _horizontalScrollBar.Value = _horizontalOffset;
+            }
+        }
+        finally
+        {
+            _syncingScrollBars = false;
+        }
+    }
+
+    private TextLayoutRequest CreateTextRequest(string text, TextWrapping wrapping, double width)
+        => new()
+        {
+            Text = text.AsMemory(),
+            Dpi = GetDpi(),
+            DefaultStyle = new TextRunStyle(FontFamily, FontSize, FontWeight),
+            Paragraph = new TextParagraphStyle
+            {
+                MaxWidth = width,
+                Wrapping = wrapping,
+                TabSize = TabSize,
+                Culture = System.Globalization.CultureInfo.CurrentUICulture
+            }
+        };
+
+    private Rect GetEditorContentBounds()
+    {
+        var snapped = GetSnappedBorderBounds(Bounds);
+        double border = GetBorderVisualInset();
+        return LayoutRounding.SnapViewportRectToPixels(
+            snapped.Deflate(new Thickness(border)).Deflate(Padding),
+            GetDpi() / 96.0);
+    }
+
+    private void OnDocumentChanged(TextChange change)
+    {
+        _view?.Invalidate(change);
+        DocumentChanged?.Invoke(this);
+    }
+
+    private void OnEditorStateChanged()
+    {
+        _preferredCaretX = double.NaN;
+        EditingStateChanged?.Invoke();
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (e.Handled)
+        {
+            return;
+        }
+        if (e.PrimaryKey && HandlePrimaryKey(e))
+        {
+            e.Handled = true;
+            EnsureCaretVisible();
+            return;
         }
 
-        return null;
+        switch (e.Key)
+        {
+            case Key.Left:
+                _editor.MoveLogical(LogicalDirection.Backward, e.ShiftKey, e.ControlKey);
+                break;
+            case Key.Right:
+                _editor.MoveLogical(LogicalDirection.Forward, e.ShiftKey, e.ControlKey);
+                break;
+            case Key.Up:
+                MoveCaretVertical(-1, e.ShiftKey);
+                break;
+            case Key.Down:
+                MoveCaretVertical(1, e.ShiftKey);
+                break;
+            // Ctrl is left alone: it is the tab-switching chord, and a focused editor must not
+            // swallow it on the way to the tab control.
+            case Key.PageUp when !e.ControlKey:
+                MoveCaretPage(-1, e.ShiftKey);
+                break;
+            case Key.PageDown when !e.ControlKey:
+                MoveCaretPage(1, e.ShiftKey);
+                break;
+            case Key.Home:
+                MoveToLineEdge(true, e.ShiftKey);
+                break;
+            case Key.End:
+                MoveToLineEdge(false, e.ShiftKey);
+                break;
+            case Key.Backspace when !IsReadOnly:
+                _editor.Backspace(e.ControlKey);
+                break;
+            case Key.Delete when !IsReadOnly:
+                _editor.Delete(e.ControlKey);
+                break;
+            case Key.Enter when !IsReadOnly:
+                InsertText("\n");
+                _suppressNewLineInput = true;
+                break;
+            case Key.Tab when !IsReadOnly && AcceptTab:
+                InsertText("\t");
+                _suppressTabInput = true;
+                break;
+            default:
+                return;
+        }
+        e.Handled = true;
+        EnsureCaretVisible();
+    }
+
+    private void MoveToLineEdge(bool start, bool extend)
+    {
+        var line = _document.GetLineByOffset(_editor.CaretPosition);
+        _editor.SetCaret(start ? line.Offset : line.Offset + line.Length, extend);
+    }
+
+    private void MoveCaretVertical(int direction, bool extend)
+    {
+        EnsureView();
+        if (_view is null)
+        {
+            return;
+        }
+        var caret = _view.GetCaretBounds(_editor.CaretPosition);
+        if (double.IsNaN(_preferredCaretX))
+        {
+            _preferredCaretX = caret.X;
+        }
+        double preferredCaretX = _preferredCaretX;
+        int sourceLine = _document.GetLineByOffset(_editor.CaretPosition).LineNumber;
+        var hit = _view.HitTest(new Point(
+            preferredCaretX - _horizontalOffset,
+            caret.Y - _verticalOffset + caret.Height / 2 + direction * Math.Max(1, caret.Height)));
+        int target = hit.DocumentOffset;
+        double targetVisualY = caret.Y + direction * Math.Max(1, caret.Height);
+        if (target > 0 && _view.GetCaretBounds(target).Y > targetVisualY + 0.5)
+        {
+            // A soft-wrap boundary has one document offset but two visual affinities.
+            // The editor stores offsets only, so choose the preceding grapheme when a
+            // hit at the end of the target row resolves to the following visual row.
+            target = _editor.GetPreviousCaretPosition(target);
+        }
+        _editor.SetCaret(target, extend);
+        if (hit.LineNumber == sourceLine)
+        {
+            _preferredCaretX = preferredCaretX;
+        }
+    }
+
+    /// <summary>Moves the caret one viewport, clamped to the document, and follows it with the view.</summary>
+    private void MoveCaretPage(int direction, bool extend)
+    {
+        EnsureView();
+        if (_view is null || _contentBounds.Height <= 0)
+        {
+            return;
+        }
+        var caret = _view.GetCaretBounds(_editor.CaretPosition);
+        if (double.IsNaN(_preferredCaretX))
+        {
+            _preferredCaretX = caret.X;
+        }
+        double preferredCaretX = _preferredCaretX;
+        double caretScreenY = caret.Y - _verticalOffset;
+        double targetY = caret.Y + direction * _contentBounds.Height;
+        if (targetY < 0)
+        {
+            // The caret leads the scroll: a page that overshoots the document still lands on its
+            // first line, even though the view itself has nowhere left to go.
+            SetVerticalOffset(0, false);
+            _editor.SetCaret(0, extend);
+        }
+        else if (targetY >= _view.ExtentHeight)
+        {
+            _editor.SetCaret(_document.TextLength, extend);
+        }
+        else
+        {
+            SetVerticalOffset(targetY - caretScreenY, false);
+            UpdateViewport();
+            var hit = _view.HitTest(new Point(
+                preferredCaretX - _horizontalOffset,
+                targetY - _verticalOffset + caret.Height / 2));
+            _editor.SetCaret(hit.DocumentOffset, extend);
+            // A viewport is rarely a whole number of rows, so anchor the scroll to the row the page
+            // landed on. Otherwise the caret creeps down the screen by the remainder each press.
+            SetVerticalOffset(_view.GetCaretBounds(hit.DocumentOffset).Y - caretScreenY, false);
+        }
+        UpdateViewport();
+        _preferredCaretX = preferredCaretX;
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (e.Handled || e.Button != MouseButton.Left || !IsEffectivelyEnabled)
+        {
+            return;
+        }
+        Focus();
+        SetCaretFromPoint(e.Position, e.ShiftKey);
+        _dragSelecting = true;
+        if (FindVisualRoot() is Window window)
+        {
+            window.CaptureMouse(this);
+        }
+        e.Handled = true;
+    }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        base.OnMouseDoubleClick(e);
+        if (e.Handled || e.Button != MouseButton.Left || !IsEffectivelyEnabled) return;
+        SetCaretFromPoint(e.Position, false);
+        _editor.SelectWordAt(_editor.CaretPosition);
+        EnsureCaretVisible();
+        e.Handled = true;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        if (!_dragSelecting || !IsMouseCaptured || !e.LeftButton)
+        {
+            return;
+        }
+        AutoScroll(e.Position);
+        SetCaretFromPoint(e.Position, true);
+        e.Handled = true;
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        if (e.Button == MouseButton.Left)
+        {
+            _dragSelecting = false;
+            if (FindVisualRoot() is Window window)
+            {
+                window.ReleaseMouseCapture();
+            }
+        }
     }
 
     protected override void OnMouseWheel(MouseWheelEventArgs e)
     {
         base.OnMouseWheel(e);
-
-        if (e.Handled)
+        if (!e.Handled && e.Delta.Y != 0)
         {
-            return;
-        }
-
-        var viewportBounds = GetViewportContentBounds();
-        var dpiScale = GetDpi() / 96.0;
-        bool handled = false;
-
-        if (_vBar.IsVisible && e.Delta.Y != 0)
-        {
-            double scrollDip = e.Delta.Y * Theme.Metrics.ScrollWheelStep;
-            if (Math.Abs(scrollDip) >= 0.5)
-            {
-                SetVerticalOffset(ClampOffset(VerticalOffset - scrollDip, GetExtentHeight(viewportBounds.Width), viewportBounds.Height, dpiScale), false);
-                _vBar.Value = VerticalOffset;
-                handled = true;
-            }
-        }
-
-        if (_hBar.IsVisible && e.Delta.X != 0)
-        {
-            double scrollDip = e.Delta.X * Theme.Metrics.ScrollWheelStep;
-            if (Math.Abs(scrollDip) >= 0.5)
-            {
-                // _hBar.Maximum is set in ArrangeContent to (extentW - viewportW), so it already
-                // encodes the legal horizontal range without re-running the wrap-aware extent math.
-                double newOffset = Math.Clamp(HorizontalOffset - scrollDip, 0, _hBar.Maximum);
-                SetHorizontalOffset(newOffset, false);
-                _hBar.Value = HorizontalOffset;
-                handled = true;
-            }
-        }
-
-        if (handled)
-        {
-            InvalidateVisual();
+            SetVerticalOffset(_verticalOffset - e.Delta.Y * Theme.Metrics.ScrollWheelStep);
             e.Handled = true;
         }
     }
 
-    protected override void MoveCaretToLineEdge(bool start, bool extendSelection)
-        => MoveToLineEdge(start, extendSelection);
-
-    protected override void OnKeyDown(KeyEventArgs e)
+    private void SetCaretFromPoint(Point point, bool extend)
     {
-        if (e.Key is not Key.Up and not Key.Down)
+        EnsureView();
+        if (_view is null)
         {
-            ResetWrapNavigationX();
+            return;
         }
-
-        base.OnKeyDown(e);
+        var hit = _view.HitTest(new Point(point.X - _contentBounds.X, point.Y - _contentBounds.Y));
+        _editor.SetCaret(hit.DocumentOffset, extend);
+        EnsureCaretVisible();
     }
 
-    // Key handling is centralized in TextBase.
-    protected override void MoveCaretVerticalKey(int deltaLines, bool extendSelection)
-        => MoveCaretVertical(deltaLines, extendSelection);
+    private void AutoScroll(Point point)
+    {
+        if (point.Y < _contentBounds.Y)
+        {
+            SetVerticalOffset(_verticalOffset + point.Y - _contentBounds.Y);
+        }
+        else if (point.Y > _contentBounds.Bottom)
+        {
+            SetVerticalOffset(_verticalOffset + point.Y - _contentBounds.Bottom);
+        }
+        if (Wrap)
+        {
+            return;
+        }
+        if (point.X < _contentBounds.X + DRAG_EDGE_DIP)
+        {
+            SetHorizontalOffset(_horizontalOffset + point.X - (_contentBounds.X + DRAG_EDGE_DIP));
+        }
+        else if (point.X > _contentBounds.Right - DRAG_EDGE_DIP)
+        {
+            SetHorizontalOffset(_horizontalOffset + point.X - (_contentBounds.Right - DRAG_EDGE_DIP));
+        }
+    }
+
+    private protected override void EnsureCaretVisible()
+    {
+        if (_contentBounds.IsEmpty)
+        {
+            return;
+        }
+        EnsureView();
+        if (_view is null)
+        {
+            return;
+        }
+        // Scrolling materializes lines, which replaces estimated metrics with measured ones and so
+        // moves both the caret and the scroll limit. A single pass stops short of the document edge
+        // whenever the estimate was low, on either axis.
+        for (int pass = 0; pass < SCROLL_SETTLE_PASSES; pass++)
+        {
+            var caret = _view.GetCaretBounds(_editor.CaretPosition);
+            double vertical = _verticalOffset;
+            double horizontal = _horizontalOffset;
+            if (caret.Y < vertical) vertical = caret.Y;
+            else if (caret.Bottom > vertical + _contentBounds.Height) vertical = caret.Bottom - _contentBounds.Height;
+            if (!Wrap)
+            {
+                if (caret.X < horizontal) horizontal = caret.X;
+                else if (caret.Right > horizontal + _contentBounds.Width - CARET_SLACK)
+                {
+                    horizontal = caret.Right - _contentBounds.Width + CARET_SLACK;
+                }
+            }
+            double settledVertical = _verticalOffset;
+            double settledHorizontal = _horizontalOffset;
+            SetVerticalOffset(vertical, false);
+            SetHorizontalOffset(horizontal, false);
+            UpdateViewport();
+            if (Math.Abs(_verticalOffset - settledVertical) < 0.001 &&
+                Math.Abs(_horizontalOffset - settledHorizontal) < 0.001)
+            {
+                break;
+            }
+        }
+        InvalidateVisual();
+    }
+
+    /// <summary>
+    /// Replaces a document range the way a program does rather than a user: the caret rides along
+    /// with the surrounding text, and neither <see cref="TextBase.IsReadOnly"/> nor
+    /// <see cref="EditableRegions"/> is consulted. The change stays undoable.
+    /// </summary>
+    public void ReplaceRange(int start, int length, string? text)
+        => _editor.ReplaceRange(start, length, text);
+
+    /// <summary>
+    /// Replaces a document range the way a user types over it: the caret lands at the end of the
+    /// inserted text, undo returns to where the caret was, and <see cref="EditableRegions"/> is
+    /// honored. <see cref="ReplaceRange"/> is the programmatic counterpart.
+    /// </summary>
+    public void EnterText(int start, int length, string? text)
+        => _editor.EnterText(start, length, text);
+
+    /// <summary>Consulted before every edit. Null leaves the document fully editable.</summary>
+    public IEditableRegionProvider? EditableRegions
+    {
+        get => _editor.EditableRegions;
+        set => _editor.EditableRegions = value;
+    }
+
+    /// <summary>Raised after typed or composed text reached the document, once per commit.</summary>
+    public event Action<string>? TextCommitted
+    {
+        add => _editor.TextCommitted += value;
+        remove => _editor.TextCommitted -= value;
+    }
+
+    /// <inheritdoc/>
+    public TextViewLayerStack Layers => _layers;
+
+    /// <inheritdoc/>
+    public void InsertLayer(ITextViewLayer layer, TextViewLayerAnchor anchor, TextLayerPosition position)
+        => _layers.Insert(layer, anchor, position);
+
+    /// <inheritdoc/>
+    public void InvalidateLayer(TextViewLayerAnchor anchor) => InvalidateVisual();
+
+    /// <inheritdoc/>
+    public Point ScrollOffset => new(_horizontalOffset, _verticalOffset);
+
+    /// <inheritdoc/>
+    public event Action<ITextViewHost>? ScrollOffsetChanged;
+
+    /// <inheritdoc/>
+    public void MakeVisible(Rect documentRect)
+    {
+        if (_contentBounds.IsEmpty)
+        {
+            return;
+        }
+        EnsureView();
+        SetVerticalOffset(
+            TextViewScrolling.ResolveOffset(
+                _verticalOffset, _contentBounds.Height, documentRect.Y, documentRect.Height),
+            false);
+        if (!Wrap)
+        {
+            SetHorizontalOffset(
+                TextViewScrolling.ResolveOffset(
+                    _horizontalOffset, _contentBounds.Width, documentRect.X, documentRect.Width),
+                false);
+        }
+        UpdateViewport();
+        InvalidateVisual();
+    }
+
+    private void SetVerticalOffset(double value, bool invalidate = true)
+    {
+        // Against the extent the last layout measured. Arrange clamps again once the lines for the
+        // new offset are up, which is what settles a scroll into estimated territory.
+        double extent = _view?.ExtentHeight ?? 0;
+        double maximum = Math.Max(0, extent - _contentBounds.Height);
+        value = Math.Clamp(double.IsFinite(value) ? value : 0, 0, maximum);
+        if (Math.Abs(_verticalOffset - value) < 0.001) return;
+        _verticalOffset = value;
+        // Standing the lines up is the layout pass's, so the anchor is captured there too. A caller
+        // that scrolls and reads the viewport in the same breath asks for a layout first.
+        _scrollAnchorStale = true;
+        UpdateScrollBarRanges();
+        ScrollOffsetChanged?.Invoke(this);
+        if (invalidate) InvalidateArrange();
+    }
+
+    private void SetHorizontalOffset(double value, bool invalidate = true)
+    {
+        // The scroll bar's limit is only refreshed on arrange, and materializing a slice grows the
+        // extent mid-keystroke, so the limit has to come from the view itself.
+        double extent = _view?.ExtentWidth ?? 0;
+        double maximum = Math.Max(0, extent - _contentBounds.Width + CARET_SLACK);
+        value = Wrap ? 0 : Math.Clamp(double.IsFinite(value) ? value : 0, 0, maximum);
+        if (Math.Abs(_horizontalOffset - value) < 0.001) return;
+        _horizontalOffset = value;
+        UpdateScrollBarRanges();
+        ScrollOffsetChanged?.Invoke(this);
+        if (invalidate) InvalidateVisual();
+    }
+
+    private void ReplaceDocument(EditableTextDocument document)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        if (ReferenceEquals(document, _document))
+        {
+            return;
+        }
+        _document.Changed -= OnDocumentChanged;
+        _editor.StateChanged -= OnEditorStateChanged;
+        ReplaceDocumentCore(document);
+        _document.Changed += OnDocumentChanged;
+        _editor.StateChanged += OnEditorStateChanged;
+        _preferredCaretX = double.NaN;
+        _verticalOffset = 0;
+        _scrollAnchorOffset = 0;
+        _scrollAnchorDelta = 0;
+        ResetView();
+        InvalidateMeasure();
+        InvalidateVisual();
+        DocumentChanged?.Invoke(this);
+    }
+
+    private void ResetView()
+    {
+        _horizontalOffset = 0;
+        RebuildView();
+    }
+
+    private void RebuildView()
+    {
+        _view?.Dispose();
+        _view = null;
+        _viewFactory = null;
+        InvalidateMeasure();
+        InvalidateVisual();
+    }
+
+    private void OnWrapChanged(bool value)
+    {
+        ResetView();
+        WrapChanged?.Invoke(value);
+    }
+
+    protected override void OnMewPropertyChanged(MewProperty property)
+    {
+        if (property.Id == FontFamilyProperty.Id ||
+            property.Id == FontSizeProperty.Id ||
+            property.Id == FontWeightProperty.Id)
+        {
+            ResetView();
+        }
+        base.OnMewPropertyChanged(property);
+    }
+
+    protected override void OnDpiChanged(uint oldDpi, uint newDpi)
+    {
+        base.OnDpiChanged(oldDpi, newDpi);
+        ResetView();
+    }
+
+    protected override void OnThemeChanged(Theme oldTheme, Theme newTheme)
+    {
+        base.OnThemeChanged(oldTheme, newTheme);
+
+        // Classifier paint spans are cached per materialized line; theme-dependent
+        // classifiers must re-run against the new theme without losing scroll position.
+        Extensions.Revision++;
+        RebuildView();
+    }
 
     protected override void OnDispose()
     {
+        _view?.Dispose();
+        _document.Changed -= OnDocumentChanged;
+        _editor.StateChanged -= OnEditorStateChanged;
+        _verticalScrollBar.Dispose();
+        _horizontalScrollBar.Dispose();
         base.OnDispose();
-        _vBar.Dispose();
-        _hBar.Dispose();
     }
 
-    private static void DrawCaret(IGraphicsContext context, double x, double y, double lineHeight, Theme theme)
-    {
-        if (lineHeight <= 0)
-        {
-            return;
-        }
-
-        // Keep caret slightly inset to match single-line TextBox behavior and avoid a "top aligned" look.
-        if (lineHeight <= 4)
-        {
-            context.FillRectangle(new Rect(x, y, 1, Math.Max(1, lineHeight)), theme.Palette.WindowText);
-            return;
-        }
-
-        const double pad = 2;
-        double top = y + pad;
-        double bottom = y + lineHeight - pad;
-        if (bottom <= top)
-        {
-            top = y;
-            bottom = y + lineHeight;
-        }
-
-        context.DrawLine(new Point(x, top), new Point(x, bottom), theme.Palette.WindowText, 1, pixelSnap: true);
-    }
-
-    private bool CanComputeExtentWidth() => !WrapEnabled && _lineStarts.Count <= ExtentWidthLineCountHardLimit;
-    private void RenderText(IGraphicsContext context, Rect contentBounds, IFont font, Theme theme)
-    {
-        double lineHeight = GetLineHeight();
-        int lineCount = Math.Max(1, _lineStarts.Count);
-        var textColor = Foreground;
-
-        if (!WrapEnabled)
-        {
-            int caretLine = -1;
-            int caretLineStart = 0;
-            if (IsFocused && IsEffectivelyEnabled && CaretVisible)
-            {
-                GetLineFromIndex(CaretPosition, out caretLine, out caretLineStart, out _);
-            }
-
-            int firstLine = lineHeight <= 0 ? 0 : Math.Max(0, (int)Math.Floor(VerticalOffset / lineHeight));
-            double offsetInLine = lineHeight <= 0 ? 0 : VerticalOffset - firstLine * lineHeight;
-            double y = contentBounds.Y - offsetInLine;
-
-            int maxLines = lineHeight <= 0 ? lineCount : (int)Math.Ceiling((contentBounds.Height + offsetInLine) / lineHeight) + 1;
-            int lastExclusive = Math.Min(lineCount, firstLine + Math.Max(0, maxLines));
-
-            for (int line = firstLine; line < lastExclusive; line++)
-            {
-                GetLineSpan(line, out int start, out int end);
-                var cache = _textView.EnsureLineMeasureCache(line, start, end, context, font);
-                ReadOnlySpan<char> lineSpan = cache.Text.AsSpan();
-
-                double xFrom = Math.Max(0, HorizontalOffset);
-                double xTo = xFrom + Math.Max(0, contentBounds.Width);
-
-                int startCol = MultiLineTextView.GetCharIndexFromXCached(cache, xFrom, context, font);
-                int endCol = MultiLineTextView.GetCharIndexFromXCached(cache, xTo, context, font);
-                if (endCol < startCol)
-                {
-                    endCol = startCol;
-                }
-                endCol = Math.Min(lineSpan.Length, endCol + 2);
-
-                double prefixW = startCol <= 0 ? 0 : MultiLineTextView.GetPrefixWidthCached(cache, startCol, context, font);
-                double drawX = contentBounds.X - HorizontalOffset + prefixW;
-                ReadOnlySpan<char> visible = lineSpan[startCol..endCol];
-
-                var lineRect = new Rect(drawX, y, 1_000_000, lineHeight);
-                RenderSelectionForRow(context, font, theme, start, startCol, visible, y, drawX, IsSelectionActive);
-                context.DrawText(visible, lineRect, font, textColor, TextAlignment.Left, TextAlignment.Top, TextWrapping.NoWrap);
-
-                // Composition underline (attribute-based)
-                if (IsComposing && CompositionLength > 0)
-                {
-                    int compStart = CompositionStartIndex;
-                    int compEnd = compStart + CompositionLength;
-                    int cs = Math.Max(compStart - start, startCol);
-                    int ce = Math.Min(compEnd - start, endCol);
-                    if (cs < ce && cs >= 0)
-                    {
-                        double ulY = y + lineHeight;
-                        int attrOffset = (cs + start) - compStart;
-                        double baseX = contentBounds.X - HorizontalOffset;
-                        TextBoxView.DrawSegmentedCompositionUnderline(
-                            cache, context, font, ulY, textColor,
-                            CompositionAttributes, attrOffset, ce - cs,
-                            cs, baseX);
-                    }
-                }
-
-                if (line == caretLine)
-                {
-                    int caret = Math.Clamp(CaretPosition - caretLineStart, 0, lineSpan.Length);
-                    if (caret >= startCol && caret <= endCol)
-                    {
-                        double caretX = contentBounds.X - HorizontalOffset + MultiLineTextView.GetPrefixWidthCached(cache, caret, context, font);
-                        DrawCaret(context, caretX, y, lineHeight, theme);
-                    }
-                }
-
-                y += lineHeight;
-            }
-
-            return;
-        }
-
-        // Reuse the live render context/font passed in - it already implements IGraphicsContext
-        // measurement (MeasureText etc.), so a separate offscreen measurement context is unnecessary here.
-        double wrapWidth = Math.Max(1, contentBounds.Width);
-
-        int firstRow = lineHeight <= 0 ? 0 : Math.Max(0, (int)Math.Floor(VerticalOffset / lineHeight));
-        double offsetInRow = lineHeight <= 0 ? 0 : VerticalOffset - firstRow * lineHeight;
-        double yRow = contentBounds.Y - offsetInRow;
-
-        _wrapVirtualizer.MapVisualRowToLine(firstRow, wrapWidth, context, font, out int lineIndex, out int rowInLine);
-
-        double yWrap = yRow;
-        int maxRows = lineHeight <= 0 ? 1 : (int)Math.Ceiling((contentBounds.Height + offsetInRow) / lineHeight) + 1;
-        int rendered = 0;
-
-        (int start, int end) selection = default;
-        bool canDrawCaret = IsFocused && IsEffectivelyEnabled && CaretVisible;
-        bool canDrawSelection = HasSelection;
-        if (canDrawSelection)
-        {
-            selection = GetSelectionRange();
-        }
-
-        while (rendered < maxRows && lineIndex < lineCount)
-        {
-            GetLineSpan(lineIndex, out int lineStart, out int lineEnd);
-            string fullLine = _textView.GetLineText(lineIndex, lineStart, lineEnd);
-            var layout = _wrapVirtualizer.GetWrapLayout(lineIndex, fullLine, wrapWidth, context, font);
-
-            MultiLineTextView.CachedLineMeasure? lineMeasure = null;
-            if ((canDrawCaret && CaretPosition >= lineStart && CaretPosition <= lineEnd) ||
-                (canDrawSelection && selection.start < lineEnd && selection.end > lineStart))
-            {
-                lineMeasure = _textView.EnsureLineMeasureCache(lineIndex, lineStart, lineEnd, context, font);
-            }
-
-            for (int row = rowInLine; row < layout.SegmentStarts.Length && rendered < maxRows; row++)
-            {
-                int segStart = layout.SegmentStarts[row];
-                int segEnd = (row + 1 < layout.SegmentStarts.Length) ? layout.SegmentStarts[row + 1] : fullLine.Length;
-                ReadOnlySpan<char> rowText = segStart < segEnd ? fullLine.AsSpan(segStart, segEnd - segStart) : ReadOnlySpan<char>.Empty;
-
-                var rowRect = new Rect(contentBounds.X, yWrap, wrapWidth, lineHeight);
-                RenderSelectionForRow(context, font, theme, lineStart, segStart, rowText, yWrap, contentBounds.X, IsSelectionActive, lineMeasure);
-                context.DrawText(rowText, rowRect, font, textColor, TextAlignment.Left, TextAlignment.Top, TextWrapping.NoWrap);
-
-                // Composition underline (wrap mode, attribute-based)
-                if (IsComposing && CompositionLength > 0)
-                {
-                    int compStart = CompositionStartIndex;
-                    int compEnd = compStart + CompositionLength;
-                    int cs = Math.Max(compStart - lineStart, segStart);
-                    int ce = Math.Min(compEnd - lineStart, segEnd);
-                    if (cs < ce)
-                    {
-                        lineMeasure ??= _textView.EnsureLineMeasureCache(lineIndex, lineStart, lineEnd, context, font);
-                        double ulY = yWrap + lineHeight;
-                        int attrOffset = (cs + lineStart) - compStart;
-                        double segPrefixW = MultiLineTextView.GetPrefixWidthCached(lineMeasure, segStart, context, font);
-                        TextBoxView.DrawSegmentedCompositionUnderline(
-                            lineMeasure, context, font, ulY, textColor,
-                            CompositionAttributes, attrOffset, ce - cs,
-                            cs, contentBounds.X - segPrefixW);
-                    }
-                }
-
-                if (lineMeasure != null)
-                {
-                    DrawCaretForWrappedRow(context, contentBounds, font, theme, lineStart, segStart, segEnd, rowText, yWrap, lineMeasure);
-                }
-
-                yWrap += lineHeight;
-                rendered++;
-            }
-
-            lineIndex++;
-            rowInLine = 0;
-        }
-    }
-
-    private void SetCaretFromPointCore(Point p, Rect contentBounds)
-    {
-        ResetWrapNavigationX();
-
-        double lineHeight = GetLineHeight();
-        if (!WrapEnabled)
-        {
-            int line = lineHeight <= 0 ? 0 : (int)Math.Floor((p.Y - contentBounds.Y + VerticalOffset) / lineHeight);
-            line = Math.Clamp(line, 0, _lineStarts.Count - 1);
-
-            GetLineSpan(line, out int start, out int end);
-            double x = p.X - contentBounds.X + HorizontalOffset;
-
-            using var m = BeginTextMeasurement();
-            var cache = _textView.EnsureLineMeasureCache(line, start, end, m.Context, m.Font);
-            CaretPosition = start + MultiLineTextView.GetCharIndexFromXCached(cache, x, m.Context, m.Font);
-            return;
-        }
-
-        using var measure = BeginTextMeasurement();
-        double wrapWidth = Math.Max(1, contentBounds.Width);
-        int row = lineHeight <= 0 ? 0 : (int)Math.Floor((p.Y - contentBounds.Y + VerticalOffset) / lineHeight);
-        _wrapVirtualizer.MapVisualRowToLine(row, wrapWidth, measure.Context, measure.Font, out int lineIndex, out int rowInLine, out int lineStartRow);
-
-        GetLineSpan(lineIndex, out int lineStart, out int lineEnd);
-        var lineMeasure = _textView.EnsureLineMeasureCache(lineIndex, lineStart, lineEnd, measure.Context, measure.Font);
-        string fullLine = lineMeasure.Text;
-        var layout = _wrapVirtualizer.GetWrapLayout(lineIndex, fullLine, wrapWidth, measure.Context, measure.Font);
-        rowInLine = Math.Clamp(rowInLine, 0, layout.SegmentStarts.Length - 1);
-        int segStart = layout.SegmentStarts[rowInLine];
-        int segEnd = (rowInLine + 1 < layout.SegmentStarts.Length) ? layout.SegmentStarts[rowInLine + 1] : fullLine.Length;
-
-        double xInRow = p.X - contentBounds.X;
-        double baseX = MultiLineTextView.GetPrefixWidthCached(lineMeasure, segStart, measure.Context, measure.Font);
-        int colInLine = MultiLineTextView.GetCharIndexFromXCached(lineMeasure, baseX + xInRow, measure.Context, measure.Font);
-        colInLine = Math.Clamp(colInLine, segStart, segEnd);
-        CaretPosition = lineStart + colInLine;
-    }
-
-    private void MoveCaretHorizontal(int delta, bool extendSelection)
-    {
-        int newPos = Math.Clamp(CaretPosition + delta, 0, GetTextLengthCore());
-        SetCaretAndSelection(newPos, extendSelection);
-    }
-
-    private void MoveCaretVertical(int deltaLines, bool extendSelection)
-    {
-        if (deltaLines == 0)
-        {
-            return;
-        }
-
-        GetLineFromIndex(CaretPosition, out int line, out int lineStart, out int lineEnd);
-
-        if (WrapEnabled)
-        {
-            MoveCaretVerticalWrapped(
-                deltaLines < 0 ? -1 : 1,
-                extendSelection,
-                line,
-                lineStart,
-                lineEnd);
-            return;
-        }
-
-        int newLine = Math.Clamp(line + deltaLines, 0, _lineStarts.Count - 1);
-        if (newLine == line)
-        {
-            return;
-        }
-
-        using var measure = BeginTextMeasurement();
-        double x;
-        if (CaretPosition <= lineStart)
-        {
-            x = 0;
-        }
-        else
-        {
-            var cache = _textView.EnsureLineMeasureCache(line, lineStart, lineEnd, measure.Context, measure.Font);
-            x = MultiLineTextView.GetPrefixWidthCached(cache, CaretPosition - lineStart, measure.Context, measure.Font);
-        }
-
-        GetLineSpan(newLine, out int ns, out int ne);
-        var newCache = _textView.EnsureLineMeasureCache(newLine, ns, ne, measure.Context, measure.Font);
-        int newPos = ns + MultiLineTextView.GetCharIndexFromXCached(newCache, x, measure.Context, measure.Font);
-        SetCaretAndSelection(newPos, extendSelection);
-    }
-
-    private void MoveCaretVerticalWrapped(
-        int direction,
-        bool extendSelection,
-        int line,
-        int lineStart,
-        int lineEnd)
-    {
-        using var measure = BeginTextMeasurement();
-        double wrapWidth = Math.Max(1, GetViewportContentBounds().Width);
-        var lineMeasure = _textView.EnsureLineMeasureCache(line, lineStart, lineEnd, measure.Context, measure.Font);
-        var layout = _wrapVirtualizer.GetWrapLayout(line, lineMeasure.Text, wrapWidth, measure.Context, measure.Font);
-        int caretCol = Math.Clamp(CaretPosition - lineStart, 0, lineMeasure.Text.Length);
-        int currentRow = TextWrapVirtualizer.GetWrapRowFromColumn(layout, caretCol);
-
-        int targetLine = line;
-        int targetRow = currentRow + direction;
-        MultiLineTextView.CachedLineMeasure targetMeasure = lineMeasure;
-        var targetLayout = layout;
-        int targetLineStart = lineStart;
-
-        if (targetRow < 0)
-        {
-            if (line == 0)
-            {
-                return;
-            }
-
-            targetLine = line - 1;
-            GetLineSpan(targetLine, out targetLineStart, out int targetLineEnd);
-            targetMeasure = _textView.EnsureLineMeasureCache(
-                targetLine,
-                targetLineStart,
-                targetLineEnd,
-                measure.Context,
-                measure.Font);
-            targetLayout = _wrapVirtualizer.GetWrapLayout(
-                targetLine,
-                targetMeasure.Text,
-                wrapWidth,
-                measure.Context,
-                measure.Font);
-            targetRow = targetLayout.SegmentStarts.Length - 1;
-        }
-        else if (targetRow >= layout.SegmentStarts.Length)
-        {
-            if (line >= _lineStarts.Count - 1)
-            {
-                return;
-            }
-
-            targetLine = line + 1;
-            GetLineSpan(targetLine, out targetLineStart, out int targetLineEnd);
-            targetMeasure = _textView.EnsureLineMeasureCache(
-                targetLine,
-                targetLineStart,
-                targetLineEnd,
-                measure.Context,
-                measure.Font);
-            targetLayout = _wrapVirtualizer.GetWrapLayout(
-                targetLine,
-                targetMeasure.Text,
-                wrapWidth,
-                measure.Context,
-                measure.Font);
-            targetRow = 0;
-        }
-
-        bool stayInLogicalLine = targetLine == line;
-        bool continueNavigation =
-            stayInLogicalLine &&
-            _wrapNavigationDocumentVersion == DocumentVersion &&
-            _wrapNavigationCaretPosition == CaretPosition &&
-            _wrapNavigationLine == line &&
-            Math.Abs(_wrapNavigationWidth - wrapWidth) < 0.01;
-        int currentSegmentStart = layout.SegmentStarts[currentRow];
-        double targetX = continueNavigation
-            ? _wrapNavigationX
-            : MultiLineTextView.GetSpanWidthCached(
-                lineMeasure,
-                currentSegmentStart,
-                caretCol,
-                measure.Context,
-                measure.Font);
-
-        int targetSegmentStart = targetLayout.SegmentStarts[targetRow];
-        int targetSegmentEnd = targetRow + 1 < targetLayout.SegmentStarts.Length
-            ? targetLayout.SegmentStarts[targetRow + 1]
-            : targetMeasure.Text.Length;
-        double targetSegmentX = MultiLineTextView.GetPrefixWidthCached(
-            targetMeasure,
-            targetSegmentStart,
-            measure.Context,
-            measure.Font);
-        int targetCol = GetClosestColumnFromX(
-            targetMeasure,
-            targetSegmentX + targetX,
-            targetSegmentStart,
-            targetSegmentEnd,
-            measure.Context,
-            measure.Font);
-        if (targetRow + 1 < targetLayout.SegmentStarts.Length && targetCol == targetSegmentEnd)
-        {
-            // A soft-wrap boundary belongs to the following row in the current caret model.
-            // Keep vertical navigation on the requested row instead of visually skipping it.
-            targetCol = Math.Max(targetSegmentStart, targetSegmentEnd - 1);
-        }
-
-        int targetPosition = targetLineStart + targetCol;
-        SetCaretAndSelection(targetPosition, extendSelection);
-
-        if (stayInLogicalLine)
-        {
-            _wrapNavigationDocumentVersion = DocumentVersion;
-            _wrapNavigationCaretPosition = targetPosition;
-            _wrapNavigationLine = targetLine;
-            _wrapNavigationWidth = wrapWidth;
-            _wrapNavigationX = targetX;
-        }
-        else
-        {
-            ResetWrapNavigationX();
-        }
-    }
-
-    private static int GetClosestColumnFromX(
-        MultiLineTextView.CachedLineMeasure measure,
-        double x,
-        int segmentStart,
-        int segmentEnd,
-        IGraphicsContext context,
-        IFont font)
-    {
-        int column = MultiLineTextView.GetCharIndexFromXCached(measure, x, context, font);
-        column = Math.Clamp(column, segmentStart, segmentEnd);
-        if (column <= segmentStart)
-        {
-            return column;
-        }
-
-        double atColumn = MultiLineTextView.GetPrefixWidthCached(measure, column, context, font);
-        double beforeColumn = MultiLineTextView.GetPrefixWidthCached(measure, column - 1, context, font);
-        return Math.Abs(x - beforeColumn) < Math.Abs(atColumn - x) ? column - 1 : column;
-    }
-
-    private void ResetWrapNavigationX()
-    {
-        _wrapNavigationDocumentVersion = -1;
-        _wrapNavigationCaretPosition = -1;
-        _wrapNavigationLine = -1;
-        _wrapNavigationWidth = 0;
-        _wrapNavigationX = 0;
-    }
-
-    private void MoveToLineEdge(bool start, bool extendSelection)
-    {
-        GetLineFromIndex(CaretPosition, out _, out int lineStart, out int lineEnd);
-        int newPos = start ? lineStart : lineEnd;
-        SetCaretAndSelection(newPos, extendSelection);
-    }
-
-    private void EnsureCaretVisible(Rect contentBounds)
-    {
-        using var measure = BeginTextMeasurement();
-        var font = measure.Font;
-
-        GetLineFromIndex(CaretPosition, out int line, out int lineStart, out int lineEnd);
-        double lineHeight = GetLineHeight();
-
-        double caretY;
-        double caretX;
-
-        if (!WrapEnabled)
-        {
-            caretY = line * lineHeight;
-            if (CaretPosition <= lineStart)
-            {
-                caretX = 0;
-            }
-            else
-            {
-                var cache = _textView.EnsureLineMeasureCache(line, lineStart, lineEnd, measure.Context, font);
-                caretX = MultiLineTextView.GetPrefixWidthCached(cache, CaretPosition - lineStart, measure.Context, font);
-            }
-        }
-        else
-        {
-            double wrapWidth = Math.Max(1, contentBounds.Width);
-            GetLineSpan(line, out _, out int wrapLineEnd);
-            var lineMeasure = _textView.EnsureLineMeasureCache(line, lineStart, wrapLineEnd, measure.Context, font);
-            string fullLine = lineMeasure.Text;
-            var layout = _wrapVirtualizer.GetWrapLayout(line, fullLine, wrapWidth, measure.Context, font);
-            int caretCol = Math.Clamp(CaretPosition - lineStart, 0, fullLine.Length);
-            int caretRow = TextWrapVirtualizer.GetWrapRowFromColumn(layout, caretCol);
-            int lineStartRow = _wrapVirtualizer.GetVisualRowStartForLine(line, wrapWidth, measure.Context, font);
-            caretY = (lineStartRow + caretRow) * lineHeight;
-
-            int segStart = layout.SegmentStarts[caretRow];
-            caretX = MultiLineTextView.GetPrefixWidthCached(lineMeasure, caretCol, measure.Context, font) -
-                     MultiLineTextView.GetPrefixWidthCached(lineMeasure, segStart, measure.Context, font);
-        }
-
-        double viewportH = Math.Max(1, contentBounds.Height);
-        double viewportW = Math.Max(1, contentBounds.Width);
-        double extentH = GetExtentHeight(viewportW);
-        double extentW = (!_hBar.IsVisible || WrapEnabled) ? 0 : GetExtentWidthForViewport(measure.Context, font, viewportH);
-
-        if (caretY < VerticalOffset)
-        {
-            SetVerticalOffset(caretY, false);
-        }
-        else if (caretY + lineHeight > VerticalOffset + viewportH)
-        {
-            SetVerticalOffset(caretY + lineHeight - viewportH, false);
-        }
-
-        if (!WrapEnabled)
-        {
-            if (caretX < HorizontalOffset)
-            {
-                SetHorizontalOffset(caretX, false);
-            }
-            else if (caretX > HorizontalOffset + viewportW)
-            {
-                SetHorizontalOffset(caretX - viewportW, false);
-            }
-        }
-
-        var dpiScale = GetDpi() / 96.0;
-        SetVerticalOffset(ClampOffset(VerticalOffset, extentH, viewportH, dpiScale), false);
-        SetHorizontalOffset((_hBar.IsVisible && !WrapEnabled) ? ClampOffset(HorizontalOffset, extentW, viewportW, dpiScale) : 0, false);
-
-        if (_vBar.IsVisible)
-        {
-            _vBar.Value = VerticalOffset;
-        }
-
-        if (_hBar.IsVisible)
-        {
-            _hBar.Value = HorizontalOffset;
-        }
-    }
-
-    private void ClampOffsets(Rect contentBounds)
-    {
-        var dpiScale = GetDpi() / 96.0;
-        double wrapWidth = Math.Max(1, contentBounds.Width);
-        SetVerticalOffset(ClampOffset(VerticalOffset, GetExtentHeight(wrapWidth), Math.Max(1, contentBounds.Height), dpiScale), false);
-        if (!_hBar.IsVisible || WrapEnabled)
-        {
-            SetHorizontalOffset(0, false);
-        }
-        else
-        {
-            using var measure = BeginTextMeasurement();
-            double extentW = GetExtentWidthForViewport(measure.Context, measure.Font, Math.Max(1, contentBounds.Height));
-            SetHorizontalOffset(ClampOffset(HorizontalOffset, extentW, Math.Max(1, contentBounds.Width), dpiScale), false);
-        }
-        if (_vBar.IsVisible)
-        {
-            _vBar.Value = VerticalOffset;
-        }
-
-        if (_hBar.IsVisible)
-        {
-            _hBar.Value = HorizontalOffset;
-        }
-    }
-
-    private double GetExtentHeight(double wrapWidth, bool bypassCache = false)
-    {
-        if (!WrapEnabled)
-        {
-            return Math.Max(0, _lineStarts.Count * GetLineHeight());
-        }
-
-        return _wrapVirtualizer.GetExtentHeight(wrapWidth, GetLineHeight(), FontSize, bypassCache);
-    }
-
-    // Computes wrap layouts for the lines about to be visible, mirroring the row walk in RenderText
-    // (without drawing), so GetExtentHeight reflects the current viewport instead of whatever lines
-    // happened to be cached from a previous frame or scroll position.
-    private void WarmWrapCacheForViewport(IGraphicsContext context, IFont font, double viewportWidth, double viewportHeight)
-    {
-        double lineHeight = GetLineHeight();
-        if (lineHeight <= 0)
-        {
-            return;
-        }
-
-        double wrapWidth = Math.Max(1, viewportWidth);
-        int lineCount = Math.Max(1, _lineStarts.Count);
-
-        int firstRow = Math.Max(0, (int)Math.Floor(VerticalOffset / lineHeight));
-        _wrapVirtualizer.MapVisualRowToLine(firstRow, wrapWidth, context, font, out int lineIndex, out _);
-
-        int rowsNeeded = (int)Math.Ceiling(viewportHeight / lineHeight) + 1;
-        int rowsSeen = 0;
-
-        while (rowsSeen < rowsNeeded && lineIndex < lineCount)
-        {
-            GetLineSpan(lineIndex, out int lineStart, out int lineEnd);
-            string fullLine = _textView.GetLineText(lineIndex, lineStart, lineEnd);
-            var layout = _wrapVirtualizer.GetWrapLayout(lineIndex, fullLine, wrapWidth, context, font);
-            rowsSeen += Math.Max(1, layout.SegmentStarts.Length);
-            lineIndex++;
-        }
-    }
-
-    private double GetExtentWidth()
-    {
-        int version = DocumentVersion;
-        var fontKey = new TextLineWidthEstimator.FontKey(FontFamily, FontSize, FontWeight, GetDpi());
-        if (_lineWidthEstimator.TryGetCached(version, fontKey, out double cached))
-        {
-            return cached;
-        }
-
-        using var measure = BeginTextMeasurement();
-        return _lineWidthEstimator.Compute(measure.Context, measure.Font, version, fontKey);
-    }
-
-    private double GetExtentWidth(IGraphicsContext context, IFont font)
-    {
-        int version = DocumentVersion;
-        var fontKey = new TextLineWidthEstimator.FontKey(FontFamily, FontSize, FontWeight, GetDpi());
-        if (_lineWidthEstimator.TryGetCached(version, fontKey, out double cached))
-        {
-            return cached;
-        }
-
-        return _lineWidthEstimator.Compute(context, font, version, fontKey);
-    }
-
-    private double GetExtentWidthForViewport(IGraphicsContext context, IFont font, double viewportHeightDip)
-    {
-        if (WrapEnabled)
-        {
-            return 0;
-        }
-
-        int version = DocumentVersion;
-        var fontKey = new TextLineWidthEstimator.FontKey(FontFamily, FontSize, FontWeight, GetDpi());
-
-        if (CanComputeExtentWidth())
-        {
-            return GetExtentWidth(context, font);
-        }
-
-        // For very large documents, avoid scanning all lines. Instead, update an observed max using the visible line range.
-        double lineHeight = GetLineHeight();
-        int lineCount = Math.Max(0, _lineStarts.Count);
-        if (lineCount <= 0 || lineHeight <= 0)
-        {
-            return 0;
-        }
-
-        int firstLine = (int)Math.Floor(VerticalOffset / lineHeight);
-        firstLine = Math.Clamp(firstLine, 0, Math.Max(0, lineCount - 1));
-        int maxLines = (int)Math.Ceiling(Math.Max(0, viewportHeightDip) / lineHeight) + 2;
-        int lastExclusive = Math.Min(lineCount, firstLine + Math.Max(1, maxLines));
-
-        return _lineWidthEstimator.ComputeObservedMax(context, font, version, fontKey, firstLine, lastExclusive);
-    }
-
-    private double GetLineHeight() => _lineHeight > 0 ? _lineHeight : Math.Max(16, FontSize * 1.4);
-
-    private void RebuildLineStartsFromDocument()
-    {
-        _lineStarts.Clear();
-        _lineStarts.Add(0);
-
-        for (int i = 0; i < Document.Length; i++)
-        {
-            if (Document[i] == '\n')
-            {
-                _lineStarts.Add(i + 1);
-            }
-        }
-
-        if (_lineStarts.Count == 0)
-        {
-            _lineStarts.Add(0);
-        }
-    }
-
-    private void EnforceWrapLineLimit()
-    {
-        if (_lineStarts.Count <= WrapLineCountHardLimit)
-        {
-            return;
-        }
-
-        if (!WrapEnabled)
-        {
-            return;
-        }
-
-        SetWrapEnabled(false);
-    }
-
-    private void GetLineSpan(int line, out int start, out int end)
-    {
-        if (_lineStarts.Count == 0)
-        {
-            RebuildLineStartsFromDocument();
-        }
-
-        line = Math.Clamp(line, 0, _lineStarts.Count - 1);
-        start = _lineStarts[line];
-        end = line + 1 < _lineStarts.Count ? _lineStarts[line + 1] - 1 : Document.Length;
-        if (end < start)
-        {
-            end = start;
-        }
-
-        if (end > start && Document[end - 1] == '\r')
-        {
-            end--;
-        }
-    }
-
-    private void GetLineFromIndex(int index, out int line, out int lineStart, out int lineEnd)
-    {
-        if (_lineStarts.Count == 0)
-        {
-            RebuildLineStartsFromDocument();
-        }
-
-        index = Math.Clamp(index, 0, Document.Length);
-
-        int lo = 0;
-        int hi = _lineStarts.Count - 1;
-        while (lo <= hi)
-        {
-            int mid = (lo + hi) / 2;
-            int s = _lineStarts[mid];
-            if (s <= index)
-            {
-                lo = mid + 1;
-            }
-            else
-            {
-                hi = mid - 1;
-            }
-        }
-
-        line = Math.Clamp(lo - 1, 0, _lineStarts.Count - 1);
-        GetLineSpan(line, out lineStart, out lineEnd);
-    }
-
-    private void RenderSelectionForRow(
-        IGraphicsContext context,
-        IFont font,
-        Theme theme,
-        int lineStart,
-        int rowSegmentStart,
-        ReadOnlySpan<char> rowText,
-        double y,
-        double xBase,
-        bool isSelectionActive,
-        MultiLineTextView.CachedLineMeasure? fullLineMeasure = null)
-    {
-        if (!HasSelection || rowText.IsEmpty)
-        {
-            return;
-        }
-
-        var (selA, selB) = GetSelectionRange();
-
-        int rowStart = lineStart + rowSegmentStart;
-        int rowEnd = rowStart + rowText.Length;
-        int s = Math.Max(selA, rowStart);
-        int t = Math.Min(selB, rowEnd);
-        if (s >= t)
-        {
-            return;
-        }
-
-        int relS = s - rowStart;
-        int relT = t - rowStart;
-
-        double beforeW;
-        double selW;
-        if (fullLineMeasure != null)
-        {
-            int a = rowSegmentStart + relS;
-            int b = rowSegmentStart + relT;
-            beforeW = relS <= 0 ? 0 : MultiLineTextView.GetSpanWidthCached(fullLineMeasure, rowSegmentStart, a, context, font);
-            selW = MultiLineTextView.GetSpanWidthCached(fullLineMeasure, a, b, context, font);
-        }
-        else
-        {
-            beforeW = relS <= 0 ? 0 : context.MeasureText(rowText[..relS], font).Width;
-            selW = context.MeasureText(rowText[relS..relT], font).Width;
-        }
-
-        if (isSelectionActive)
-        {
-            context.FillRectangle(new Rect(xBase + beforeW, y, selW, GetLineHeight()), theme.Palette.SelectionBackground);
-        }
-    }
-
-    internal static bool IsCaretOwnedByWrappedRow(
-        int caretColumn,
-        int segmentStart,
-        int segmentEnd,
-        bool isLastRow)
-        => caretColumn >= segmentStart &&
-           (caretColumn < segmentEnd || (isLastRow && caretColumn == segmentEnd));
-
-    private void DrawCaretForWrappedRow(
-        IGraphicsContext context,
-        Rect contentBounds,
-        IFont font,
-        Theme theme,
-        int lineStart,
-        int segStart,
-        int segEnd,
-        ReadOnlySpan<char> rowText,
-        double y,
-        MultiLineTextView.CachedLineMeasure lineMeasure)
-    {
-        if (!IsFocused || !IsEffectivelyEnabled || !CaretVisible)
-        {
-            return;
-        }
-
-        int caret = CaretPosition;
-        int caretColumn = caret - lineStart;
-        if (!IsCaretOwnedByWrappedRow(
-                caretColumn,
-                segStart,
-                segEnd,
-                segEnd == lineMeasure.Text.Length))
-        {
-            return;
-        }
-
-        int rowStart = lineStart + segStart;
-        int rel = Math.Clamp(caret - rowStart, 0, rowText.Length);
-        double x = contentBounds.X +
-                   (rel <= 0
-                       ? 0
-                       : MultiLineTextView.GetSpanWidthCached(lineMeasure, segStart, segStart + rel, context, font));
-        DrawCaret(context, x, y, GetLineHeight(), theme);
-    }
-
-    // Note: text measurement caches live in MultiLineTextView.
-    private string GetLineText(int lineIndex, int start, int end)
-    {
-        return _textView.GetLineText(lineIndex, start, end);
-    }
-
-    private void ApplyInsert(int index, string text)
-    {
-        if (string.IsNullOrEmpty(text))
-        {
-            return;
-        }
-
-        _textView.Reset();
-        _wrapVirtualizer.Reset();
-        _lineWidthEstimator.Reset();
-
-        index = ApplyInsertCore(index, text.AsSpan());
-        UpdateLineStartsOnInsert(index, text);
-
-        CaretPosition = Math.Clamp(CaretPosition, 0, GetTextLengthCore());
-    }
-
-    private void ApplyRemove(int index, int length)
-    {
-        if (length <= 0)
-        {
-            return;
-        }
-
-        _textView.Reset();
-        _wrapVirtualizer.Reset();
-        _lineWidthEstimator.Reset();
-
-        int removed = ApplyRemoveCore(index, length);
-        if (removed > 0)
-        {
-            UpdateLineStartsOnRemove(index, removed);
-        }
-
-        CaretPosition = Math.Clamp(CaretPosition, 0, GetTextLengthCore());
-    }
-
-    private void UpdateLineStartsOnInsert(int index, string insertedText)
-    {
-        int len = insertedText.Length;
-        for (int i = 0; i < _lineStarts.Count; i++)
-        {
-            if (_lineStarts[i] > index)
-            {
-                _lineStarts[i] += len;
-            }
-        }
-
-        int insertPos = LowerBoundLineStart(index + 1);
-        for (int i = 0; i < insertedText.Length; i++)
-        {
-            if (insertedText[i] != '\n')
-            {
-                continue;
-            }
-
-            _lineStarts.Insert(insertPos, index + i + 1);
-            insertPos++;
-        }
-    }
-
-    private void UpdateLineStartsOnRemove(int index, int removedLength)
-    {
-        int end = index + removedLength;
-
-        for (int i = _lineStarts.Count - 1; i >= 0; i--)
-        {
-            int s = _lineStarts[i];
-            if (s > index && s <= end)
-            {
-                _lineStarts.RemoveAt(i);
-            }
-        }
-
-        for (int i = 0; i < _lineStarts.Count; i++)
-        {
-            if (_lineStarts[i] > end)
-            {
-                _lineStarts[i] -= removedLength;
-            }
-        }
-
-        if (_lineStarts.Count == 0)
-        {
-            _lineStarts.Add(0);
-        }
-    }
-
-    private int LowerBoundLineStart(int value)
-    {
-        int lo = 0;
-        int hi = _lineStarts.Count;
-        while (lo < hi)
-        {
-            int mid = (lo + hi) / 2;
-            if (_lineStarts[mid] < value)
-            {
-                lo = mid + 1;
-            }
-            else
-            {
-                hi = mid;
-            }
-        }
-        return lo;
-    }
-    private readonly record struct WrapLayout(int Version, double Width, int[] SegmentStarts);
-    private readonly record struct WrapAnchor(int LineIndex, int StartRow);
-
-    private void CaptureViewAnchor()
-    {
-        _pendingViewAnchorIndex = -1;
-        _pendingViewAnchorYOffset = 0;
-        _pendingViewAnchorXOffset = 0;
-
-        double lineHeight = GetLineHeight();
-        if (lineHeight <= 0)
-        {
-            return;
-        }
-
-        _pendingViewAnchorYOffset = VerticalOffset - Math.Floor(VerticalOffset / lineHeight) * lineHeight;
-
-        using var measure = BeginTextMeasurement();
-        double viewportW = GetViewportContentBounds().Width;
-        double wrapWidth = Math.Max(1, viewportW);
-
-        if (WrapEnabled)
-        {
-            int firstRow = Math.Max(0, (int)Math.Floor(VerticalOffset / lineHeight));
-            _wrapVirtualizer.MapVisualRowToLine(firstRow, wrapWidth, measure.Context, measure.Font, out int lineIndex, out int rowInLine);
-
-            GetLineSpan(lineIndex, out int lineStart, out int lineEnd);
-            string fullLine = GetLineText(lineIndex, lineStart, lineEnd);
-            var layout = _wrapVirtualizer.GetWrapLayout(lineIndex, fullLine, wrapWidth, measure.Context, measure.Font);
-            rowInLine = Math.Clamp(rowInLine, 0, Math.Max(0, layout.SegmentStarts.Length - 1));
-
-            int segStart = layout.SegmentStarts.Length == 0 ? 0 : layout.SegmentStarts[rowInLine];
-            _pendingViewAnchorIndex = Math.Clamp(lineStart + segStart, 0, GetTextLengthCore());
-            _pendingViewAnchorXOffset = 0;
-            return;
-        }
-
-        int firstLine = Math.Max(0, (int)Math.Floor(VerticalOffset / lineHeight));
-        firstLine = Math.Clamp(firstLine, 0, Math.Max(0, _lineStarts.Count - 1));
-
-        GetLineSpan(firstLine, out int start, out int end);
-        var lineMeasure = _textView.EnsureLineMeasureCache(firstLine, start, end, measure.Context, measure.Font);
-        int col = MultiLineTextView.GetCharIndexFromXCached(lineMeasure, HorizontalOffset, measure.Context, measure.Font);
-        double colWidth = col <= 0 ? 0 : MultiLineTextView.GetPrefixWidthCached(lineMeasure, col, measure.Context, measure.Font);
-        _pendingViewAnchorXOffset = HorizontalOffset - colWidth;
-        _pendingViewAnchorIndex = Math.Clamp(start + col, 0, GetTextLengthCore());
-    }
-
-    private void ApplyViewAnchorIfPending()
-    {
-        if (_pendingViewAnchorIndex < 0)
-        {
-            return;
-        }
-
-        double lineHeight = GetLineHeight();
-        if (lineHeight <= 0)
-        {
-            _pendingViewAnchorIndex = -1;
-            return;
-        }
-
-        using var measure = BeginTextMeasurement();
-
-        var viewportBounds = GetViewportContentBounds();
-        double viewportW = viewportBounds.Width;
-        double viewportH = viewportBounds.Height;
-        double wrapWidth = Math.Max(1, viewportW);
-
-        GetLineFromIndex(_pendingViewAnchorIndex, out int line, out int lineStart, out int lineEnd);
-        int col = Math.Clamp(_pendingViewAnchorIndex - lineStart, 0, Math.Max(0, lineEnd - lineStart));
-
-        if (WrapEnabled)
-        {
-            string fullLine = GetLineText(line, lineStart, lineEnd);
-            var layout = _wrapVirtualizer.GetWrapLayout(line, fullLine, wrapWidth, measure.Context, measure.Font);
-            int rowInLine = TextWrapVirtualizer.GetWrapRowFromColumn(layout, col);
-            int rowStart = _wrapVirtualizer.GetVisualRowStartForLine(line, wrapWidth, measure.Context, measure.Font);
-            SetVerticalOffset((rowStart + rowInLine) * lineHeight + _pendingViewAnchorYOffset, false);
-            SetHorizontalOffset(0, false);
-        }
-        else
-        {
-            SetVerticalOffset(line * lineHeight + _pendingViewAnchorYOffset, false);
-
-            var lineMeasure = _textView.EnsureLineMeasureCache(line, lineStart, lineEnd, measure.Context, measure.Font);
-            col = Math.Clamp(col, 0, lineMeasure.Text.Length);
-            double colWidth = col <= 0 ? 0 : MultiLineTextView.GetPrefixWidthCached(lineMeasure, col, measure.Context, measure.Font);
-            SetHorizontalOffset(Math.Max(0, colWidth + _pendingViewAnchorXOffset), false);
-        }
-
-        _pendingViewAnchorIndex = -1;
-        _pendingViewAnchorYOffset = 0;
-        _pendingViewAnchorXOffset = 0;
-
-        var dpiScale = GetDpi() / 96.0;
-        double extentH = GetExtentHeight(wrapWidth);
-        SetVerticalOffset(ClampOffset(VerticalOffset, extentH, viewportH, dpiScale), false);
-
-        double extentW = (!_hBar.IsVisible || WrapEnabled) ? 0 : GetExtentWidthForViewport(measure.Context, measure.Font, viewportH);
-        SetHorizontalOffset((_hBar.IsVisible && !WrapEnabled) ? ClampOffset(HorizontalOffset, extentW, viewportW, dpiScale) : 0, false);
-
-        if (_vBar.IsVisible)
-        {
-            _vBar.Value = VerticalOffset;
-        }
-
-        if (_hBar.IsVisible)
-        {
-            _hBar.Value = HorizontalOffset;
-        }
-    }
+    bool IVisualTreeHost.VisitChildren(Func<Element, bool> visitor)
+        => visitor(_verticalScrollBar) && visitor(_horizontalScrollBar);
 }

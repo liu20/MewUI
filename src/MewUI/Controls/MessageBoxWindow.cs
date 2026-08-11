@@ -126,7 +126,7 @@ public sealed class MessageBoxWindow : Window
             };
 
             var detailAt = new AccessText();
-            detailAt.SetRawText(MewUIStrings.PromptShowDetail.Value);
+            detailAt.RawText = MewUIStrings.PromptShowDetail.Value;
             var detailCheckBox = new CheckBox
             {
                 Content = detailAt,
@@ -160,7 +160,7 @@ public sealed class MessageBoxWindow : Window
         foreach (var proxy in _checkBoxes)
         {
             var at = new AccessText();
-            at.SetRawText(proxy.Text);
+            at.RawText = proxy.Text;
             var cb = new CheckBox
             {
                 Content = at,

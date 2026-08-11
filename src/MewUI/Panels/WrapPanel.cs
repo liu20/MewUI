@@ -143,10 +143,12 @@ public class WrapPanel : Panel
 
             if (measureChildren)
             {
-                bool horizontal = Orientation == Orientation.Horizontal;
+                // Children see the panel constraint on both axes, not infinity along the wrap
+                // axis: a child that wraps its own content needs the line width to report a
+                // height, otherwise it measures as one line and overflows once arranged.
                 var measureSize = new Size(
-                    double.IsNaN(ItemWidth) ? (horizontal ? double.PositiveInfinity : constraintSize.Width) : ItemWidth,
-                    double.IsNaN(ItemHeight) ? (horizontal ? constraintSize.Height : double.PositiveInfinity) : ItemHeight
+                    double.IsNaN(ItemWidth) ? constraintSize.Width : ItemWidth,
+                    double.IsNaN(ItemHeight) ? constraintSize.Height : ItemHeight
                 );
                 child.Measure(measureSize);
             }

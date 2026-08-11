@@ -29,12 +29,14 @@ public sealed class FluentExtensionCoverageTests
     public void ControlPropertyExtensions_SetValues()
     {
         var ring = new ProgressRing().IsActive(false);
+        var bar = new ProgressBar().IsIndeterminate(false);
         var password = new PasswordBox().PasswordChar('*');
         var slider = new Slider()
             .ThumbBrush(Color.Red)
             .ThumbBorderBrush(Color.Black);
 
         Assert.IsFalse(ring.IsActive);
+        Assert.IsFalse(bar.IsIndeterminate);
         Assert.AreEqual('*', password.PasswordChar);
         Assert.AreEqual(Color.Red, slider.ThumbBrush);
         Assert.AreEqual(Color.Black, slider.ThumbBorderBrush);
@@ -86,7 +88,7 @@ public sealed class FluentExtensionCoverageTests
     }
 
     [TestMethod]
-    public void ConvertedBinding_WithConvertBack_UpdatesBothDirections()
+    public void ConvertedBinding_DirectWriteReplacesBindingWithLocalValue()
     {
         var source = new ObservableValue<int>(12);
         var textBox = new TextBox()
@@ -98,7 +100,10 @@ public sealed class FluentExtensionCoverageTests
         Assert.AreEqual("24", textBox.Text);
 
         textBox.Text = "36";
-        Assert.AreEqual(36, source.Value);
+        Assert.AreEqual(24, source.Value);
+
+        source.Value = 48;
+        Assert.AreEqual("36", textBox.Text);
     }
 
     [TestMethod]
@@ -131,10 +136,36 @@ public sealed class FluentExtensionCoverageTests
         _ = new ListBox().BindSelectedIndex(source, value => value, value => value);
         _ = new ComboBox().BindSelectedIndex(source, value => value, value => value);
         _ = new ProgressBar().BindValue(source, value => value);
+        _ = new ProgressBar().BindIsIndeterminate(source, value => value < 0);
         _ = new Slider().BindValue(source, value => value, value => (int)value);
         _ = new NumericUpDown().BindValue(source, value => value, value => (int)value);
         _ = new Calendar().BindSelectedDate(source, value => new DateTime(2000, 1, value), value => value?.Day ?? 1);
         _ = new DatePicker().BindSelectedDate(source, value => new DateTime(2000, 1, value), value => value?.Day ?? 1);
         _ = new ProgressRing().BindIsActive(source, value => value > 0);
+    }
+
+    [TestMethod]
+    public void CommandExtensions_SetAndBindSemanticCommands()
+    {
+        var first = new Command("test.first", "First");
+        var second = new Command("test.second", "Second");
+        var icon = new IconTemplate(size => new Border().Size(size.Dip));
+        var source = new ObservableValue<Command?>(first);
+
+        var button = new Button().BindCommand(source);
+        var item = new MenuItem().Command(first).Icon(icon);
+        var menu = new Menu().Item(first).Item("Second label", second);
+        var menuBar = new MenuBar().Item(first).Item("Second label", second);
+
+        Assert.AreSame(first, button.Command);
+        source.Value = second;
+        Assert.AreSame(second, button.Command);
+        Assert.AreSame(first, item.Command);
+        Assert.AreSame(icon, item.Icon);
+        Assert.AreEqual("First", item.GetParsedText().displayText);
+        Assert.AreSame(first, ((MenuItem)menu.Items[0]).Command);
+        Assert.AreSame(second, ((MenuItem)menu.Items[1]).Command);
+        Assert.AreSame(first, ((MenuItem)menuBar.Items[0]).Command);
+        Assert.AreSame(second, ((MenuItem)menuBar.Items[1]).Command);
     }
 }

@@ -34,6 +34,27 @@ internal sealed class PreviewWindowBackend : IWindowBackend
 
     public void SetResizable(bool resizable) { }
 
+    public void SetWindowState(WindowState state)
+    {
+        if (state == WindowState.Normal)
+        {
+            return;
+        }
+        // Preview surfaces have no OS window states: snap the framework state back so the
+        // previewed UI cannot minimize itself into a frozen frame or fake-maximize.
+        _session.NotifyBlockedWindowCommand(state.ToString());
+        var context = SynchronizationContext.Current;
+        if (context != null)
+        {
+            // Deferred so the revert does not nest inside the property-change callback.
+            context.Post(_ => _window.SetWindowStateFromBackend(WindowState.Normal), null);
+        }
+        else
+        {
+            _window.SetWindowStateFromBackend(WindowState.Normal);
+        }
+    }
+
     public void PresentSurface() => _session.NotifyPresented(_window);
 
     public void Hide() { }
@@ -64,6 +85,8 @@ internal sealed class PreviewWindowBackend : IWindowBackend
     public Point GetPosition() => default;
 
     public void SetPosition(double leftDip, double topDip) { }
+
+    public void SetPositionPx(int leftPx, int topPx) { }
 
     public void CaptureMouse() { }
 

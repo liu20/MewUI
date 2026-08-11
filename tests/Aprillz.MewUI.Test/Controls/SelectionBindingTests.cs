@@ -71,8 +71,12 @@ public sealed class SelectionBindingTests
         Assert.AreEqual(2, grid.SelectedIndex);
         Assert.AreEqual("c", grid.SelectedItem);
 
-        // control -> source (BindsTwoWayByDefault)
-        grid.SelectedIndex = 1;
+        source.Value = 99;
+        Assert.AreEqual(2, grid.SelectedIndex);
+        Assert.AreEqual(99, source.Value, "a Binding push is not a target commit");
+
+        // selection model -> source (the control's input path)
+        grid.ItemsSource.SelectedIndex = 1;
         Assert.AreEqual(1, source.Value);
     }
 
@@ -82,8 +86,8 @@ public sealed class SelectionBindingTests
         var grid = new GridView();
         grid.ItemsSource = ItemsView.Create(new[] { "a", "b", "c" });
 
-        // Property-to-property forward binding writes at the local tier, so it drives the
-        // control's selection instead of losing to the selection value the control sets.
+        // Property-to-property forward binding writes the Binding slot, so it drives the
+        // control's selection without replacing an explicit Local value.
         var source = new IndexSource();
         grid.SetBinding(GridView.SelectedIndexProperty, source, IndexSource.ValueProperty);
 
@@ -137,8 +141,8 @@ public sealed class SelectionBindingTests
         source.Value = nodes[1];
         Assert.AreSame(nodes[1], tree.SelectedItem);
 
-        // control -> source (BindsTwoWayByDefault)
-        tree.SelectedItem = nodes[0];
+        // selection model -> source (the control's input path)
+        tree.ItemsSource.SelectedItem = nodes[0];
         Assert.AreSame(nodes[0], source.Value);
     }
 
@@ -185,7 +189,7 @@ public sealed class SelectionBindingTests
         Assert.AreEqual("c", list.SelectedItem);
         Assert.AreEqual(2, list.SelectedIndex);
 
-        list.SelectedIndex = 0;
+        list.ItemsSource.SelectedIndex = 0;
         Assert.AreEqual("a", source.Value);
     }
 

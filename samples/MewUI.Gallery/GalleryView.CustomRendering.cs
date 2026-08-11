@@ -7,7 +7,7 @@ partial class GalleryView
 {
     private FrameworkElement CustomRenderingPage() =>
         CardGrid(
-            Card("Offscreen", new SampleOffscreenControl { Height = 300, Width = 280 }),
+            Card("Offscreen", new SampleOffscreenControl { Height = 240, Width = 280 }),
             // Result bitmap changes after every worker-thread render, so a stale BitmapCache
             // blit would hide the update until something else invalidates the border.
             Card("Async Rendering", AsyncConfettiContent()).Cached(false)

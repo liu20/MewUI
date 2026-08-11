@@ -78,6 +78,8 @@ internal sealed class MacOSWindowBackend : IWindowBackend
 
     internal Window Window => _window;
 
+    internal long InputRoutingOrder { get; set; }
+
     internal bool AcceptsImeTextInput =>
         _imeHasMarkedText || (_imeMode != ImeMode.Disabled && _window.FocusManager.FocusedElement is ITextInputClient);
 
@@ -573,6 +575,19 @@ internal sealed class MacOSWindowBackend : IWindowBackend
         MacOSWindowInterop.SetWindowPosition(_nsWindow, leftDip, cocoaY);
     }
 
+    public void SetPositionPx(int leftPx, int topPx)
+    {
+        if (_nsWindow == 0)
+        {
+            return;
+        }
+
+        // Cocoa places windows in points from the bottom-left - the conversion ClientToScreen inverts.
+        var cocoaTopLeft = TopLeftPxToCocoaScreenPoint(new Point(leftPx, topPx));
+        var frame = MacOSWindowInterop.GetWindowFrame(_nsWindow);
+        MacOSWindowInterop.SetWindowPosition(_nsWindow, cocoaTopLeft.x, cocoaTopLeft.y - frame.size.height);
+    }
+
     public void CaptureMouse()
     { }
 
@@ -919,6 +934,14 @@ internal sealed class MacOSWindowBackend : IWindowBackend
         {
             ImeUnmarkText();
         }
+
+        // AppKit keeps its own marked-text state in the view's NSTextInputContext. Discard it so a
+        // focus move does not deliver the stale composition into the next focused editor.
+        var inputContext = ObjC.MsgSend_nint(_nsView, ObjC.Sel("inputContext"));
+        if (inputContext != 0)
+        {
+            ObjC.MsgSend_void(inputContext, ObjC.Sel("discardMarkedText"));
+        }
     }
 
     public void Dispose()
@@ -1127,7 +1150,7 @@ internal sealed class MacOSWindowBackend : IWindowBackend
             return;
         }
 
-        switch (_window.StartupLocation)
+        switch (_window.EffectiveStartupLocation)
         {
             case WindowStartupLocation.CenterScreen:
                 MacOSWindowInterop.CenterWindow(_nsWindow);
@@ -1340,14 +1363,55 @@ internal sealed class MacOSWindowBackend : IWindowBackend
         var screenPos = ClientToScreen(pos);
         _window.UpdateLastMousePosition(pos, screenPos);
 
+        if (IsReroutableMouseEvent(type))
+        {
+            var inputTarget = _host.ResolveMouseInputTarget(this, screenPos);
+            if (!ReferenceEquals(inputTarget, this))
+            {
+                _window.ClearMouseOverState();
+                inputTarget.ProcessReroutedMouseEvent(ev, type, screenPos);
+                return;
+            }
+        }
+
+        ProcessMouseOrKeyEvent(ev, type, pos, screenPos, client, eventWindowMatchesTarget: true);
+    }
+
+    private void ProcessReroutedMouseEvent(nint ev, int type, Point screenPos)
+    {
+        if (!_enabled)
+        {
+            _window.NotifyInputWhenDisabled();
+            return;
+        }
+
+        _ = UpdateClientSizeIfNeeded();
+        var client = _window.ClientSize;
+        var pos = ScreenToClient(screenPos);
+        _window.UpdateLastMousePosition(pos, screenPos);
+        ProcessMouseOrKeyEvent(ev, type, pos, screenPos, client, eventWindowMatchesTarget: false);
+    }
+
+    private void ProcessMouseOrKeyEvent(
+        nint ev,
+        int type,
+        Point pos,
+        Point screenPos,
+        Size client,
+        bool eventWindowMatchesTarget)
+    {
         switch (type)
         {
             // Mouse moved / dragged
             case 5:  // NSEventTypeMouseMoved
             case 6:  // NSEventTypeLeftMouseDragged
             case 7:  // NSEventTypeRightMouseDragged
+            case 8:  // NSEventTypeMouseEntered
             case 27: // NSEventTypeOtherMouseDragged
-                if (ShouldIgnoreMouseEvent(ev, pos, client, allowOutsideWhileCaptured: true))
+                if (ShouldIgnoreMouseEvent(
+                    ev, pos, client,
+                    allowOutsideWhileCaptured: true,
+                    eventWindowMatchesTarget))
                 {
                     return;
                 }
@@ -1384,7 +1448,10 @@ internal sealed class MacOSWindowBackend : IWindowBackend
                 break;
 
             case 22: // NSEventTypeScrollWheel
-                if (ShouldIgnoreMouseEvent(ev, pos, client, allowOutsideWhileCaptured: true))
+                if (ShouldIgnoreMouseEvent(
+                    ev, pos, client,
+                    allowOutsideWhileCaptured: true,
+                    eventWindowMatchesTarget))
                 {
                     return;
                 }
@@ -1401,12 +1468,48 @@ internal sealed class MacOSWindowBackend : IWindowBackend
         }
     }
 
-    private bool ShouldIgnoreMouseEvent(nint ev, Point pos, Size client, bool allowOutsideWhileCaptured)
+    private static bool IsReroutableMouseEvent(int type)
+        => type is 1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 22 or 25 or 26 or 27;
+
+    internal bool IsInteractivePopupAt(MacOSWindowBackend eventTarget, Point screenPositionPx)
+    {
+        if (_window.Kind != Controls.WindowKind.Popup
+            || _window.IsInputTransparentSurface
+            || !_enabled
+            || _nsWindow == 0
+            || !MacOSInterop.IsWindowVisible(_nsWindow))
+        {
+            return false;
+        }
+
+        // A popup may geometrically overlap another MewUI top-level that is actually above it.
+        // Limit coordinate-based correction to the owner/popup family of the NSEvent target;
+        // AppKit remains authoritative between unrelated top-level windows.
+        var popupOwner = _window.Owner;
+        if (!ReferenceEquals(eventTarget, this)
+            && !ReferenceEquals(popupOwner, eventTarget.Window)
+            && !(eventTarget.Window.Kind == Controls.WindowKind.Popup
+                && ReferenceEquals(popupOwner, eventTarget.Window.Owner)))
+        {
+            return false;
+        }
+
+        var pos = ScreenToClient(screenPositionPx);
+        var client = _window.ClientSize;
+        return pos.X >= 0 && pos.Y >= 0 && pos.X < client.Width && pos.Y < client.Height;
+    }
+
+    private bool ShouldIgnoreMouseEvent(
+        nint ev,
+        Point pos,
+        Size client,
+        bool allowOutsideWhileCaptured,
+        bool eventWindowMatchesTarget)
     {
         var evWindow = MacOSInterop.GetEventWindow(ev);
         bool isCaptured = _window.HasMouseCapture || _leftDown || _rightDown || _middleDown;
 
-        if (evWindow != 0 && evWindow != _nsWindow && !isCaptured)
+        if (eventWindowMatchesTarget && evWindow != 0 && evWindow != _nsWindow && !isCaptured)
         {
             return true;
         }
@@ -1609,7 +1712,6 @@ internal sealed class MacOSWindowBackend : IWindowBackend
             }
 
             WindowInputRouter.KeyDown(_window, args);
-            _window.ProcessKeyBindings(args);
             _window.ProcessAccessKeyDown(args);
 
             // WPF-like Tab behavior:
@@ -1761,11 +1863,11 @@ internal sealed class MacOSWindowBackend : IWindowBackend
             // If the platform provides a replacement range, align our selection/caret so the IME composition
             // replaces the correct portion of the document.
             // (AppKit's NSRange is UTF-16 based, which matches .NET string indexing.)
-            if (replacementRange.location != NSNotFound && _window.FocusManager.FocusedElement is Controls.TextBase tb2)
+            if (replacementRange.location != NSNotFound && _window.FocusManager.FocusedElement is ITextCompositionEditor markEditor)
             {
                 int start = (int)replacementRange.location;
                 int end = start + (int)replacementRange.length;
-                tb2.SetSelectionRangeForPlatform(start, end);
+                markEditor.SetSelectionRangeForPlatform(start, end);
             }
 
             _imeHasMarkedText = true;
@@ -1795,24 +1897,24 @@ internal sealed class MacOSWindowBackend : IWindowBackend
             }
         }
 
-        if (_window.FocusManager.FocusedElement is Controls.TextBase tb)
+        if (_window.FocusManager.FocusedElement is ITextCompositionEditor editor)
         {
-            ImeLogger.Write($"  TextBase composingStart={tb.CompositionStartIndex} composingLen={tb.CompositionLength} caret={tb.CaretPosition} textLen={tb.TextLengthInternal}");
+            ImeLogger.Write($"  editor composingStart={editor.CompositionStartIndex} composingLen={editor.CompositionLength} caret={editor.CaretPosition} textLen={editor.TextLength}");
             try
             {
-                int textLen = tb.TextLengthInternal;
-                int compStart = Math.Max(0, tb.CompositionStartIndex);
-                int compLen = Math.Max(0, tb.CompositionLength);
+                int textLen = editor.TextLength;
+                int compStart = Math.Max(0, editor.CompositionStartIndex);
+                int compLen = Math.Max(0, editor.CompositionLength);
 
                 string compText = (compLen > 0 && compStart + compLen <= textLen)
-                    ? tb.GetTextSubstringInternal(compStart, compLen)
+                    ? editor.GetTextSubstring(compStart, compLen)
                     : string.Empty;
 
                 int tailLen = Math.Min(32, textLen);
-                string tail = tailLen > 0 ? tb.GetTextSubstringInternal(textLen - tailLen, tailLen) : string.Empty;
+                string tail = tailLen > 0 ? editor.GetTextSubstring(textLen - tailLen, tailLen) : string.Empty;
 
-                var (selStart, selEnd) = tb.SelectionRange;
-                ImeLogger.Write($"    TextBase selection=({selStart},{selEnd}) compText='{Truncate(compText)}' tail='{Truncate(tail)}'");
+                var (selStart, selEnd) = editor.SelectionRange;
+                ImeLogger.Write($"    editor selection=({selStart},{selEnd}) compText='{Truncate(compText)}' tail='{Truncate(tail)}'");
             }
             catch
             {
@@ -1831,13 +1933,13 @@ internal sealed class MacOSWindowBackend : IWindowBackend
         // unmarkText means "accept the current preedit as committed text".
         // Use CommitTextCompositionInternal (which records undo) instead of
         // EndTextCompositionInternal (which removes the text and loses it).
-        if (_window.FocusManager.FocusedElement is Controls.TextBase tb && tb.IsComposing)
+        if (_window.FocusManager.FocusedElement is ITextCompositionEditor { IsComposing: true } unmarkEditor)
         {
             var endArgs = new TextCompositionEventArgs(_imeMarkedText);
             _window.RaisePreviewTextCompositionEnd(endArgs);
             if (!endArgs.Handled)
             {
-                tb.CommitTextCompositionInternal();
+                unmarkEditor.CommitActiveComposition();
             }
         }
         else
@@ -1871,7 +1973,7 @@ internal sealed class MacOSWindowBackend : IWindowBackend
         }
 
         // IME commit: AppKit typically calls insertText while we still have marked text (setMarkedText path).
-        if (_imeHasMarkedText && _window.FocusManager.FocusedElement is Controls.TextBase tb)
+        if (_imeHasMarkedText && _window.FocusManager.FocusedElement is ITextCompositionEditor insertEditor)
         {
             if (!string.Equals(text, _imeMarkedText, StringComparison.Ordinal))
             {
@@ -1882,7 +1984,7 @@ internal sealed class MacOSWindowBackend : IWindowBackend
             _window.RaisePreviewTextCompositionEnd(endArgs);
             if (!endArgs.Handled)
             {
-                tb.CommitTextCompositionInternal();
+                insertEditor.CommitActiveComposition();
             }
 
             _imeHasMarkedText = false;
@@ -1894,11 +1996,11 @@ internal sealed class MacOSWindowBackend : IWindowBackend
 
         // If the platform provides a replacement range, align our selection/caret so the inserted text
         // replaces the intended portion of the document.
-        if (replacementRange.location != NSNotFound && _window.FocusManager.FocusedElement is Controls.TextBase tbReplace)
+        if (replacementRange.location != NSNotFound && _window.FocusManager.FocusedElement is ITextCompositionEditor replaceEditor)
         {
             int start = (int)replacementRange.location;
             int end = start + (int)replacementRange.length;
-            tbReplace.SetSelectionRangeForPlatform(start, end);
+            replaceEditor.SetSelectionRangeForPlatform(start, end);
         }
 
         // Cocoa routes plain text input through insertText during keyDown handling.
@@ -1954,13 +2056,13 @@ internal sealed class MacOSWindowBackend : IWindowBackend
 
         _forwardKeyToAppThisKeyDown = true;
 
-        // If we are in preedit (setMarkedText path), commit the current composition so the TextBase
+        // If we are in preedit (setMarkedText path), commit the current composition so the editor
         // undo stack stays consistent, then reset IME state for key-up reporting.
         if (_imeHasMarkedText && _imeState == ImeState.Preedit)
         {
-            if (_window.FocusManager.FocusedElement is Controls.TextBase tb && tb.IsComposing)
+            if (_window.FocusManager.FocusedElement is ITextCompositionEditor { IsComposing: true } keyEditor)
             {
-                tb.CommitTextCompositionInternal();
+                keyEditor.CommitActiveComposition();
             }
             _imeHasMarkedText = false;
             _imeMarkedText = string.Empty;

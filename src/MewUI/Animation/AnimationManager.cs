@@ -1,11 +1,14 @@
 using System.Diagnostics;
 
+using Aprillz.MewUI.Controls;
+
 namespace Aprillz.MewUI.Animation;
 
 /// <summary>
-/// Drives all active <see cref="AnimationClock"/> instances synchronized with the render loop. While any clock is
-/// active it sets <see cref="RenderLoopSettings.AnimationActive"/> so the platform host renders every frame, and
-/// clears it when idle. It never touches the user's <see cref="RenderLoopSettings.Continuous"/> flag.
+/// Drives all active <see cref="AnimationClock"/> instances synchronized with the platform render pulse. While any
+/// clock is active it sets <see cref="RenderLoopSettings.AnimationActive"/> so the host continues pulsing, and
+/// clears it when idle. Per-window demand lets the host render only the surfaces that consumed that pulse. It never
+/// touches the user's <see cref="RenderLoopSettings.Continuous"/> flag.
 /// </summary>
 public sealed class AnimationManager
 {
@@ -19,6 +22,8 @@ public sealed class AnimationManager
     private readonly List<AnimationClock> _active = new();
     private readonly List<AnimationClock> _pendingAdd = new();
     private readonly List<AnimationClock> _pendingRemove = new();
+    private readonly HashSet<Window> _pulseDemandWindows = new(ReferenceEqualityComparer.Instance);
+    private bool _pulseHasApplicationDemand;
     private bool _isUpdating;
 
     internal AnimationManager() { }
@@ -57,6 +62,26 @@ public sealed class AnimationManager
             {
                 return HasUnpausedClock();
             }
+        }
+    }
+
+    /// <summary>
+    /// Advances all clocks once and returns the render-demand snapshot for this platform pulse.
+    /// Disposing the lease releases any window references captured by the final animation frame.
+    /// </summary>
+    internal AnimationPulse BeginPulse(RenderLoopSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+
+        try
+        {
+            Update();
+            return new AnimationPulse(this, settings);
+        }
+        catch
+        {
+            CompletePulse();
+            throw;
         }
     }
 
@@ -111,19 +136,42 @@ public sealed class AnimationManager
     }
 
     /// <summary>
-    /// Updates all active animation clocks. Called by the rendering pipeline
-    /// before each frame (e.g. from <c>Window.RenderFrameCore</c>).
+    /// Updates all active animation clocks. Called once by the platform host before selecting and
+    /// rendering the windows that consumed the pulse.
     /// </summary>
     public void Update()
     {
         lock (_sync)
         {
+            _pulseDemandWindows.Clear();
+            _pulseHasApplicationDemand = false;
+
             if (_active.Count == 0 && _pendingAdd.Count == 0)
             {
                 return;
             }
 
             long now = Stopwatch.GetTimestamp();
+
+            // Capture demand before ticking. A clock may complete and unregister during Update, but
+            // its final callback still needs one frame on the surface it updated.
+            for (int i = 0; i < _active.Count; i++)
+            {
+                var clock = _active[i];
+                if (!clock.IsRunning || clock.IsPaused)
+                {
+                    continue;
+                }
+
+                if (!clock.HasOwner)
+                {
+                    _pulseHasApplicationDemand = true;
+                }
+                else if (clock.ResolveOwnerWindow() is Window window)
+                {
+                    _pulseDemandWindows.Add(window);
+                }
+            }
 
             _isUpdating = true;
             try
@@ -156,6 +204,34 @@ public sealed class AnimationManager
             }
 
             DisableContinuousModeIfIdle();
+        }
+    }
+
+    private bool PulseHasApplicationRenderDemand
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _pulseHasApplicationDemand;
+            }
+        }
+    }
+
+    private bool HasPulseRenderDemand(Window window)
+    {
+        lock (_sync)
+        {
+            return _pulseDemandWindows.Contains(window);
+        }
+    }
+
+    private void CompletePulse()
+    {
+        lock (_sync)
+        {
+            _pulseDemandWindows.Clear();
+            _pulseHasApplicationDemand = false;
         }
     }
 
@@ -206,6 +282,38 @@ public sealed class AnimationManager
     }
 
     /// <summary>
+    /// Provides the render policy and demand snapshot for one animation pulse. This scope-bound usage
+    /// pattern keeps clock advancement paired with snapshot cleanup in every platform loop.
+    /// </summary>
+    internal readonly struct AnimationPulse : IDisposable
+    {
+        private readonly AnimationManager _manager;
+        private readonly bool _hasApplicationRenderDemand;
+        private readonly bool _rendersApplicationWide;
+
+        internal AnimationPulse(AnimationManager manager, RenderLoopSettings settings)
+        {
+            _manager = manager;
+            _hasApplicationRenderDemand = manager.PulseHasApplicationRenderDemand;
+            _rendersApplicationWide =
+                settings.Continuous ||
+                !settings.VSyncEnabled ||
+                _hasApplicationRenderDemand;
+        }
+
+        internal bool HasApplicationRenderDemand => _hasApplicationRenderDemand;
+
+        internal bool HasRenderDemand(Window window) => _manager.HasPulseRenderDemand(window);
+
+        internal bool ShouldRender(Window window, bool needsRender) =>
+            needsRender ||
+            _rendersApplicationWide ||
+            HasRenderDemand(window);
+
+        public void Dispose() => _manager.CompletePulse();
+    }
+
+    /// <summary>
     /// Resets the singleton instance. For testing purposes only.
     /// </summary>
     internal static void Reset()
@@ -218,6 +326,8 @@ public sealed class AnimationManager
                 instance._active.Clear();
                 instance._pendingAdd.Clear();
                 instance._pendingRemove.Clear();
+                instance._pulseDemandWindows.Clear();
+                instance._pulseHasApplicationDemand = false;
                 instance.DisableContinuousModeIfIdle();
             }
         }

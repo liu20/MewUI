@@ -62,6 +62,9 @@ public sealed class WindowBuildOwnershipTests
         Assert.AreEqual(0, window.BuildCount);
     }
 
+    // The guard is Conditional("DEBUG") so no reflection reaches AOT, which leaves the call site
+    // with nothing to run in a release build.
+#if DEBUG
     [TestMethod]
     public void FluentBuild_OnOverriddenWindow_ThrowsInDebug()
     {
@@ -69,6 +72,7 @@ public sealed class WindowBuildOwnershipTests
 
         Assert.ThrowsExactly<InvalidOperationException>(() => window.Build(x => x.Title("misuse")));
     }
+#endif
 
     [TestMethod]
     public void InvokeOnBuildHook_RerunsTheHook()

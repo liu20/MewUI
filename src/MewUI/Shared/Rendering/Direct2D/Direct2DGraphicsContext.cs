@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using Aprillz.MewUI.Native.Com;
 using Aprillz.MewUI.Native.Direct2D;
 using Aprillz.MewUI.Native.DirectWrite;
+using Aprillz.MewUI.Text;
 
 using static Aprillz.MewUI.Rendering.GradientBrushHelper;
 
@@ -14,6 +15,9 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
 {
     private const int D2DERR_RECREATE_TARGET = unchecked((int)0x8899000C);
     private const int D2DERR_WRONG_RESOURCE_DOMAIN = unchecked((int)0x88990015);
+
+    // Far beyond any render target, so a clip using it bounds only the other axis.
+    private const float UNBOUNDED_CLIP_EXTENT = 1 << 20;
 
     // ENABLE_COLOR_FONT is a Windows 8.1+ DrawText/DrawTextLayout option. On Win7 / Win8.0 the
     // D2D runtime rejects it with a deferred E_INVALIDARG at EndDraw, which silently drops the
@@ -141,6 +145,8 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
         _textPixelSnap = true;
         _transform = Matrix3x2.Identity;
         _clipBoundsWorld = null;
+        _opaqueBackdropLayers.Clear();
+        _opacityLayers.Clear();
 
         if (_renderTarget != 0)
         {
@@ -179,6 +185,14 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
             ? D2D1_TEXT_ANTIALIAS_MODE.CLEARTYPE
             : D2D1_TEXT_ANTIALIAS_MODE.GRAYSCALE;
         D2D1VTable.SetTextAntialiasMode((ID2D1RenderTarget*)_renderTarget, textAa);
+
+        // Tuned params applied to every target, so grayscale (popup / cached bitmap) surfaces get the
+        // same glyph weight as the window. 0 leaves the target on its default params.
+        nint textParams = _ownerFactory.TextRenderingParams;
+        if (textParams != 0)
+        {
+            D2D1VTable.SetTextRenderingParams((ID2D1RenderTarget*)_renderTarget, textParams);
+        }
     }
 
     // True when this context's BeginGpuPixelSurfaceFrame was the outermost entry on the
@@ -948,8 +962,8 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
         }
     }
 
-    public override TextLayout? CreateTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, in TextLayoutConstraints constraints)
+    public override BackendTextLayout? CreateBackendTextLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, in BackendTextLayoutConstraints constraints)
     {
         if (text.IsEmpty)
         {
@@ -985,7 +999,8 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
 
         float w = maxWidth >= float.MaxValue ? float.MaxValue : (float)maxWidth;
         float h = bounds.Height > 0 && !double.IsPositiveInfinity(bounds.Height) ? (float)bounds.Height : float.MaxValue;
-        int hr = DWriteVTable.CreateTextLayout((IDWriteFactory*)_dwriteFactory, text, nativeFormat, w, h, out nint nativeLayout);
+        int hr = DWriteVTable.CreateGdiCompatibleTextLayout(
+            (IDWriteFactory*)_dwriteFactory, text, nativeFormat, w, h, (float)DpiScale, useGdiNatural: false, out nint nativeLayout);
 
         if (hr < 0 || nativeLayout == 0)
         {
@@ -1026,24 +1041,24 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
             height += -metrics.top;
         }
 
-        var measured = new Size(TextMeasurePolicy.ApplyWidthPadding(metrics.widthIncludingTrailingWhitespace), height);
+        var measured = new Size(metrics.widthIncludingTrailingWhitespace, height);
         double effectiveMaxWidth = bounds.Width > 0 && !double.IsPositiveInfinity(bounds.Width) ? bounds.Width : measured.Width;
 
-        var result = new TextLayout
+        var result = new BackendTextLayout
         {
             MeasuredSize = measured,
             EffectiveBounds = bounds,
             EffectiveMaxWidth = effectiveMaxWidth,
-            ContentHeight = measured.Height,
-            BackendHandle = nativeLayout
+            ContentHeight = measured.Height
         };
+        result.AttachBackendHandle(nativeLayout, static handle => ComHelpers.Release(handle));
         TextTracker?.TrackLayout(result);
 
         return result;
     }
 
-    public override void DrawTextLayout(ReadOnlySpan<char> text,
-        TextFormat format, TextLayout layout, Color color)
+    public override void DrawBackendTextLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, BackendTextLayout layout, Color color)
     {
         if (layout == null)
         {
@@ -1074,12 +1089,35 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
 
         nint brush = GetSolidBrush(color);
         var options = _textPixelSnap
-            ? D2D1_DRAW_TEXT_OPTIONS.CLIP | _colorFontOption
-            : D2D1_DRAW_TEXT_OPTIONS.NO_SNAP | D2D1_DRAW_TEXT_OPTIONS.CLIP | _colorFontOption;
+            ? _colorFontOption
+            : D2D1_DRAW_TEXT_OPTIONS.NO_SNAP | _colorFontOption;
 
         var rt = _deviceContext != 0 ? _deviceContext : _renderTarget;
-        D2D1VTable.DrawTextLayout((ID2D1RenderTarget*)rt,
-            new D2D1_POINT_2F((float)bounds.X, (float)bounds.Y), layout.BackendHandle, brush, options);
+        var origin = new D2D1_POINT_2F((float)bounds.X, (float)bounds.Y);
+
+        if (layout.ContentHeight > bounds.Height)
+        {
+            options |= D2D1_DRAW_TEXT_OPTIONS.CLIP;
+            D2D1VTable.DrawTextLayout((ID2D1RenderTarget*)rt, origin, layout.BackendHandle, brush, options);
+            return;
+        }
+
+        // Clipping at the line box shaves the antialiased edge row of a flush descender, so text that
+        // fits is bounded horizontally only.
+        var horizontalClip = new D2D1_RECT_F(
+            (float)bounds.X,
+            -UNBOUNDED_CLIP_EXTENT,
+            (float)bounds.Right,
+            UNBOUNDED_CLIP_EXTENT);
+        D2D1VTable.PushAxisAlignedClip((ID2D1RenderTarget*)rt, horizontalClip);
+        try
+        {
+            D2D1VTable.DrawTextLayout((ID2D1RenderTarget*)rt, origin, layout.BackendHandle, brush, options);
+        }
+        finally
+        {
+            D2D1VTable.PopAxisAlignedClip((ID2D1RenderTarget*)rt);
+        }
     }
 
     public override Size MeasureText(ReadOnlySpan<char> text, IFont font)
@@ -1408,120 +1446,6 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
         D2D1VTable.FillEllipse((ID2D1RenderTarget*)_renderTarget, ellipse, brush);
     }
 
-    protected override void DrawTextCore(ReadOnlySpan<char> text, Rect bounds, IFont font, Color color,
-        TextAlignment horizontalAlignment = TextAlignment.Left,
-        TextAlignment verticalAlignment = TextAlignment.Top,
-        TextWrapping wrapping = TextWrapping.NoWrap,
-        TextTrimming trimming = TextTrimming.None)
-    {
-        if (_renderTarget == 0 || text.IsEmpty)
-        {
-            return;
-        }
-
-        if (_clipBoundsWorld.HasValue && bounds.Width < 100_000)
-        {
-            var clip = _clipBoundsWorld.Value;
-            var wv = Vector2.Transform(new Vector2((float)bounds.X, (float)bounds.Y), _transform);
-            if (wv.X + bounds.Width <= clip.X || wv.X >= clip.Right ||
-                wv.Y + bounds.Height <= clip.Y || wv.Y >= clip.Bottom)
-            {
-                return;
-            }
-        }
-
-        if (font is not DirectWriteFont dwFont)
-        {
-            throw new ArgumentException("Font must be a DirectWriteFont", nameof(font));
-        }
-
-        // Use cached native format when available, fall back to temporary (mirrors CreateTextLayout).
-        nint textFormat;
-        bool ownFormat;
-        if (_textFormatCache != null)
-        {
-            textFormat = _textFormatCache.GetOrCreate(_dwriteFactory, dwFont, horizontalAlignment, verticalAlignment, wrapping);
-            ownFormat = false;
-        }
-        else
-        {
-            textFormat = CreateDWriteTextFormat(dwFont, horizontalAlignment, verticalAlignment, wrapping);
-            ownFormat = true;
-        }
-        if (textFormat == 0)
-        {
-            return;
-        }
-
-        // Build layout rect so that width/height are converted to float independently of position,
-        // avoiding float precision loss from (float)(X+W) - (float)X != (float)W.
-        float left = (float)bounds.X;
-        float top = (float)bounds.Y;
-        float w = (float)bounds.Width;
-        float h = (float)bounds.Height;
-        var layoutRect = new D2D1_RECT_F(left, top, left + w, top + h);
-
-        nint textLayout = 0;
-        try
-        {
-            nint brush = GetSolidBrush(color);
-            var options = _textPixelSnap
-                ? D2D1_DRAW_TEXT_OPTIONS.CLIP | _colorFontOption
-                : D2D1_DRAW_TEXT_OPTIONS.NO_SNAP | D2D1_DRAW_TEXT_OPTIONS.CLIP | _colorFontOption;
-
-            if (trimming == TextTrimming.CharacterEllipsis)
-            {
-                int hr = DWriteVTable.CreateTextLayout((IDWriteFactory*)_dwriteFactory, text, textFormat,
-                    w, h, out textLayout);
-                if (hr >= 0 && textLayout != 0)
-                {
-                    ApplyCustomFontFallback(textLayout);
-                    // Trimming sign depends only on the format, so it is cached alongside it
-                    // when the format cache is available; otherwise built and released per call.
-                    nint trimmingSign = 0;
-                    bool ownTrimmingSign = false;
-                    if (_textFormatCache != null)
-                    {
-                        trimmingSign = _textFormatCache.GetOrCreateTrimmingSign(_dwriteFactory, textFormat);
-                    }
-                    else
-                    {
-                        DWriteVTable.CreateEllipsisTrimmingSign((IDWriteFactory*)_dwriteFactory, textFormat, out trimmingSign);
-                        ownTrimmingSign = true;
-                    }
-                    try
-                    {
-                        var dwriteTrimming = new DWRITE_TRIMMING { granularity = DWRITE_TRIMMING_GRANULARITY.CHARACTER };
-                        DWriteVTable.SetTrimming(textLayout, dwriteTrimming, trimmingSign);
-                        var rtLayout = _deviceContext != 0 ? _deviceContext : _renderTarget;
-                        D2D1VTable.DrawTextLayout((ID2D1RenderTarget*)rtLayout,
-                            new D2D1_POINT_2F(left, top), textLayout, brush, options);
-                    }
-                    finally
-                    {
-                        if (ownTrimmingSign)
-                        {
-                            ComHelpers.Release(trimmingSign);
-                        }
-                    }
-                    return;
-                }
-            }
-
-            // Use ID2D1DeviceContext (D2D 1.1) when available - required for ENABLE_COLOR_FONT.
-            var rt = _deviceContext != 0 ? _deviceContext : _renderTarget;
-            D2D1VTable.DrawText((ID2D1RenderTarget*)rt, text, textFormat, layoutRect, brush, options);
-        }
-        finally
-        {
-            ComHelpers.Release(textLayout);
-            if (ownFormat)
-            {
-                ComHelpers.Release(textFormat);
-            }
-        }
-    }
-
     protected override void DrawImageCore(IImage image, Rect destRect) =>
         DrawImageCore(image, destRect, new Rect(0, 0, image.PixelWidth, image.PixelHeight));
 
@@ -1606,7 +1530,7 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
     }
 
     // PathGeometry re-tessellation cache (report-shared-rendering.md #8, rendering-abstraction
-    // #4): PathGeometry is mutable and neutral-layer generic (unlike TextLayout, which is an
+    // #4): PathGeometry is mutable and neutral-layer generic (unlike BackendTextLayout, which is an
     // immutable, backend-created result with a single BackendHandle slot), and the same
     // instance is drawn with either fill rule depending on call site. Route chosen: a
     // conservative keyed cache local to this backend context (ConditionalWeakTable<PathGeometry,
@@ -1793,7 +1717,8 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
             }
 
             float w = maxWidth >= float.MaxValue ? float.MaxValue : (float)Math.Max(0, maxWidth);
-            int hr = DWriteVTable.CreateTextLayout((IDWriteFactory*)_dwriteFactory, text, textFormat, w, float.MaxValue, out textLayout);
+            int hr = DWriteVTable.CreateGdiCompatibleTextLayout(
+                (IDWriteFactory*)_dwriteFactory, text, textFormat, w, float.MaxValue, (float)DpiScale, useGdiNatural: false, out textLayout);
             if (hr < 0 || textLayout == 0)
             {
                 return Size.Empty;
@@ -1813,7 +1738,7 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
                 height += -metrics.top;
             }
 
-            return new Size(TextMeasurePolicy.ApplyWidthPadding(metrics.widthIncludingTrailingWhitespace), height);
+            return new Size(metrics.widthIncludingTrailingWhitespace, height);
         }
         finally
         {
@@ -1904,6 +1829,169 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
         DrawImageBitmapCore(image.GetOrCreateBitmap(_renderTarget, _renderTargetGeneration, _deviceContext), destRect, sourceRect);
     }
 
+    // One entry per open scope so End undoes exactly what its Begin did; 0 means the scope pushed
+    // nothing (already opaque, already inside a layer, or the layer could not be created).
+    private readonly Stack<nint> _opaqueBackdropLayers = new();
+
+    public override void BeginOpaqueBackdrop()
+    {
+        // Nothing to add when the target is already opaque (ClearType is on anyway) or when an
+        // enclosing scope already put us inside such a layer.
+        if (_clearTypeEnabled || _renderTarget == 0 || _opaqueBackdropLayers.Count > 0)
+        {
+            _opaqueBackdropLayers.Push(0);
+            return;
+        }
+
+        if (D2D1VTable.CreateLayer((ID2D1RenderTarget*)_renderTarget, out nint layer) < 0 || layer == 0)
+        {
+            _opaqueBackdropLayers.Push(0);
+            return;
+        }
+
+        // The scope fills its box opaquely as its first act, so that fill lands inside the layer and
+        // the text after it has real pixels to blend subpixel coverage against, even though the target
+        // itself carries per-pixel alpha. Content bounds stay unbounded: the layer is here for the
+        // ClearType option, and clipping to the element box would shave pixel-snapped borders.
+        var contentBounds = new D2D1_RECT_F(
+            -UNBOUNDED_CLIP_EXTENT,
+            -UNBOUNDED_CLIP_EXTENT,
+            UNBOUNDED_CLIP_EXTENT,
+            UNBOUNDED_CLIP_EXTENT);
+
+        if (_deviceContext != 0)
+        {
+            var parameters1 = new D2D1_LAYER_PARAMETERS1(
+                contentBounds: contentBounds,
+                geometricMask: 0,
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE.PER_PRIMITIVE,
+                maskTransform: D2D1_MATRIX_3X2_F.Identity,
+                opacity: 1.0f,
+                opacityBrush: 0,
+                layerOptions: D2D1_LAYER_OPTIONS1.INITIALIZE_FROM_BACKGROUND);
+
+            D2D1VTable.PushLayer((ID2D1DeviceContext*)_deviceContext, parameters1, layer);
+        }
+        else
+        {
+            var parameters = new D2D1_LAYER_PARAMETERS(
+                contentBounds: contentBounds,
+                geometricMask: 0,
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE.PER_PRIMITIVE,
+                maskTransform: D2D1_MATRIX_3X2_F.Identity,
+                opacity: 1.0f,
+                opacityBrush: 0,
+                layerOptions: D2D1_LAYER_OPTIONS.INITIALIZE_FOR_CLEARTYPE);
+
+            D2D1VTable.PushLayer((ID2D1RenderTarget*)_renderTarget, parameters, layer);
+        }
+
+        D2D1VTable.SetTextAntialiasMode((ID2D1RenderTarget*)_renderTarget, D2D1_TEXT_ANTIALIAS_MODE.CLEARTYPE);
+        _opaqueBackdropLayers.Push(layer);
+    }
+
+    public override void EndOpaqueBackdrop()
+    {
+        if (_opaqueBackdropLayers.Count == 0)
+        {
+            return;
+        }
+
+        nint layer = _opaqueBackdropLayers.Pop();
+        if (layer == 0 || _renderTarget == 0)
+        {
+            return;
+        }
+
+        D2D1VTable.SetTextAntialiasMode((ID2D1RenderTarget*)_renderTarget, D2D1_TEXT_ANTIALIAS_MODE.GRAYSCALE);
+        D2D1VTable.PopLayer((ID2D1RenderTarget*)_renderTarget);
+        ComHelpers.Release(layer);
+    }
+
+    // One entry per open scope so End undoes exactly what its Begin did; 0 means no layer was
+    // pushed and the scope fell back to the base per-primitive multiply.
+    private readonly Stack<nint> _opacityLayers = new();
+
+    public override void BeginOpacity(double opacity)
+    {
+        if (_renderTarget == 0 ||
+            D2D1VTable.CreateLayer((ID2D1RenderTarget*)_renderTarget, out nint layer) < 0 ||
+            layer == 0)
+        {
+            base.BeginOpacity(opacity);
+            _opacityLayers.Push(0);
+            return;
+        }
+
+        // A layer composites the scope once, so drawing that overlaps itself fades as one group
+        // instead of darkening where it overlaps. Content bounds stay unbounded: clipping to the
+        // element box would shave pixel-snapped borders.
+        var contentBounds = new D2D1_RECT_F(
+            -UNBOUNDED_CLIP_EXTENT,
+            -UNBOUNDED_CLIP_EXTENT,
+            UNBOUNDED_CLIP_EXTENT,
+            UNBOUNDED_CLIP_EXTENT);
+
+        float layerOpacity = (float)Math.Clamp(opacity, 0.0, 1.0);
+
+        if (_deviceContext != 0)
+        {
+            var parameters1 = new D2D1_LAYER_PARAMETERS1(
+                contentBounds: contentBounds,
+                geometricMask: 0,
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE.PER_PRIMITIVE,
+                maskTransform: D2D1_MATRIX_3X2_F.Identity,
+                opacity: layerOpacity,
+                opacityBrush: 0,
+                layerOptions: D2D1_LAYER_OPTIONS1.NONE);
+
+            D2D1VTable.PushLayer((ID2D1DeviceContext*)_deviceContext, parameters1, layer);
+        }
+        else
+        {
+            var parameters = new D2D1_LAYER_PARAMETERS(
+                contentBounds: contentBounds,
+                geometricMask: 0,
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE.PER_PRIMITIVE,
+                maskTransform: D2D1_MATRIX_3X2_F.Identity,
+                opacity: layerOpacity,
+                opacityBrush: 0,
+                layerOptions: D2D1_LAYER_OPTIONS.NONE);
+
+            D2D1VTable.PushLayer((ID2D1RenderTarget*)_renderTarget, parameters, layer);
+        }
+
+        _opacityLayers.Push(layer);
+    }
+
+    public override void EndOpacity()
+    {
+        if (_opacityLayers.Count == 0)
+        {
+            return;
+        }
+
+        nint layer = _opacityLayers.Pop();
+        if (layer == 0)
+        {
+            base.EndOpacity();
+            return;
+        }
+
+        if (_renderTarget == 0)
+        {
+            ComHelpers.Release(layer);
+            return;
+        }
+
+        D2D1VTable.PopLayer((ID2D1RenderTarget*)_renderTarget);
+        ComHelpers.Release(layer);
+    }
+
+    // Pure translation: the only case where a bitmap can be blitted 1:1 against the device grid.
+    private bool IsUnscaledAxisAligned()
+        => _transform.M12 == 0f && _transform.M21 == 0f && _transform.M11 == 1f && _transform.M22 == 1f;
+
     private void DrawImageBitmapCore(nint bmp, Rect destRect, Rect sourceRect)
     {
         if (_renderTarget == 0)
@@ -1923,6 +2011,20 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
         double ty = _transform.M32;
         var worldDest = new Rect(destRect.X + tx, destRect.Y + ty, destRect.Width, destRect.Height);
         var snappedWorldDest = LayoutRounding.SnapRectEdgesToPixels(worldDest, DpiScale);
+
+        // Within a pixel of native size (a BitmapCache at its own DPI): match the source exactly, or
+        // D2D resamples the whole bitmap by a sub-pixel factor and softens its pixel-snapped text.
+        if (IsUnscaledAxisAligned() &&
+            Math.Abs(snappedWorldDest.Width * DpiScale - sourceRect.Width) <= 1.0 &&
+            Math.Abs(snappedWorldDest.Height * DpiScale - sourceRect.Height) <= 1.0)
+        {
+            snappedWorldDest = new Rect(
+                snappedWorldDest.X,
+                snappedWorldDest.Y,
+                sourceRect.Width / DpiScale,
+                sourceRect.Height / DpiScale);
+        }
+
         var snappedLocalDest = new Rect(
             snappedWorldDest.X - tx,
             snappedWorldDest.Y - ty,

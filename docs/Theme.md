@@ -82,6 +82,24 @@ ThemeManager.DefaultMetrics = ThemeMetrics.Default with
 };
 ```
 
+#### Default font and the system font
+
+When `FontFamily` is not specified, the theme follows the platform's system UI font: the configured UI font on Windows (localized, e.g. Malgun Gothic on Korean Windows), `.AppleSystemUIFont` on macOS, and `sans-serif` on X11. Assign `ThemeMetrics.SystemFontFamily` to state that explicitly, and read `IsSystemFontFamily` to check whether the system font is in effect.
+
+Assigning a family name uses that font instead of the system font, including names that match a platform's own system font such as `"Segoe UI"`.
+
+```csharp
+// Pin Segoe UI instead of the system font
+ThemeManager.DefaultMetrics = ThemeMetrics.Default with { FontFamily = "Segoe UI" };
+
+// Follow the system font, change only the size
+ThemeManager.DefaultMetrics = ThemeMetrics.Default with { FontSize = 13 };
+```
+
+`FontFamily` resolves on read, so any read after the platform package registers (`Win32Platform.Register()` and friends) reports the family that will actually be used. `ThemeMetrics.Default.FontFamily` gives the system font; `ThemeManager.DefaultMetrics.FontFamily` gives the final font including your override.
+
+Characters missing from the chosen font are covered by the font fallback chain, so pinning Segoe UI still renders Korean, Japanese, and Chinese text.
+
 ---
 
 ## 2. Theme setup at startup

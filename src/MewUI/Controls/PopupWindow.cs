@@ -32,17 +32,17 @@ internal sealed class PopupWindow : Window
     internal Func<nint, bool>? WatchTransferAllowed { get; set; }
 
     /// <summary>
-    /// Shows this popup surface at the given screen position (DIPs) in one atomic operation:
+    /// Shows this popup surface at the given screen position (device pixels) in one atomic operation:
     /// the position is latched before the backend maps the window, and the dismiss watch is armed
     /// once it is visible. Set <see cref="DismissRequested"/> before calling to opt into the watch.
     /// </summary>
-    internal void ShowSurface(Window owner, Point? screenPosition)
+    internal void ShowSurface(Window owner, (int X, int Y)? screenPositionPx)
     {
         // Position must be resolved before Show: backends place the window before mapping it,
         // and mapping first would flash the surface at a stale position.
-        if (screenPosition is Point position)
+        if (screenPositionPx is { } position)
         {
-            StartupPosition = position;
+            StartupPositionPx = position;
         }
 
         Show(owner);

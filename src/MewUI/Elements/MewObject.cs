@@ -8,7 +8,9 @@ namespace Aprillz.MewUI.Controls;
 public abstract class MewObject : IPropertyOwner
 {
     private PropertyValueStore? _propertyStore;
-    private Dictionary<int, IDisposable>? _propertyBindings;
+    private Dictionary<int, IPropertyBinding>? _propertyBindings;
+    private Dictionary<int, BindingRuntimeState>? _bindingStates;
+    private Dictionary<int, Action<BindingError?>>? _bindingErrorChangedCallbacks;
     private Dictionary<int, Action>? _propertyBindingCallbacks;
     // Value is a PropertyForwardEntry for the common single-forward case, or a
     // List<PropertyForwardEntry> once a second forward is registered for the same source property.
@@ -54,7 +56,7 @@ public abstract class MewObject : IPropertyOwner
                     var entry = list[index];
                     if (entry.TryGetTarget(out var target))
                     {
-                        target.PropertyStore.SetLocal(entry.TargetProperty, newValue);
+                        entry.UpdateTarget(target, newValue);
                     }
                     else
                     {
@@ -71,7 +73,7 @@ public abstract class MewObject : IPropertyOwner
                 var entry = (PropertyForwardEntry)forward;
                 if (entry.TryGetTarget(out var target))
                 {
-                    target.PropertyStore.SetLocal(entry.TargetProperty, newValue);
+                    entry.UpdateTarget(target, newValue);
                 }
                 else
                 {
@@ -94,6 +96,29 @@ public abstract class MewObject : IPropertyOwner
     internal bool HasChangeObservers(int propertyId)
         => (_propertyForwards?.ContainsKey(propertyId) ?? false)
            || (_propertyBindingCallbacks?.ContainsKey(propertyId) ?? false);
+
+    /// <summary>Adds the ids of every property something is observing on this object.</summary>
+    internal void GetObservedPropertyIds(List<int> result)
+    {
+        if (_propertyForwards != null)
+        {
+            foreach (int id in _propertyForwards.Keys)
+            {
+                result.Add(id);
+            }
+        }
+
+        if (_propertyBindingCallbacks != null)
+        {
+            foreach (int id in _propertyBindingCallbacks.Keys)
+            {
+                if (!result.Contains(id))
+                {
+                    result.Add(id);
+                }
+            }
+        }
+    }
 
     /// <summary>
     /// Fires observers (forwards/binding callbacks) for an inherited-value change that was resolved
@@ -133,6 +158,24 @@ public abstract class MewObject : IPropertyOwner
     /// </summary>
     internal T GetBindingValue<T>(MewProperty<T> property) => GetValue(property);
 
+    /// <summary>
+    /// Boxed effective-value read for binding and inherited-context refresh paths.
+    /// </summary>
+    internal object? GetBindingValue(MewProperty property)
+    {
+        if (!property.Inherits)
+            return PropertyStore.GetBoxedValue(property);
+
+        var source = PropertyStore.GetSource(property.Id);
+        if (source > ValueSource.Inherited)
+            return PropertyStore.GetBoxedValue(property);
+
+        if (source == ValueSource.Inherited && IsInheritedCacheCurrent())
+            return PropertyStore.GetBoxedValue(property);
+
+        return ResolveInheritedValueBoxed(property);
+    }
+
     // Whether cached inherited values still match the current ancestor chain.
     // Elements override this with a context-version check so a reparent invalidates lazily.
     private protected virtual bool IsInheritedCacheCurrent() => true;
@@ -143,6 +186,12 @@ public abstract class MewObject : IPropertyOwner
     /// </summary>
     protected virtual T ResolveInheritedValue<T>(MewProperty<T> property)
         => property.GetDefaultForType(PropertyStore.OwnerType);
+
+    /// <summary>
+    /// Boxed counterpart of <see cref="ResolveInheritedValue{T}"/>.
+    /// </summary>
+    internal virtual object? ResolveInheritedValueBoxed(MewProperty property)
+        => property.GetBoxedDefaultForType(PropertyStore.OwnerType);
 
     /// <summary>
     /// Sets the local (user-defined) value of a property.
@@ -162,17 +211,251 @@ public abstract class MewObject : IPropertyOwner
                 $"Use SetValue(MewPropertyKey<T>, T) with the registered key.");
         }
 
+        bool hadBinding = HasPropertyBinding(property.Id);
+        if (!hadBinding)
+        {
+            PropertyStore.SetLocal(property, value);
+            return;
+        }
+
+        PropertyStore.ValidateValueCandidate(property, value);
+        BindingDiagnostics.ReportDirectWrite(this, property);
+        DisposeExistingBinding(property.Id);
+        PropertyStore.SetLocalPrevalidated(property, value);
+        PropertyStore.ClearSource(property.Id, ValueSource.Binding);
+    }
+
+    /// <summary>
+    /// Updates a binding-owned target value without bypassing read-only, validation, or coercion
+    /// rules.
+    /// </summary>
+    internal void UpdateBindingTarget<T>(MewProperty<T> property, T value)
+    {
+        ThrowIfReadOnly(property);
+        PropertyStore.SetBinding(property, value);
+    }
+
+    internal void UpdateBindingTarget(MewProperty property, object? value)
+    {
+        ThrowIfReadOnly(property);
+        PropertyStore.SetBinding(property, value);
+    }
+
+    internal bool ApplyBindingTargetValue<T>(MewProperty<T> property, T value)
+    {
+        RecordBindingCandidate(property.Id, value);
+        if (HasPropertyBinding(property.Id) &&
+            PropertyStore.GetSource(property.Id) == ValueSource.Default &&
+            EqualityComparer<T>.Default.Equals(GetBindingValue(property), value))
+        {
+            RecordBindingSuccess(property.Id, value);
+            return true;
+        }
+
+        try
+        {
+            UpdateBindingTarget(property, value);
+            object? effectiveCandidate = PropertyStore.GetSourceValue(property, ValueSource.Binding);
+            RecordBindingSuccess(property.Id, effectiveCandidate);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            if (!HasPropertyBinding(property.Id))
+            {
+                throw;
+            }
+
+            ReportBindingError(
+                property,
+                value,
+                BindingStatus.ValidationError,
+                BindingErrorStage.TargetValidation,
+                ex);
+            return false;
+        }
+    }
+
+    internal bool ApplyBindingTargetValue(MewProperty property, object? value)
+    {
+        RecordBindingCandidate(property.Id, value);
+        if (HasPropertyBinding(property.Id) &&
+            PropertyStore.GetSource(property.Id) == ValueSource.Default &&
+            Equals(GetBindingValue(property), value))
+        {
+            RecordBindingSuccess(property.Id, value);
+            return true;
+        }
+
+        try
+        {
+            UpdateBindingTarget(property, value);
+            object? effectiveCandidate = PropertyStore.GetSourceValue(property, ValueSource.Binding);
+            RecordBindingSuccess(property.Id, effectiveCandidate);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            if (!HasPropertyBinding(property.Id))
+            {
+                throw;
+            }
+
+            ReportBindingError(
+                property,
+                value,
+                BindingStatus.ValidationError,
+                BindingErrorStage.TargetValidation,
+                ex);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Changes the current target value without replacing a binding. A later binding update can
+    /// replace this value. When no binding supplies a target value, this sets a local value.
+    /// </summary>
+    public void SetCurrentValue<T>(MewProperty<T> property, T value)
+    {
+        ArgumentNullException.ThrowIfNull(property);
+        ThrowIfReadOnly(property);
+
+        if (_propertyBindings?.TryGetValue(property.Id, out var binding) == true &&
+            binding.Capabilities.ProvidesTargetValue)
+        {
+            RecordBindingCandidate(property.Id, value);
+            try
+            {
+                binding.UpdateTargetValue(value);
+                object? candidate = PropertyStore.GetSourceValue(property, ValueSource.Binding);
+                RecordBindingSuccess(property.Id, candidate);
+            }
+            catch (Exception ex)
+            {
+                ReportBindingError(
+                    property,
+                    value,
+                    BindingStatus.ValidationError,
+                    BindingErrorStage.TargetValidation,
+                    ex);
+            }
+            return;
+        }
+
         PropertyStore.SetLocal(property, value);
     }
 
     /// <summary>
-    /// Writes a local property value for the binding infrastructure without bypassing read-only,
-    /// validation, or coercion rules.
+    /// Commits a target value to a TwoWay binding. OneWay bindings retain the target candidate
+    /// without updating their source, and an unbound property receives a local value.
     /// </summary>
-    internal void SetBindingValue<T>(MewProperty<T> property, T value)
+    protected void CommitTargetValue<T>(MewProperty<T> property, T value)
     {
+        ArgumentNullException.ThrowIfNull(property);
         ThrowIfReadOnly(property);
-        PropertyStore.SetLocal(property, value);
+
+        if (_propertyBindings == null ||
+            !_propertyBindings.TryGetValue(property.Id, out var binding) ||
+            !binding.Capabilities.ProvidesTargetValue)
+        {
+            PropertyStore.SetLocal(property, value);
+            return;
+        }
+
+        RecordBindingCandidate(property.Id, value);
+
+        if (!binding.Capabilities.AcceptsTargetCommit)
+        {
+            try
+            {
+                binding.UpdateTargetValue(value);
+                object? targetValue = PropertyStore.GetSourceValue(property, ValueSource.Binding);
+                RecordBindingSuccess(property.Id, targetValue);
+            }
+            catch (Exception ex)
+            {
+                ReportBindingError(
+                    property,
+                    value,
+                    BindingStatus.ValidationError,
+                    BindingErrorStage.TargetValidation,
+                    ex);
+            }
+            return;
+        }
+
+        object? candidate = value;
+        try
+        {
+            PropertyStore.ValidateValueCandidate(property, value);
+            if (candidate != null)
+            {
+                candidate = PropertyStore.CoerceValueCandidate(property, candidate);
+            }
+        }
+        catch (Exception ex)
+        {
+            ReportBindingError(
+                property,
+                value,
+                BindingStatus.ValidationError,
+                BindingErrorStage.TargetValidation,
+                ex);
+            return;
+        }
+
+        BindingCommitResult result = binding.CommitTargetValue(candidate);
+        if (!result.Succeeded)
+        {
+            try
+            {
+                binding.UpdateTargetValue(value);
+            }
+            catch (Exception ex)
+            {
+                ReportBindingError(
+                    property,
+                    value,
+                    BindingStatus.ValidationError,
+                    BindingErrorStage.TargetValidation,
+                    ex);
+                return;
+            }
+
+            ReportBindingError(property.Id, candidate, result.Error!);
+            return;
+        }
+
+        try
+        {
+            binding.UpdateTargetValue(result.Value);
+            object? normalized = PropertyStore.GetSourceValue(property, ValueSource.Binding);
+            RecordBindingSuccess(property.Id, normalized);
+        }
+        catch (Exception ex)
+        {
+            ReportBindingError(
+                property,
+                candidate,
+                BindingStatus.BindingError,
+                BindingErrorStage.Consistency,
+                ex);
+        }
+    }
+
+    /// <summary>
+    /// Clears only the local value for a property. Attached bindings and their target values are
+    /// preserved.
+    /// </summary>
+    public void ClearLocalValue<T>(MewProperty<T> property)
+    {
+        ArgumentNullException.ThrowIfNull(property);
+        ThrowIfReadOnly(property);
+        if (PropertyStore.HasValue(property.Id, ValueSource.Local))
+        {
+            BindingDiagnostics.ReportLocalClear(this, property);
+        }
+        PropertyStore.ClearLocalValue(property);
     }
 
     /// <summary>
@@ -201,8 +484,7 @@ public abstract class MewObject : IPropertyOwner
     protected void CoerceValue<T>(MewProperty<T> property)
     {
         if (property.CoerceCallback == null) return;
-        var current = GetValue(property);
-        PropertyStore.SetValue(property, current!, PropertyStore.GetSource(property.Id));
+        PropertyStore.CoerceValue(property);
     }
 
     /// <summary>
@@ -219,11 +501,11 @@ public abstract class MewObject : IPropertyOwner
         // Dispose existing binding BEFORE creating the new one.
         // The new binding's constructor registers a callback by property.Id;
         // if the old binding were disposed afterwards, it would remove the new callback.
-        DisposeExistingBinding(property.Id);
+        PreparePropertyBinding(property.Id);
 
         var resolvedMode = mode ?? (property.BindsTwoWayByDefault ? BindingMode.TwoWay : BindingMode.OneWay);
         var binding = new MewPropertyBinding<T>(this, property, source, resolvedMode);
-        StorePropertyBinding(property.Id, binding);
+        ActivatePropertyBinding(property.Id, binding);
     }
 
     /// <summary>
@@ -242,7 +524,7 @@ public abstract class MewObject : IPropertyOwner
         ArgumentNullException.ThrowIfNull(convert);
         ThrowIfReadOnly(property);
 
-        DisposeExistingBinding(property.Id);
+        PreparePropertyBinding(property.Id);
 
         var resolvedMode = mode ?? (property.BindsTwoWayByDefault ? BindingMode.TwoWay : BindingMode.OneWay);
         if (resolvedMode == BindingMode.TwoWay && convertBack == null)
@@ -252,7 +534,7 @@ public abstract class MewObject : IPropertyOwner
 
         var binding = new MewPropertyBinding<TProp, TSource>(
             this, property, source, convert, convertBack, resolvedMode);
-        StorePropertyBinding(property.Id, binding);
+        ActivatePropertyBinding(property.Id, binding);
     }
 
     /// <summary>
@@ -282,7 +564,7 @@ public abstract class MewObject : IPropertyOwner
                 nameof(path));
         }
 
-        DisposeExistingBinding(property.Id);
+        PreparePropertyBinding(property.Id);
 
         var binding = new MewPropertyPathBinding<T, TRoot, T>(
             this,
@@ -293,7 +575,7 @@ public abstract class MewObject : IPropertyOwner
             static value => value,
             resolvedMode,
             fallbackValue);
-        StorePropertyBinding(property.Id, binding);
+        ActivatePropertyBinding(property.Id, binding);
     }
 
     /// <summary>
@@ -333,7 +615,7 @@ public abstract class MewObject : IPropertyOwner
                 nameof(path));
         }
 
-        DisposeExistingBinding(property.Id);
+        PreparePropertyBinding(property.Id);
 
         var binding = new MewPropertyPathBinding<TProp, TRoot, TSource>(
             this,
@@ -344,17 +626,22 @@ public abstract class MewObject : IPropertyOwner
             convertBack,
             resolvedMode,
             fallbackValue);
-        StorePropertyBinding(property.Id, binding);
+        ActivatePropertyBinding(property.Id, binding);
     }
 
     /// <summary>
-    /// Removes the binding currently attached to the specified property.
-    /// The property's current value is preserved.
+    /// Removes the binding and its target value from the specified property, revealing the next
+    /// lower value source.
     /// </summary>
     public void ClearBinding<T>(MewProperty<T> property)
     {
         ArgumentNullException.ThrowIfNull(property);
+        if (HasPropertyBinding(property.Id) || HasBindingTargetValue(property.Id))
+        {
+            BindingDiagnostics.ReportBindingClear(this, property);
+        }
         DisposeExistingBinding(property.Id);
+        PropertyStore.ClearSource(property.Id, ValueSource.Binding);
     }
 
     private static void ThrowIfReadOnly(MewProperty property)
@@ -366,6 +653,164 @@ public abstract class MewObject : IPropertyOwner
         }
     }
 
+    internal bool HasPropertyBinding(int propertyId)
+        => _propertyBindings?.ContainsKey(propertyId) == true;
+
+    internal bool HasBindingTargetValue(int propertyId)
+        => _propertyStore?.HasValue(propertyId, ValueSource.Binding) == true;
+
+    internal BindingStateSnapshot? GetBindingState(int propertyId)
+    {
+        if (_bindingStates == null || !_bindingStates.TryGetValue(propertyId, out var state))
+        {
+            return null;
+        }
+
+        return new BindingStateSnapshot(
+            state.HasCurrentCandidate,
+            state.CurrentCandidate,
+            state.HasLastSuccessfulTargetValue,
+            state.LastSuccessfulTargetValue,
+            state.Error);
+    }
+
+    internal PropertyValueTrace GetPropertyValueTrace(MewProperty property)
+    {
+        ArgumentNullException.ThrowIfNull(property);
+
+        // Resolve inherited values through the same context path as GetValue before taking the
+        // slot snapshot. This materializes the current Inherited candidate when one exists.
+        _ = GetBindingValue(property);
+        return PropertyStore.GetValueTrace(property, GetBindingState(property.Id));
+    }
+
+    internal void AddBindingErrorChangedCallback(int propertyId, Action<BindingError?> callback)
+    {
+        _bindingErrorChangedCallbacks ??= new Dictionary<int, Action<BindingError?>>(capacity: 2);
+        if (_bindingErrorChangedCallbacks.TryGetValue(propertyId, out var existing))
+            _bindingErrorChangedCallbacks[propertyId] = existing + callback;
+        else
+            _bindingErrorChangedCallbacks[propertyId] = callback;
+    }
+
+    internal void RemoveBindingErrorChangedCallback(int propertyId, Action<BindingError?> callback)
+    {
+        if (_bindingErrorChangedCallbacks?.TryGetValue(propertyId, out var existing) != true)
+        {
+            return;
+        }
+
+        var updated = existing - callback;
+        if (updated == null)
+            _bindingErrorChangedCallbacks.Remove(propertyId);
+        else
+            _bindingErrorChangedCallbacks[propertyId] = updated;
+    }
+
+    internal void ReportBindingError<T>(
+        MewProperty<T> property,
+        object? candidate,
+        BindingStatus status,
+        BindingErrorStage stage,
+        Exception exception)
+        => ReportBindingError(
+            property.Id,
+            candidate,
+            new BindingError(status, stage, exception.Message, exception));
+
+    internal void ReportBindingError(
+        MewProperty property,
+        object? candidate,
+        BindingStatus status,
+        BindingErrorStage stage,
+        Exception exception)
+        => ReportBindingError(
+            property.Id,
+            candidate,
+            new BindingError(status, stage, exception.Message, exception));
+
+    private void ReportBindingError(int propertyId, object? candidate, BindingError error)
+    {
+        if (_propertyBindings?.ContainsKey(propertyId) != true)
+        {
+            return;
+        }
+
+        var state = GetOrCreateBindingState(propertyId);
+        state.HasCurrentCandidate = true;
+        state.CurrentCandidate = candidate;
+        state.Error = error;
+        NotifyBindingErrorChanged(propertyId, error);
+    }
+
+    private void RecordBindingCandidate(int propertyId, object? candidate)
+    {
+        if (_propertyBindings?.ContainsKey(propertyId) != true)
+        {
+            return;
+        }
+
+        var state = GetOrCreateBindingState(propertyId);
+        state.HasCurrentCandidate = true;
+        state.CurrentCandidate = candidate;
+    }
+
+    private void RecordBindingSuccess(int propertyId, object? value)
+    {
+        if (_propertyBindings?.ContainsKey(propertyId) != true)
+        {
+            return;
+        }
+
+        var state = GetOrCreateBindingState(propertyId);
+        bool hadError = state.Error != null;
+        state.HasCurrentCandidate = true;
+        state.CurrentCandidate = value;
+        state.HasLastSuccessfulTargetValue = true;
+        state.LastSuccessfulTargetValue = value;
+        state.Error = null;
+        if (hadError)
+        {
+            NotifyBindingErrorChanged(propertyId, null);
+        }
+    }
+
+    private BindingRuntimeState GetOrCreateBindingState(int propertyId)
+    {
+        _bindingStates ??= new Dictionary<int, BindingRuntimeState>(capacity: 2);
+        if (!_bindingStates.TryGetValue(propertyId, out var state))
+        {
+            state = new BindingRuntimeState();
+            _bindingStates[propertyId] = state;
+        }
+
+        return state;
+    }
+
+    private void ClearBindingState(int propertyId)
+    {
+        if (_bindingStates?.Remove(propertyId, out var state) == true && state.Error != null)
+        {
+            NotifyBindingErrorChanged(propertyId, null);
+        }
+    }
+
+    private void NotifyBindingErrorChanged(int propertyId, BindingError? error)
+    {
+        OnBindingErrorChanged(propertyId, error);
+
+        if (_bindingErrorChangedCallbacks?.TryGetValue(propertyId, out var callback) == true)
+        {
+            callback(error);
+        }
+    }
+
+    /// <summary>
+    /// Allows framework types to project per-property binding failures into a higher-level state.
+    /// </summary>
+    internal virtual void OnBindingErrorChanged(int propertyId, BindingError? error)
+    { }
+
     private void DisposeExistingBinding(int propertyId)
     {
         if (_propertyBindings?.TryGetValue(propertyId, out var old) == true)
@@ -374,12 +819,50 @@ public abstract class MewObject : IPropertyOwner
             try { old.Dispose(); }
             catch { /* best-effort */ }
         }
+
+        ClearBindingState(propertyId);
     }
 
-    private void StorePropertyBinding(int propertyId, IDisposable binding)
+    private void StorePropertyBinding(int propertyId, IPropertyBinding binding)
     {
-        _propertyBindings ??= new Dictionary<int, IDisposable>(capacity: 2);
+        _propertyBindings ??= new Dictionary<int, IPropertyBinding>(capacity: 2);
         _propertyBindings[propertyId] = binding;
+        GetOrCreateBindingState(propertyId);
+    }
+
+    private void ActivatePropertyBinding(int propertyId, IPropertyBinding binding)
+    {
+        StorePropertyBinding(propertyId, binding);
+        try
+        {
+            binding.Initialize();
+        }
+        catch
+        {
+            DisposeExistingBinding(propertyId);
+            PropertyStore.ClearSource(propertyId, ValueSource.Binding);
+            throw;
+        }
+    }
+
+    private void PreparePropertyBinding(int propertyId)
+    {
+        var property = MewPropertyRegistry.GetProperty(propertyId);
+        if (property != null)
+        {
+            if (HasPropertyBinding(propertyId))
+            {
+                BindingDiagnostics.ReportBindingReplacement(this, property);
+            }
+
+            if (PropertyStore.HasValue(propertyId, ValueSource.Local))
+            {
+                BindingDiagnostics.ReportLocalReplacement(this, property);
+            }
+        }
+
+        DisposeExistingBinding(propertyId);
+        PropertyStore.ClearSource(propertyId, ValueSource.Local);
     }
 
     internal void AddPropertyBindingCallback(int propertyId, Action callback)
@@ -405,10 +888,14 @@ public abstract class MewObject : IPropertyOwner
 
     // Returns the created entry so the caller can remove exactly this forward later,
     // even if another forward is later added for the same source property.
-    internal PropertyForwardEntry AddPropertyForward(int sourcePropertyId, MewObject target, MewProperty targetProperty)
+    internal PropertyForwardEntry AddPropertyForward(
+        int sourcePropertyId,
+        MewObject target,
+        MewProperty targetProperty,
+        ValueSource targetSource = ValueSource.Binding)
     {
         _propertyForwards ??= new(capacity: 2);
-        var entry = new PropertyForwardEntry(target, targetProperty);
+        var entry = new PropertyForwardEntry(target, targetProperty, targetSource);
         if (_propertyForwards.TryGetValue(sourcePropertyId, out var existing))
         {
             if (existing is List<PropertyForwardEntry> list)
@@ -447,9 +934,8 @@ public abstract class MewObject : IPropertyOwner
 
     /// <summary>
     /// Binds a <see cref="MewProperty{T}"/> on this object to a <see cref="MewProperty{T}"/> on a source object.
-    /// When the source property changes, this object's property is written as a local value,
-    /// overwriting any local value set on this object; to set a local value over a bound property,
-    /// clear the binding first. Replaces any existing binding for the same property.
+    /// When the source property changes, this object's binding value is updated without replacing
+    /// a local value. Replaces any existing binding for the same property.
     /// </summary>
     public void SetBinding<T>(MewProperty<T> property, MewObject source, MewProperty<T> sourceProperty)
     {
@@ -458,10 +944,10 @@ public abstract class MewObject : IPropertyOwner
         ArgumentNullException.ThrowIfNull(sourceProperty);
         ThrowIfReadOnly(property);
 
-        DisposeExistingBinding(property.Id);
+        PreparePropertyBinding(property.Id);
 
         var binding = new MewObjectPropertyBinding<T>(this, property, source, sourceProperty);
-        StorePropertyBinding(property.Id, binding);
+        ActivatePropertyBinding(property.Id, binding);
     }
 
     /// <summary>
@@ -482,7 +968,7 @@ public abstract class MewObject : IPropertyOwner
         ArgumentNullException.ThrowIfNull(convert);
         ThrowIfReadOnly(property);
 
-        DisposeExistingBinding(property.Id);
+        PreparePropertyBinding(property.Id);
 
         var resolvedMode = mode ?? (property.BindsTwoWayByDefault ? BindingMode.TwoWay : BindingMode.OneWay);
         if (resolvedMode == BindingMode.TwoWay && convertBack == null)
@@ -492,7 +978,7 @@ public abstract class MewObject : IPropertyOwner
 
         var binding = new MewObjectPropertyBinding<TProp, TSource>(
             this, property, source, sourceProperty, convert, convertBack, resolvedMode);
-        StorePropertyBinding(property.Id, binding);
+        ActivatePropertyBinding(property.Id, binding);
     }
 
     /// <summary>
@@ -512,11 +998,26 @@ public abstract class MewObject : IPropertyOwner
             _propertyBindings = null;
         }
 
+        _bindingStates?.Clear();
+        _bindingStates = null;
+
+        _bindingErrorChangedCallbacks?.Clear();
+        _bindingErrorChangedCallbacks = null;
+
         _propertyBindingCallbacks?.Clear();
         _propertyBindingCallbacks = null;
 
         _propertyForwards?.Clear();
         _propertyForwards = null;
+    }
+
+    private sealed class BindingRuntimeState
+    {
+        public bool HasCurrentCandidate;
+        public object? CurrentCandidate;
+        public bool HasLastSuccessfulTargetValue;
+        public object? LastSuccessfulTargetValue;
+        public BindingError? Error;
     }
 }
 
@@ -527,13 +1028,27 @@ internal sealed class PropertyForwardEntry
 {
     private readonly WeakReference<MewObject> _target;
 
-    public PropertyForwardEntry(MewObject target, MewProperty targetProperty)
+    public PropertyForwardEntry(
+        MewObject target,
+        MewProperty targetProperty,
+        ValueSource targetSource)
     {
         _target = new WeakReference<MewObject>(target);
         TargetProperty = targetProperty;
+        TargetSource = targetSource;
     }
 
     public MewProperty TargetProperty { get; }
 
+    public ValueSource TargetSource { get; }
+
     public bool TryGetTarget(out MewObject target) => _target.TryGetTarget(out target!);
+
+    public void UpdateTarget(MewObject target, object? value)
+    {
+        if (TargetSource == ValueSource.Binding)
+            target.ApplyBindingTargetValue(TargetProperty, value);
+        else
+            target.PropertyStore.SetValue(TargetProperty, value, TargetSource);
+    }
 }
