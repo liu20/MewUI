@@ -86,9 +86,11 @@ public sealed class AdvancedGridView : ScrollableItemsBase, IFocusIntoViewHost, 
     public AdvancedGridView()
     {
         _selection = new SelectionSync(() => _core.ItemsSource,
-            value => SetValue(SelectedIndexProperty, value),
-            value => SetValue(SelectedItemProperty, value),
-            value => SetValue(SelectedItemsPropertyKey, value));
+            value => SetCurrentValue(SelectedIndexProperty, value),
+            value => SetCurrentValue(SelectedItemProperty, value),
+            value => SetValue(SelectedItemsPropertyKey, value),
+            value => CommitTargetValue(SelectedIndexProperty, value),
+            value => CommitTargetValue(SelectedItemProperty, value));
 
         CellPadding = Theme.Metrics.ItemPadding;
 
