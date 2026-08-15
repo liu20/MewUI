@@ -118,7 +118,7 @@ MewUI는 작고 명시적인 코어 위에 플랫폼 호스트와 렌더링 백�
 - **NativeAOT + Trim 친화**
 - 작은 크기, 빠른 시작시간, 적은 메모리 사용
 - **XAML 없이 Fluent한 C# 마크업**으로 UI 트리 구성
-- **AOT 친화적인 명시적 바인딩**
+- **AOT 친화적인 명시적 바인딩** (중첩 경로 지원)
 - 코어는 얇게 유지하고 큰 기능은 선택형 확장 패키지로 분리
 
 ### 지향하지 않는 것
@@ -144,27 +144,20 @@ MewUI는 작고 명시적인 코어 위에 플랫폼 호스트와 렌더링 백�
 
 NativeAOT 실행 파일 크기는 플랫폼 호스트, 렌더링 백엔드, 리소스, publish 옵션에 따라 달라집니다. 아래 표는 **main executable만** 측정한 값이며, ZIP은 같은 실행 파일을 기본 측정 설정으로 압축한 보조값입니다. 크기는 **1 MB = 1024 KB** 기준입니다.
 
-| 샘플 | 플랫폼 / 백엔드 | 실행 파일 | ZIP |
-|---|---|---:|---:|
-| Hello World | Windows x64 / GDI | 2.907 MB | 1.324 MB |
-| Hello World | Windows x64 / Direct2D | 3.046 MB | 1.381 MB |
-| Hello World | Windows x64 / MewVG | 3.211 MB | 1.458 MB |
-| Hello World | Linux x64 / X11 + MewVG | 4.414 MB | 2.126 MB |
-| Hello World | macOS arm64 / MewVG | 2.635 MB | 1.186 MB |
-| Gallery | Windows x64 / GDI | 5.838 MB | 2.564 MB |
-| Gallery | Windows x64 / Direct2D | 5.959 MB | 2.612 MB |
-| Gallery | Windows x64 / MewVG | 6.176 MB | 2.707 MB |
-| Gallery | Linux x64 / X11 + MewVG | 7.420 MB | 3.518 MB |
-| Gallery | macOS arm64 / MewVG | 5.625 MB | 2.555 MB |
+재현 가능한 크기 probe, 회귀 예산, NativeAOT map 분석 방법은 [NativeAOT 크기 도구](tools/aot-size/README.md)를 참고하세요.
 
-<img src="https://github.com/user-attachments/assets/92dae0e7-6ecb-46f8-b405-2fcab629375b" />
+![MewUI publish size comparison](docs/assets/nativeaot-size-chart.svg)
+
+![MewUI publish size table](docs/assets/nativeaot-size-table.svg)
+
+[측정 데이터](tools/aot-size/release-sizes.json)
 
 Gallery는 full-featured showcase 샘플입니다. 최소 배포 크기의 기준은 Hello World 행을 참고하세요.
 
 ---
 ## 🔗 상태/바인딩(AOT 친화)
 
-바인딩은 리플렉션 없이, 명시적/델리게이트 기반입니다:
+바인딩은 리플렉션 없이, 명시적/델리게이트 기반입니다. 소스는 세 가지를 지원합니다. `ObservableValue<T>`, `INotifyPropertyChanged`를 구현한 뷰모델, 다른 요소의 `MewProperty<T>`입니다. 한 경로 안에 섞어 쓸 수 있고, `INotifyCollectionChanged` 알림도 받습니다.
 
 ```csharp
 var percent = new ObservableValue<double>(
@@ -180,51 +173,46 @@ var label  = new Label()
                     convert: v => $"Percent ({v:P0})"); 
 ```
 
-**중첩 소스** - `BindingPath<TRoot, TValue>`는 프로퍼티 이름 문자열, 리플렉션, 코드 생성 없이 중첩된 소스 체인을 따라 바인딩합니다. `Then` 하나마다 세그먼트를 덧붙이며, 관찰되는 세그먼트는 중간 값이 교체되면 자동으로 다시 연결됩니다.
+**INotifyPropertyChanged** - 평범한 MVVM 뷰모델을 감싸지 않고 그대로 씁니다. 구독은 약한 참조로 걸리므로 뷰모델 때문에 화면 객체가 메모리에 남지 않습니다.
 
 ```csharp
-// [source].Customer.City 바인딩
-var city = new TextBlock().Bind(
-    TextBlock.TextProperty,
-    order,
-    BindingPath
-        .From<OrderViewModel>()
-        .Then(order => order.Customer)      // 관찰 세그먼트: 교체 시 재연결
-        .Then(customer => customer!.City),  // leaf
-    mode: BindingMode.OneWay,
-    fallbackValue: "-");
+new Label().Bind(Label.TextProperty, vm, x => x.UserName);
+
+// TextBox는 기본이 양방향이라 입력한 값이 뷰모델에 반영됩니다
+new TextBox().Bind(TextBox.TextProperty, vm, x => x.UserName);
 ```
 
-`MewProperty<T>`도 세그먼트로 쓸 수 있습니다:
+**중첩 경로** - 점으로 이어 쓰면 컴파일 타임에 단계별 세그먼트로 분해됩니다. 문자열도 리플렉션도 없고, 중간 값이 교체되면 그 뒤 단계가 자동으로 다시 연결됩니다.
 
 ```csharp
-// [source].Padding.Left 바인딩
-var readout = new TextBlock().Bind(
-    TextBlock.TextProperty,
-    source,
-    BindingPath
-        .From<Control>()
-        .Then(Control.PaddingProperty)   // MewProperty 세그먼트: 관찰
-        .Then(padding => padding.Left),  // leaf
-    convert: left => $"{left}px",
-    mode: BindingMode.OneWay);
+// order.Customer.City
+var city = new TextBlock().Bind(TextBlock.TextProperty, order, x => x.Customer.City);
+
+// 인덱서. 0번 항목이 바뀌거나 앞에 항목이 추가/삭제되면 함께 갱신됩니다
+var first = new TextBlock().Bind(TextBlock.TextProperty, order, x => x.Lines[0].ProductName);
 ```
 
-관찰/스냅샷 세그먼트, null/fallback, TwoWay, 수명 규칙은 [Binding](docs/Binding.ko.md) 문서를 참고하세요.
+단계마다 멤버의 타입을 보고 관찰 방식을 고릅니다. `INotifyPropertyChanged`면 `PropertyChanged`, `ObservableValue<T>`면 그 알림, `MewObject`면 대응하는 `MewProperty`, 통지하는 컬렉션이면 `CollectionChanged`입니다.
+
+이 한 줄 문법은 .NET 9 이상 SDK로 빌드할 때 동작합니다. 그 아래에서는 같은 경로를 `BindingPath`와 `ThenNotifying`으로 명시해 쓰며, 잃는 것은 문법이지 기능이 아닙니다.
+
+세그먼트 종류, null/fallback, TwoWay, 컬렉션, 수명 규칙은 [Binding](docs/Binding.ko.md) 문서를 참고하세요.
 
 ---
 ## 🧱 컨트롤 / 패널
 
 컨트롤(구현됨):
-- `Button`, `ToggleButton`
+- `Button`, `ToggleButton`, `RepeatButton`, `SplitButton`, `DropDownButton`
 - `Label`, `TextBlock`, `Image`
-- `TextBox`, `MultiLineTextBox`, `PasswordBox`
+- `TextBox`, `MultiLineTextBox`, `SyntaxViewer`, `PasswordBox`
 - `CheckBox`, `RadioButton`, `ToggleSwitch`
 - `ComboBox`, `ListBox`, `TreeView`, `GridView`
 - `Slider`, `ProgressBar`, `ProgressRing`, `NumericUpDown`
 - `TabControl`, `GroupBox`, `Expander`, `Border`
 - `ColorPicker`, `DatePicker`, `Calendar`
 - `MenuBar`, `ContextMenu`, `ToolTip` (창 내 팝업)
+- `ToolBar` (선언한 밴드에 명령 그룹, 그립으로 끌어 재배치)
+- `NavigationView`
 - `ScrollViewer`
 - `Window`, `DispatcherTimer`
 

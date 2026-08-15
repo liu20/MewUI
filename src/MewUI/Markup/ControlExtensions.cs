@@ -1259,18 +1259,6 @@ public static class ControlExtensions
     #region Button
 
     /// <summary>
-    /// Sets the button content element.
-    /// </summary>
-    /// <param name="button">Target button.</param>
-    /// <param name="content">Content element.</param>
-    /// <returns>The button for chaining.</returns>
-    public static Button Content(this Button button, Element content)
-    {
-        button.Content = content;
-        return button;
-    }
-
-    /// <summary>
     /// Sets the button content to a centered text label. When <paramref name="accessKey"/> is true (default),
     /// "_" prefixes mark access key characters (e.g., "_Save" registers Alt+S).
     /// </summary>
@@ -1386,7 +1374,7 @@ public static class ControlExtensions
     /// <param name="button">Target button.</param>
     /// <param name="source">Observable source.</param>
     /// <returns>The button for chaining.</returns>
-    public static Button BindContent(this Button button, ObservableValue<Element?> source)
+    public static T BindContent<T>(this T button, ObservableValue<Element?> source) where T : Button
     {
         button.SetBinding(Button.ContentProperty, source, BindingMode.OneWay);
         return button;
@@ -1395,15 +1383,17 @@ public static class ControlExtensions
     /// <summary>
     /// Binds the button content element to a converted observable value.
     /// </summary>
+    /// <typeparam name="T">Button type.</typeparam>
     /// <typeparam name="TSource">Source value type.</typeparam>
     /// <param name="button">Target button.</param>
     /// <param name="source">Observable source.</param>
     /// <param name="convert">Conversion function.</param>
     /// <returns>The button for chaining.</returns>
-    public static Button BindContent<TSource>(
-        this Button button,
+    public static T BindContent<T, TSource>(
+        this T button,
         ObservableValue<TSource> source,
         Func<TSource, Element?> convert)
+        where T : Button
     {
         ArgumentNullException.ThrowIfNull(button);
         ArgumentNullException.ThrowIfNull(source);
@@ -1416,10 +1406,11 @@ public static class ControlExtensions
     /// <summary>
     /// Sets the semantic command invoked by the button.
     /// </summary>
-    public static Button Command(
-        this Button button,
+    public static T Command<T>(
+        this T button,
         Command? command,
         CommandPresentationMode presentation = CommandPresentationMode.None)
+        where T : Button
     {
         ArgumentNullException.ThrowIfNull(button);
         button.Command = command;
@@ -1430,10 +1421,11 @@ public static class ControlExtensions
     /// <summary>
     /// Binds the button's semantic command to an observable value.
     /// </summary>
-    public static Button BindCommand(
-        this Button button,
+    public static T BindCommand<T>(
+        this T button,
         ObservableValue<Command?> source,
         CommandPresentationMode presentation = CommandPresentationMode.None)
+        where T : Button
     {
         ArgumentNullException.ThrowIfNull(button);
         ArgumentNullException.ThrowIfNull(source);
@@ -1448,7 +1440,7 @@ public static class ControlExtensions
     /// <param name="button">Target button.</param>
     /// <param name="handler">Click handler.</param>
     /// <returns>The button for chaining.</returns>
-    public static Button OnClick(this Button button, Action handler)
+    public static T OnClick<T>(this T button, Action handler) where T : Button
     {
         button.Click += handler;
         return button;
@@ -1460,7 +1452,7 @@ public static class ControlExtensions
     /// <param name="button">Target button.</param>
     /// <param name="handler">Double click handler.</param>
     /// <returns>The button for chaining.</returns>
-    public static Button OnDoubleClick(this Button button, Action handler)
+    public static T OnDoubleClick<T>(this T button, Action handler) where T : Button
     {
         ArgumentNullException.ThrowIfNull(button);
         ArgumentNullException.ThrowIfNull(handler);
@@ -2865,7 +2857,7 @@ public static class ControlExtensions
 
     /// <summary>
     /// Configures each <see cref="ButtonGroup"/> segment container after its content is bound. Use it
-    /// to assign <see cref="SegmentButton.Command"/>, subscribe to <see cref="SegmentButton.Click"/>,
+    /// to assign <see cref="CommandSourceControl.Command"/>, subscribe to <see cref="SegmentButton.Click"/>,
     /// or configure <see cref="SegmentButton.IsCheckable"/> / <see cref="SegmentButton.IsChecked"/>
     /// (independent toggle), enabled state, or tooltip.
     /// </summary>
@@ -5003,7 +4995,7 @@ public static class ControlExtensions
     /// <returns>The control for chaining.</returns>
     public static T Content<T>(this T control, Element content) where T : ContentControl
     {
-        control.Content = content as UIElement;
+        control.Content = content;
         return control;
     }
 
@@ -5289,6 +5281,184 @@ public static class ControlExtensions
 
         datePicker.SetBinding(DatePicker.SelectedDateProperty, source, convert, convertBack);
         return datePicker;
+    }
+
+    #endregion
+
+    #region DropDownButton
+
+    /// <summary>
+    /// Sets the menu opened by the dropdown button.
+    /// </summary>
+    /// <param name="button">Target dropdown button.</param>
+    /// <param name="menu">Menu to open.</param>
+    /// <returns>The dropdown button for chaining.</returns>
+    public static DropDownButton DropDownMenu(this DropDownButton button, Menu? menu)
+    {
+        button.DropDownMenu = menu;
+        return button;
+    }
+
+    /// <summary>
+    /// Sets whether the dropdown button's menu is open.
+    /// </summary>
+    /// <param name="button">Target dropdown button.</param>
+    /// <param name="value">Whether the menu is open.</param>
+    /// <returns>The dropdown button for chaining.</returns>
+    public static DropDownButton IsDropDownOpen(this DropDownButton button, bool value = true)
+    {
+        button.IsDropDownOpen = value;
+        return button;
+    }
+
+    /// <summary>
+    /// Sets the maximum dropdown menu height.
+    /// </summary>
+    /// <param name="button">Target dropdown button.</param>
+    /// <param name="value">Maximum dropdown menu height.</param>
+    /// <returns>The dropdown button for chaining.</returns>
+    public static DropDownButton MaxDropDownHeight(this DropDownButton button, double value)
+    {
+        button.MaxDropDownHeight = value;
+        return button;
+    }
+
+    /// <summary>
+    /// Adds a handler invoked immediately before the dropdown menu opens.
+    /// </summary>
+    /// <param name="button">Target dropdown button.</param>
+    /// <param name="handler">Opening handler.</param>
+    /// <returns>The dropdown button for chaining.</returns>
+    public static DropDownButton OnDropDownOpening(this DropDownButton button, Action handler)
+    {
+        button.DropDownOpening += handler;
+        return button;
+    }
+
+    /// <summary>
+    /// Adds a handler invoked after the dropdown menu closes.
+    /// </summary>
+    /// <param name="button">Target dropdown button.</param>
+    /// <param name="handler">Closed handler.</param>
+    /// <returns>The dropdown button for chaining.</returns>
+    public static DropDownButton OnDropDownClosed(this DropDownButton button, Action handler)
+    {
+        button.DropDownClosed += handler;
+        return button;
+    }
+
+    #endregion
+
+    #region SplitButton
+
+    // The Button text-content extensions cannot be generic: their signature would match the ToggleBase
+    // ones, and a type constraint is not part of a member's signature. These overloads restore the
+    // SplitButton type for chaining, the same way CheckBox and ToggleButton do over ToggleBase.
+
+    /// <summary>
+    /// Sets the split button content to a centered text label. When <paramref name="accessKey"/> is true
+    /// (default), "_" prefixes mark access key characters (e.g., "_Save" registers Alt+S).
+    /// </summary>
+    /// <param name="button">Target split button.</param>
+    /// <param name="text">Content text.</param>
+    /// <param name="accessKey">Whether underscore prefixes define access keys.</param>
+    /// <returns>The split button for chaining.</returns>
+    public static SplitButton Content(this SplitButton button, string text, bool accessKey = true)
+    {
+        Content((Button)button, text, accessKey);
+        return button;
+    }
+
+    /// <summary>
+    /// Binds the split button content to an observable string value (creates a centered TextBlock).
+    /// </summary>
+    /// <param name="button">Target split button.</param>
+    /// <param name="source">Observable source.</param>
+    /// <param name="accessKey">Whether underscore prefixes define access keys.</param>
+    /// <returns>The split button for chaining.</returns>
+    public static SplitButton BindContent(this SplitButton button, ObservableValue<string> source, bool accessKey = true)
+    {
+        BindContent((Button)button, source, accessKey);
+        return button;
+    }
+
+    /// <summary>
+    /// Binds the split button content to an observable value with converter (creates a centered TextBlock).
+    /// </summary>
+    /// <typeparam name="TSource">Source value type.</typeparam>
+    /// <param name="button">Target split button.</param>
+    /// <param name="source">Observable source.</param>
+    /// <param name="convert">Conversion function.</param>
+    /// <param name="accessKey">Whether underscore prefixes define access keys.</param>
+    /// <returns>The split button for chaining.</returns>
+    public static SplitButton BindContent<TSource>(
+        this SplitButton button,
+        ObservableValue<TSource> source,
+        Func<TSource, string> convert,
+        bool accessKey = true)
+    {
+        BindContent((Button)button, source, convert, accessKey);
+        return button;
+    }
+
+    /// <summary>
+    /// Sets the menu opened by the split button's dropdown face.
+    /// </summary>
+    /// <param name="button">Target split button.</param>
+    /// <param name="menu">Menu to open.</param>
+    /// <returns>The split button for chaining.</returns>
+    public static SplitButton DropDownMenu(this SplitButton button, Menu? menu)
+    {
+        button.DropDownMenu = menu;
+        return button;
+    }
+
+    /// <summary>
+    /// Sets whether the split button's dropdown menu is open.
+    /// </summary>
+    /// <param name="button">Target split button.</param>
+    /// <param name="value">Whether the menu is open.</param>
+    /// <returns>The split button for chaining.</returns>
+    public static SplitButton IsDropDownOpen(this SplitButton button, bool value = true)
+    {
+        button.IsDropDownOpen = value;
+        return button;
+    }
+
+    /// <summary>
+    /// Sets the maximum dropdown menu height.
+    /// </summary>
+    /// <param name="button">Target split button.</param>
+    /// <param name="value">Maximum dropdown menu height.</param>
+    /// <returns>The split button for chaining.</returns>
+    public static SplitButton MaxDropDownHeight(this SplitButton button, double value)
+    {
+        button.MaxDropDownHeight = value;
+        return button;
+    }
+
+    /// <summary>
+    /// Adds a handler invoked immediately before the dropdown menu opens.
+    /// </summary>
+    /// <param name="button">Target split button.</param>
+    /// <param name="handler">Opening handler.</param>
+    /// <returns>The split button for chaining.</returns>
+    public static SplitButton OnDropDownOpening(this SplitButton button, Action handler)
+    {
+        button.DropDownOpening += handler;
+        return button;
+    }
+
+    /// <summary>
+    /// Adds a handler invoked after the dropdown menu closes.
+    /// </summary>
+    /// <param name="button">Target split button.</param>
+    /// <param name="handler">Closed handler.</param>
+    /// <returns>The split button for chaining.</returns>
+    public static SplitButton OnDropDownClosed(this SplitButton button, Action handler)
+    {
+        button.DropDownClosed += handler;
+        return button;
     }
 
     #endregion

@@ -165,10 +165,6 @@ FrameworkElement TopBar() => new Border()
                     .CenterVertical()
                     .Spacing(12)
                     .Children(
-                        new ToggleButton()
-                            .IsChecked()
-                            .Content("Toggle")
-                            .OnCheckedChanged(x => gallery.IsEnabled(x)),
                         new CheckBox()
                             .Content("Max FPS")
                             .BindIsChecked(maxFpsEnabled)

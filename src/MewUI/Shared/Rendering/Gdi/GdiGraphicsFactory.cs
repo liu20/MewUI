@@ -19,6 +19,9 @@ public sealed class GdiGraphicsFactory : IGraphicsFactory, ITextBackendFactory, 
 
     public string Backend => BackendIdentifier;
 
+    // GDI blits to the window DC with no presentation queue, so nothing throttles a frame to the refresh.
+    public bool SupportsVSync => false;
+
     public ITextEngine TextEngine => TextServices.GetEngine(this);
 
     internal GdiGraphicsFactory() { }
@@ -84,15 +87,6 @@ public sealed class GdiGraphicsFactory : IGraphicsFactory, ITextBackendFactory, 
                 && !string.IsNullOrWhiteSpace(windowsFamily)
             ? windowsFamily
             : fallbackFamily;
-
-    public IImage CreateImageFromFile(string path) =>
-        CreateImageFromBytes(File.ReadAllBytes(path));
-
-    public IImage CreateImageFromBytes(byte[] data) =>
-        ImageDecoders.TryDecode(data, out var bmp)
-            ? CreateImage(bmp.WidthPx, bmp.HeightPx, bmp.Data)
-            : throw new NotSupportedException(
-                $"Unsupported image format. Built-in decoders: BMP/PNG/JPEG. Detected: {ImageDecoders.DetectFormatId(data) ?? "unknown"}.");
 
     /// <summary>
     /// Creates an empty 32-bit ARGB image.
@@ -215,7 +209,7 @@ public sealed class GdiGraphicsFactory : IGraphicsFactory, ITextBackendFactory, 
 
     public void Dispose()
     {
-        TextServices.ReleaseEngine(this);
+        TextServices.ReleaseIfCreated(this);
         _renderResourceCache.Dispose();
 
         lock (_layeredLock)

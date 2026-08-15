@@ -11,9 +11,7 @@ public static class DefaultStyles
     // the cache must not be mutated concurrently.
     private static readonly object _stylesLock = new();
     private static Dictionary<Type, Style>? _styles;
-
-    private static IReadOnlyDictionary<Type, Func<Style>> StyleFactories =>
-        field ??= CreateStyleFactories();
+    private static readonly Dictionary<Type, Func<Style>> _styleFactories = [];
 
     private static Transition[] ColorTransitions =>
         field ??=
@@ -48,45 +46,24 @@ public static class DefaultStyles
     private static StateTrigger[] CreateValidationBorderTriggers(bool include)
         => include ? [CreateValidationBorderTrigger()] : [];
 
-    private static IReadOnlyDictionary<Type, Func<Style>> CreateStyleFactories()
+    internal static bool Register<TControl>(Func<Style> factory) where TControl : Control
     {
-        return new Dictionary<Type, Func<Style>>
+        ArgumentNullException.ThrowIfNull(factory);
+        lock (_stylesLock)
         {
-            [typeof(Control)] = CreateControlBaseStyle,
-            [typeof(Button)] = CreateButtonStyle,
-            [typeof(ToggleButton)] = CreateToggleButtonStyle,
-            [typeof(DropDownBase)] = CreateDropDownBaseStyle,
-            [typeof(TabHeaderButton)] = CreateTabHeaderButtonStyle,
-            [typeof(SegmentedControl)] = CreateSegmentedControlStyle,
-            [typeof(SegmentButton)] = CreateSegmentButtonStyle,
-            [typeof(ButtonGroup)] = CreateButtonGroupStyle,
-            [typeof(MenuBar)] = CreateMenuBarStyle,
-            [typeof(TextBase)] = CreateTextBaseStyle,
-            [typeof(MultiLineTextBox)] = CreateMultiLineTextBoxStyle,
-            [typeof(SyntaxViewer)] = CreateSyntaxViewerStyle,
-            [typeof(CheckBox)] = CreateCheckBoxStyle,
-            [typeof(RadioButton)] = CreateRadioButtonStyle,
-            [typeof(ToggleSwitch)] = CreateToggleSwitchStyle,
-            [typeof(NumericUpDown)] = CreateNumericUpDownStyle,
-            [typeof(ProgressBar)] = CreateProgressBarStyle,
-            [typeof(Slider)] = CreateSliderStyle,
-            [typeof(ItemsControl)] = CreateItemsControlStyle,
-            [typeof(ScrollableItemsBase)] = CreateScrollableItemsBaseStyle,
-            [typeof(ListBox)] = CreateListBoxStyle,
-            [typeof(TreeView)] = CreateTreeViewStyle,
-            [typeof(GridView)] = CreateGridViewStyle,
-            [typeof(NavigationView)] = CreateNavigationViewStyle,
-            [typeof(ContextMenu)] = CreateContextMenuStyle,
-            [typeof(ToolTip)] = CreateToolTipStyle,
-            [typeof(Expander)] = CreateExpanderStyle,
-            [typeof(GroupBox)] = CreateGroupBoxStyle,
-            [typeof(TabControl)] = CreateTabControlStyle,
-            [typeof(Window)] = CreateWindowStyle,
-            [typeof(Calendar)] = CreateCalendarStyle,
-            [typeof(Border)] = CreateBorderStyle,
-            [typeof(SplitPanel.SplitterThumb)] = CreateSplitterThumbStyle,
-            [typeof(ScrollBar)] = CreateScrollBarStyle,
-        };
+            _styleFactories[typeof(TControl)] = factory;
+        }
+
+        return true;
+    }
+
+    internal static void EnsureRegistered<TControl>(Func<Style> factory) where TControl : Control
+    {
+        ArgumentNullException.ThrowIfNull(factory);
+        lock (_stylesLock)
+        {
+            _styleFactories.TryAdd(typeof(TControl), factory);
+        }
     }
 
     /// <summary>
@@ -102,7 +79,7 @@ public static class DefaultStyles
                 return style;
             }
 
-            if (!StyleFactories.TryGetValue(controlType, out var factory))
+            if (!_styleFactories.TryGetValue(controlType, out var factory))
             {
                 return null;
             }
@@ -123,7 +100,7 @@ public static class DefaultStyles
         }
     }
 
-    private static Style CreateControlBaseStyle() =>
+    internal static Style CreateControlBaseStyle() =>
         new(typeof(Control))
         {
             Setters =
@@ -145,8 +122,10 @@ public static class DefaultStyles
     private static Style CreateControlBasedStyle(
         Type targetType,
         bool includeValidationBorder,
-        params SetterBase[] extraSetters) =>
-        new(targetType)
+        params SetterBase[] extraSetters)
+    {
+        EnsureRegistered<Control>(CreateControlBaseStyle);
+        return new(targetType)
         {
             BasedOn = GetStyle(typeof(Control)),
             Transitions = ColorTransitions,
@@ -182,41 +161,45 @@ public static class DefaultStyles
                 ..CreateValidationBorderTriggers(includeValidationBorder),
             ],
         };
+    }
 
-    private static Style CreateCheckBoxStyle()
+    internal static Style CreateCheckBoxStyle()
         => CreateValidationControlBasedStyle(typeof(CheckBox),
             Setter.Create(Control.PaddingProperty, new Thickness(4, 2, 4, 2)));
 
-    private static Style CreateRadioButtonStyle()
+    internal static Style CreateRadioButtonStyle()
         => CreateValidationControlBasedStyle(typeof(RadioButton),
             Setter.Create(Control.PaddingProperty, new Thickness(4, 2, 4, 2)));
 
-    private static Style CreateNumericUpDownStyle()
+    internal static Style CreateNumericUpDownStyle()
         => CreateValidationControlBasedStyle(typeof(NumericUpDown),
             Setter.Create(Control.PaddingProperty, new Thickness(4, 2, 4, 2)),
             Setter.Create(FrameworkElement.MinHeightProperty, t => t.Metrics.BaseControlHeight),
             Setter.Create(Control.TemplateProperty, (ControlTemplate?)NumericUpDownTemplate.Instance));
 
-    private static Style CreateItemsControlStyle()
+    internal static Style CreateItemsControlStyle()
         => CreateControlBasedStyle(typeof(ItemsControl));
 
-    private static Style CreateScrollableItemsBaseStyle()
+    internal static Style CreateScrollableItemsBaseStyle()
         => CreateControlBasedStyle(typeof(ScrollableItemsBase));
 
-    private static Style CreateListBoxStyle() =>
-        new(typeof(ListBox))
+    internal static Style CreateListBoxStyle()
+    {
+        EnsureRegistered<ScrollableItemsBase>(CreateScrollableItemsBaseStyle);
+        return new(typeof(ListBox))
         {
             BasedOn = GetStyle(typeof(ScrollableItemsBase)),
             Triggers = [CreateValidationBorderTrigger()],
         };
+    }
 
-    private static Style CreateTreeViewStyle()
+    internal static Style CreateTreeViewStyle()
         => CreateControlBasedStyle(typeof(TreeView));
 
-    private static Style CreateGridViewStyle()
+    internal static Style CreateGridViewStyle()
         => CreateControlBasedStyle(typeof(GridView));
 
-    private static Style CreateNavigationViewStyle() =>
+    internal static Style CreateNavigationViewStyle() =>
         new(typeof(NavigationView))
         {
             Setters =
@@ -227,7 +210,7 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateContextMenuStyle() =>
+    internal static Style CreateContextMenuStyle() =>
         new(typeof(ContextMenu))
         {
             Setters =
@@ -243,7 +226,7 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateToolTipStyle()
+    internal static Style CreateToolTipStyle()
         => CreateControlBasedStyle(typeof(ToolTip),
             Setter.Create(Control.PaddingProperty, new Thickness(8, 4, 8, 4)),
             Setter.Create(TextElement.ForegroundProperty, t => t.Palette.WindowText),
@@ -253,15 +236,15 @@ public static class DefaultStyles
             Setter.Create(Control.CornerRadiusProperty, t => t.Metrics.ControlCornerRadius),
             Setter.Create(Control.BorderThicknessProperty, t => t.Metrics.ControlBorderThickness));
 
-    private static Style CreateGroupBoxStyle()
+    internal static Style CreateGroupBoxStyle()
         => CreateContainerStyle(typeof(GroupBox));
 
-    private static Style CreateCalendarStyle()
+    internal static Style CreateCalendarStyle()
         => CreateValidationControlBasedStyle(typeof(Calendar),
             Setter.Create(Control.CornerRadiusProperty, t => t.Metrics.ControlCornerRadius),
             Setter.Create(Control.BorderThicknessProperty, t => t.Metrics.ControlBorderThickness));
 
-    private static Style CreateBorderStyle() =>
+    internal static Style CreateBorderStyle() =>
         new(typeof(Border))
         {
             Setters =
@@ -285,7 +268,7 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateWindowStyle() =>
+    internal static Style CreateWindowStyle() =>
         new(typeof(Window))
         {
             Setters =
@@ -299,7 +282,7 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateSplitterThumbStyle() =>
+    internal static Style CreateSplitterThumbStyle() =>
         new(typeof(SplitPanel.SplitterThumb))
         {
             Transitions = ColorTransitions,
@@ -331,7 +314,7 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateScrollBarStyle() =>
+    internal static Style CreateScrollBarStyle() =>
         new(typeof(ScrollBar))
         {
             Transitions = ColorTransitions,
@@ -355,7 +338,7 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateToggleSwitchStyle() =>
+    internal static Style CreateToggleSwitchStyle() =>
         new(typeof(ToggleSwitch))
         {
             Transitions = ToggleSwitchColorTransitions,
@@ -453,7 +436,7 @@ public static class DefaultStyles
 
     // No triggers - thumb uses PickAccentBorder with its own thumbState (includes _isDragging).
 
-    private static Style CreateSliderStyle() =>
+    internal static Style CreateSliderStyle() =>
         new(typeof(Slider))
         {
             Transitions = SliderColorTransitions,
@@ -499,7 +482,7 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateProgressBarStyle() =>
+    internal static Style CreateProgressBarStyle() =>
         new(typeof(ProgressBar))
         {
             Setters =
@@ -512,7 +495,7 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateExpanderStyle() =>
+    internal static Style CreateExpanderStyle() =>
         new(typeof(Expander))
         {
             Setters =
@@ -538,7 +521,7 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateTabControlStyle() =>
+    internal static Style CreateTabControlStyle() =>
         new(typeof(TabControl))
         {
             Setters =
@@ -559,7 +542,7 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateSegmentedControlStyle() =>
+    internal static Style CreateSegmentedControlStyle() =>
         new(typeof(SegmentedControl))
         {
             Transitions = ColorTransitions,
@@ -585,7 +568,7 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateSegmentButtonStyle() =>
+    internal static Style CreateSegmentButtonStyle() =>
         new(typeof(SegmentButton))
         {
             Transitions = ColorTransitions,
@@ -655,7 +638,7 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateButtonGroupStyle() =>
+    internal static Style CreateButtonGroupStyle() =>
         new(typeof(ButtonGroup))
         {
             Transitions = ColorTransitions,
@@ -673,7 +656,7 @@ public static class DefaultStyles
             // segment is focused.
         };
 
-    private static Style CreateMenuBarStyle() =>
+    internal static Style CreateMenuBarStyle() =>
         new(typeof(MenuBar))
         {
             Setters =
@@ -686,7 +669,7 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateButtonStyle() =>
+    internal static Style CreateButtonStyle() =>
         new(typeof(Button))
         {
             Transitions = ColorTransitions,
@@ -742,7 +725,201 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateToggleButtonStyle() =>
+    // A face lies on the owner's chrome, so it clears the base fill and border and paints only its
+    // own state. The triggers are declared here rather than inherited: a derived style's base setter
+    // outranks the BasedOn style's triggers, so the transparent base would otherwise swallow hover.
+    internal static Style CreateDropDownFaceStyle()
+    {
+        EnsureRegistered<Control>(CreateControlBaseStyle);
+        EnsureRegistered<Button>(CreateButtonStyle);
+        return Style.DeriveFromRegisteredDefault(typeof(Button),
+            transitions: [Transition.Create(Control.BackgroundProperty)],
+            setters:
+            [
+                // The hover hue at zero alpha, not Color.Transparent: that constant is white, so the fill
+                // would ramp from white and flash bright over dark chrome on the way in and out again.
+                Setter.Create(Control.BackgroundProperty, t => t.Palette.ButtonHoverBackground.WithAlpha(0)),
+                Setter.Create(Control.BorderThicknessProperty, 0.0),
+            ],
+            triggers:
+            [
+                new StateTrigger
+                {
+                    Match = VisualStateFlags.Hot,
+                    Setters = [Setter.Create(Control.BackgroundProperty, t => t.Palette.ButtonHoverBackground)],
+                },
+                new StateTrigger
+                {
+                    Match = VisualStateFlags.Pressed,
+                    Setters = [Setter.Create(Control.BackgroundProperty, t => t.Palette.ButtonPressedBackground)],
+                },
+                new StateTrigger
+                {
+                    Match = VisualStateFlags.None,
+                    Exclude = VisualStateFlags.Enabled,
+                    Setters =
+                    [
+                        Setter.Create(Control.BackgroundProperty, t => t.Palette.ButtonDisabledBackground),
+                        Setter.Create(TextElement.ForegroundProperty, t => t.Palette.DisabledText),
+                    ],
+                },
+            ]);
+    }
+
+    internal static Style CreateToolBarStyle() =>
+        new(typeof(ToolBar))
+        {
+            Setters =
+            [
+                Setter.Create(Control.BackgroundProperty, t => t.Palette.ControlBackground),
+                Setter.Create(Control.PaddingProperty, new Thickness(4, 2, 4, 2)),
+                Setter.Create(Control.BorderThicknessProperty, 0.0),
+            ],
+        };
+
+    internal static Style CreateToolBarGroupPlateStyle() =>
+        new(typeof(ToolBarGroupPlate))
+        {
+            Setters =
+            [
+                Setter.Create(Control.BackgroundProperty, t => t.Palette.ContainerBackground),
+                Setter.Create(Control.CornerRadiusProperty, t => t.Metrics.ControlCornerRadius),
+                Setter.Create(Control.BorderThicknessProperty, 0.0),
+            ],
+        };
+
+    internal static Style CreateToolBarButtonStyle()
+    {
+        EnsureRegistered<Control>(CreateControlBaseStyle);
+        EnsureRegistered<Button>(CreateButtonStyle);
+        return Style.DeriveFromRegisteredDefault(typeof(Button),
+            transitions: [Transition.Create(Control.BackgroundProperty)],
+            setters: CreateToolBarButtonBaseSetters(),
+            triggers: CreateToolBarButtonTriggers());
+    }
+
+    internal static Style CreateToolBarToggleButtonStyle()
+    {
+        EnsureRegistered<Control>(CreateControlBaseStyle);
+        EnsureRegistered<ToggleButton>(CreateToggleButtonStyle);
+        return Style.DeriveFromRegisteredDefault(typeof(ToggleButton),
+            transitions: [Transition.Create(Control.BackgroundProperty)],
+            setters: CreateToolBarButtonBaseSetters(),
+            triggers:
+            [
+                .. CreateToolBarButtonTriggers(),
+                new StateTrigger
+                {
+                    Match = VisualStateFlags.Checked,
+                    Setters = [Setter.Create(Control.BackgroundProperty, t => Color.Composite(t.Palette.ButtonFace, t.Palette.Accent.WithAlpha(96)))],
+                },
+                new StateTrigger
+                {
+                    Match = VisualStateFlags.Checked | VisualStateFlags.Hot,
+                    Setters = [Setter.Create(Control.BackgroundProperty, t => Color.Composite(t.Palette.ButtonHoverBackground, t.Palette.Accent.WithAlpha(96)))],
+                },
+            ]);
+    }
+
+    // The toolbar paints the row, so an entry contributes only its own fill. The idle fill carries the
+    // hover hue at zero alpha rather than Color.Transparent, which is white and would make the fill ramp
+    // from white and flash bright over a dark toolbar.
+    private static SetterBase[] CreateToolBarButtonBaseSetters() =>
+        [
+            Setter.Create(Control.BackgroundProperty, t => t.Palette.ButtonHoverBackground.WithAlpha(0)),
+            Setter.Create(Control.BorderThicknessProperty, 0.0),
+            Setter.Create(Control.PaddingProperty, new Thickness(6, 2, 6, 2)),
+        ];
+
+    private static StateTrigger[] CreateToolBarButtonTriggers() =>
+        [
+            new StateTrigger
+            {
+                Match = VisualStateFlags.Hot,
+                Setters = [Setter.Create(Control.BackgroundProperty, t => t.Palette.ButtonHoverBackground)],
+            },
+            new StateTrigger
+            {
+                Match = VisualStateFlags.Pressed,
+                Setters = [Setter.Create(Control.BackgroundProperty, t => t.Palette.ButtonPressedBackground)],
+            },
+            new StateTrigger
+            {
+                Match = VisualStateFlags.None,
+                Exclude = VisualStateFlags.Enabled,
+                Setters =
+                [
+                    Setter.Create(Control.BackgroundProperty, t => t.Palette.ButtonDisabledBackground),
+                    Setter.Create(TextElement.ForegroundProperty, t => t.Palette.DisabledText),
+                ],
+            },
+        ];
+
+    internal static Style CreateDropDownButtonStyle() =>
+        new(typeof(DropDownButton))
+        {
+            Transitions = ColorTransitions,
+            Setters = CreateDropDownButtonChromeSetters(DropDownButtonTemplate.Instance),
+            Triggers = CreateDropDownButtonChromeTriggers(),
+        };
+
+    internal static Style CreateSplitButtonStyle() =>
+        new(typeof(SplitButton))
+        {
+            Transitions = ColorTransitions,
+            Setters = CreateDropDownButtonChromeSetters(SplitButtonTemplate.Instance),
+            Triggers = CreateDropDownButtonChromeTriggers(),
+        };
+
+    // The owner owns the chrome (the template forwards it to a wrapping Border) and the face parts
+    // own their fill, so hover and press read per face while focus and the open state ring the whole
+    // control the way a ComboBox does.
+    private static SetterBase[] CreateDropDownButtonChromeSetters(ControlTemplate template) =>
+        [
+            Setter.Create(Control.BackgroundProperty, t => t.Palette.ButtonFace),
+            Setter.Create(Control.BorderBrushProperty, t => t.Palette.ControlBorder),
+            Setter.Create(Control.PaddingProperty, new Thickness(8, 4, 8, 4)),
+            Setter.Create(FrameworkElement.MinHeightProperty, t => t.Metrics.BaseControlHeight),
+            Setter.Create(Control.CornerRadiusProperty, t => t.Metrics.ControlCornerRadius),
+            Setter.Create(Control.BorderThicknessProperty, t => t.Metrics.ControlBorderThickness),
+            Setter.Create(Control.TemplateProperty, (ControlTemplate?)template),
+        ];
+
+    private static StateTrigger[] CreateDropDownButtonChromeTriggers() =>
+        [
+            new StateTrigger
+            {
+                Match = VisualStateFlags.Hot,
+                Setters =
+                [
+                    Setter.Create(Control.BorderBrushProperty, t => Color.Composite(t.Palette.ControlBorder, t.Palette.AccentBorderHotOverlay)),
+                ],
+            },
+            new StateTrigger
+            {
+                Match = VisualStateFlags.Focused,
+                Setters = [Setter.Create(Control.BorderBrushProperty, t => t.Palette.Accent)],
+            },
+            // Focus moves into the menu while it is open, so the open state carries the same accent
+            // ring; without it the control would look unfocused for as long as the menu is up.
+            new StateTrigger
+            {
+                Match = VisualStateFlags.Active,
+                Setters = [Setter.Create(Control.BorderBrushProperty, t => t.Palette.Accent)],
+            },
+            new StateTrigger
+            {
+                Match = VisualStateFlags.None,
+                Exclude = VisualStateFlags.Enabled,
+                Setters =
+                [
+                    Setter.Create(Control.BackgroundProperty, t => t.Palette.ButtonDisabledBackground),
+                    Setter.Create(TextElement.ForegroundProperty, t => t.Palette.DisabledText),
+                ],
+            },
+        ];
+
+    internal static Style CreateToggleButtonStyle() =>
         new(typeof(ToggleButton))
         {
             Transitions = ColorTransitions,
@@ -832,13 +1009,13 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateTextBaseStyle()
+    internal static Style CreateTextBaseStyle()
         => CreateTextInputStyle(typeof(TextBase));
 
-    private static Style CreateMultiLineTextBoxStyle()
+    internal static Style CreateMultiLineTextBoxStyle()
         => CreateTextInputStyle(typeof(MultiLineTextBox));
 
-    private static Style CreateSyntaxViewerStyle()
+    internal static Style CreateSyntaxViewerStyle()
         => CreateTextInputStyle(typeof(SyntaxViewer));
 
     private static Style CreateTextInputStyle(Type targetType) =>
@@ -882,7 +1059,7 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateDropDownBaseStyle() =>
+    internal static Style CreateDropDownBaseStyle() =>
         new(typeof(DropDownBase))
         {
             Transitions = ColorTransitions,
@@ -941,7 +1118,7 @@ public static class DefaultStyles
             ],
         };
 
-    private static Style CreateTabHeaderButtonStyle() =>
+    internal static Style CreateTabHeaderButtonStyle() =>
         new(typeof(TabHeaderButton))
         {
             Transitions = ColorTransitions,

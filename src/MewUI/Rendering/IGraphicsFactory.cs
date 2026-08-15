@@ -19,6 +19,13 @@ public interface IGraphicsFactory : IRenderDevice, IDisposable
     string Backend { get; }
 
     /// <summary>
+    /// Whether presenting a frame is paced by the display's refresh. A backend that reports false leaves
+    /// <see cref="RenderLoopSettings.VSyncEnabled"/> with nothing to act on, so the render loop caps the
+    /// frame rate itself instead of spinning.
+    /// </summary>
+    bool SupportsVSync => true;
+
+    /// <summary>
     /// Creates a font resource.
     /// </summary>
     IFont CreateFont(string family, double size, FontWeight weight = FontWeight.Normal,
@@ -30,16 +37,6 @@ public interface IGraphicsFactory : IRenderDevice, IDisposable
     /// </summary>
     IFont CreateFont(string family, double size, uint dpi, FontWeight weight = FontWeight.Normal,
         bool italic = false, bool underline = false, bool strikethrough = false);
-
-    /// <summary>
-    /// Creates an image from a file path.
-    /// </summary>
-    IImage CreateImageFromFile(string path);
-
-    /// <summary>
-    /// Creates an image from a byte array.
-    /// </summary>
-    IImage CreateImageFromBytes(byte[] data);
 
     /// <summary>
     /// Creates a graphics context for the specified render target.
@@ -95,6 +92,31 @@ public interface IGraphicsFactory : IRenderDevice, IDisposable
 
         public void Dispose() { }
     }
+}
+
+/// <summary>Encoded-image helpers kept outside the backend dispatch contract for NativeAOT pay-for-play.</summary>
+public static class GraphicsFactoryImageExtensions
+{
+    /// <summary>Creates an image from a file path.</summary>
+    public static IImage CreateImageFromFile(this IGraphicsFactory factory, string path)
+    {
+        ArgumentNullException.ThrowIfNull(factory);
+        return ImageSource.FromFile(path).CreateImage(factory);
+    }
+
+    /// <summary>Creates an image from encoded bytes.</summary>
+    public static IImage CreateImageFromBytes(this IGraphicsFactory factory, byte[] data)
+    {
+        ArgumentNullException.ThrowIfNull(factory);
+        return ImageSource.FromBytes(data).CreateImage(factory);
+    }
+}
+
+/// <summary>Optional custom encoded-image capability used after built-in decoding fails.</summary>
+public interface IEncodedImageFactory
+{
+    /// <summary>Creates an image from an encoded payload understood by the custom factory.</summary>
+    IImage CreateImageFromBytes(byte[] data);
 }
 
 /// <summary>

@@ -133,6 +133,8 @@ partial class GalleryView
 
         var searchBox = new TextBox().Placeholder("Find...").Width(150);
         var countLabel = new TextBlock().FontSize(ThemeFontSize.Small).CenterVertical();
+        var previousMatch = new Command("gallery.find.previous", "Previous match");
+        var nextMatch = new Command("gallery.find.next", "Next match");
 
         void UpdateCountLabel()
             => countLabel.Text = classifier.Matches.Count == 0
@@ -170,12 +172,30 @@ partial class GalleryView
             UpdateCountLabel();
         }
 
-        static Button ChevronButton(GlyphKind kind, Action onClick)
-            => new Button()
-                .Content(new GlyphElement().Kind(kind))
-                .Padding(0)
-                .WithTheme((t, c) => c.MinWidth(t.Metrics.BaseControlHeight))
-                .OnClick(onClick);
+        var findNavigation = new ButtonGroup()
+            .Items([previousMatch, nextMatch], command => command.Text ?? string.Empty)
+            .ItemTemplate<Command>(
+                build: _ => new GlyphElement(),
+                bind: (view, _, index, _) =>
+                    ((GlyphElement)view).Kind = index == 0
+                        ? GlyphKind.ChevronUp
+                        : GlyphKind.ChevronDown)
+            .ItemPadding(Thickness.Zero)
+            .PrepareContainer<Command>((segment, command, _) =>
+            {
+                segment.Command = command;
+                segment.ToolTip(command.Text);
+                segment.WithTheme((theme, current) =>
+                    current.MinWidth(theme.Metrics.BaseControlHeight));
+            });
+        findNavigation.Commands.Register(
+            previousMatch,
+            () => MoveCurrent(-1),
+            () => classifier.Matches.Count > 0);
+        findNavigation.Commands.Register(
+            nextMatch,
+            () => MoveCurrent(+1),
+            () => classifier.Matches.Count > 0);
 
         searchBox.TextChanged += _ => RefreshMatches();
         box.DocumentChanged += _ => RefreshMatches();
@@ -183,15 +203,14 @@ partial class GalleryView
 
         return new StackPanel()
             .Vertical()
-            .Spacing(6)
+            .Spacing(8)
             .Children(
                 new StackPanel()
                     .Horizontal()
-                    .Spacing(4)
+                    .Spacing(8)
                     .Children(
                         searchBox,
-                        ChevronButton(GlyphKind.ChevronUp, () => MoveCurrent(-1)),
-                        ChevronButton(GlyphKind.ChevronDown, () => MoveCurrent(+1)),
+                        findNavigation,
                         countLabel),
                 box);
     }
@@ -227,7 +246,7 @@ partial class GalleryView
                     "NumericUpDown (int/double)",
                     new Grid()
                         .Columns("Auto,Auto,Auto")
-                        .Rows("Auto,Auto")
+                        .Rows("Auto,Auto,Auto")
                         .Spacing(8)
                         .AutoIndexing()
                         .Children(
@@ -263,6 +282,20 @@ partial class GalleryView
 
                             new TextBlock()
                                 .BindText(doubleBinding, value => $"Value: {value:0.##}")
+                                .CenterVertical(),
+
+                            new TextBlock()
+                                .Text("Disabled")
+                                .CenterVertical(),
+
+                            new NumericUpDown()
+                                .Disable()
+                                .Width(140)
+                                .Minimum(0)
+                                .Maximum(100)
+                                .Step(0.1)
+                                .Format("0.##")
+                                .BindValue(doubleBinding)
                                 .CenterVertical()
                         )
                 ),

@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using Aprillz.MewUI.Controls;
 
 namespace Aprillz.MewUI;
@@ -84,5 +86,63 @@ public static class MewPropertyBindingPathExtensions
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(property);
         return path.Append<TNext>(new MewPropertyBindingPathSegment<TOwner, TNext>(property));
+    }
+}
+
+/// <summary>
+/// Adds indexed segments to binding paths whose current owner exposes an indexer.
+/// </summary>
+public static class IndexedBindingPathExtensions
+{
+    /// <summary>
+    /// Appends a segment that reads an indexer and observes the owner's collection change or
+    /// indexer change notifications. An index that no longer exists makes the path unavailable
+    /// rather than faulted. The segment is read-only.
+    /// </summary>
+    public static BindingPath<TRoot, TNext> ThenIndexed<TRoot, TOwner, TNext>(
+        this BindingPath<TRoot, TOwner> path,
+        Func<TOwner, TNext> getter,
+        [CallerArgumentExpression(nameof(getter))] string? getterExpression = null)
+        where TRoot : class
+        where TOwner : class
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(getter);
+
+        int index = BindingGetterExpression.ReadConstantIndex(getterExpression);
+        return path.Append<TNext>(new IndexedBindingPathSegment<TOwner, TNext>(getter, index));
+    }
+}
+
+/// <summary>
+/// Adds <see cref="INotifyPropertyChanged"/> segments to binding paths whose current owner raises
+/// property change notifications.
+/// </summary>
+public static class InpcBindingPathExtensions
+{
+    /// <summary>
+    /// Appends a segment that reads <paramref name="getter"/> and observes the owner's
+    /// <see cref="INotifyPropertyChanged.PropertyChanged"/> for the property that
+    /// <paramref name="getter"/> names. A change notification carrying a null or empty property
+    /// name is treated as "every property changed" and refreshes the segment.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// Thrown when <paramref name="getter"/> is not a single member access such as
+    /// <c>x =&gt; x.Name</c>.
+    /// </exception>
+    public static BindingPath<TRoot, TNext> ThenNotifying<TRoot, TOwner, TNext>(
+        this BindingPath<TRoot, TOwner> path,
+        Func<TOwner, TNext> getter,
+        Action<TOwner, TNext>? setter = null,
+        [CallerArgumentExpression(nameof(getter))] string? getterExpression = null)
+        where TRoot : class
+        where TOwner : class, INotifyPropertyChanged
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(getter);
+
+        string propertyName = BindingGetterExpression.InferPropertyName(getterExpression);
+        return path.Append<TNext>(
+            new InpcBindingPathSegment<TOwner, TNext>(getter, setter, propertyName));
     }
 }

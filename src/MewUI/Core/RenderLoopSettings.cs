@@ -9,7 +9,6 @@ namespace Aprillz.MewUI;
 public sealed class RenderLoopSettings
 {
     private int _continuous;
-    private int _animationActive;
     private int _targetFps;
     private int _vsyncEnabled = 1;
 
@@ -49,11 +48,9 @@ public sealed class RenderLoopSettings
     /// Driven by the animation system: true while one or more animation clocks are active. Not a user knob - set the
     /// <see cref="Continuous"/> flag to force continuous rendering yourself.
     /// </summary>
-    internal bool AnimationActive
-    {
-        get => Volatile.Read(ref _animationActive) != 0;
-        set => Interlocked.Exchange(ref _animationActive, value ? 1 : 0);
-    }
+    // Pulled from the animation manager rather than pushed into here, so a clock started before this run
+    // existed still turns the loop continuous once the loop begins reading.
+    internal bool AnimationActive => Animation.AnimationManager.Instance.HasUnpausedClocks;
 
     /// <summary>
     /// True when the render loop should run continuously: VSync is off, the user <see cref="Continuous"/> flag is set,
@@ -63,4 +60,24 @@ public sealed class RenderLoopSettings
 
     /// <summary>Convenience toggle for the user <see cref="Continuous"/> flag.</summary>
     public void SetContinuous(bool enabled) => Continuous = enabled;
+
+    /// <summary>
+    /// Frame rate the loop should hold itself to, or 0 to leave pacing to the backend's presentation.
+    /// <see cref="TargetFps"/> wins when set; otherwise a backend that cannot pace on the display refresh
+    /// gets <see cref="VSyncFallbackFps"/> so an animating window does not render as fast as the CPU allows.
+    /// </summary>
+    internal int EffectiveFrameCap(bool backendSupportsVSync)
+    {
+        int target = TargetFps;
+        if (target > 0)
+        {
+            return target;
+        }
+
+        return VSyncEnabled && !backendSupportsVSync ? VSyncFallbackFps : 0;
+    }
+
+    // Chosen over a display-refresh query because no platform host exposes one, and 60 is the rate a
+    // backend without presentation pacing (GDI) is expected to hold.
+    internal const int VSyncFallbackFps = 60;
 }

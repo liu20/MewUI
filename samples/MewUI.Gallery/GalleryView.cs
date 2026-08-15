@@ -45,8 +45,9 @@ partial class GalleryView : UserControl
 
         // Top-only 1px separator below the app top bar (static chrome, no hover).
         return new Border()
-            .BorderThickness(new Thickness(0, 1, 0, 0))
-            .WithTheme((t, b) => b.BorderBrush(t.Palette.WindowBackground.Lerp(t.Palette.ControlBorder, 0.45)))
+            .WithTheme((t, b) => b
+                .BorderBrush(t.Palette.WindowBackground.Lerp(t.Palette.ControlBorder, 0.45))
+                .BorderThickness(new Thickness(0, t.Metrics.ControlBorderThickness, 0, 0)))
             .Child(nav);
     }
 
@@ -128,6 +129,7 @@ partial class GalleryView : UserControl
         [
             Group("Basics"),
             Page("Buttons", ButtonsPage, "tap_single_regular"),
+            Page("ToolBar", ToolBarPage, "wrench_regular"),
             Page("Inputs", InputsPage, "textbox_regular"),
             Page("Data Binding", DataBindingPage, "link_regular"),
             Page("Drag & Drop", DragDropPage, "drag_regular"),

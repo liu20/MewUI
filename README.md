@@ -145,7 +145,7 @@ MewUI is a code-first GUI framework with a small, explicit core and platform-spe
 - **NativeAOT + trimming friendliness**
 - **Small footprint, fast startup, low memory usage**
 - **Fluent C# markup** for building UI trees (no XAML)
-- **AOT-friendly explicit binding**
+- **AOT-friendly explicit binding** (including nested paths)
 - **Thin core, optional extensions** for larger features
 
 ### Non-goals (by design):
@@ -167,27 +167,20 @@ The core covers common desktop UI patterns; specialized features such as charts 
 
 NativeAOT executable size depends on the platform host, rendering backend, resources, and publish options. The table below measures the **main executable only**; ZIP is the same executable compressed with the default measurement settings. Sizes use binary units: **1 MB = 1024 KB**.
 
-| Sample | Platform / backend | Executable | ZIP |
-|---|---|---:|---:|
-| Hello World | Windows x64 / GDI | 2.907 MB | 1.324 MB |
-| Hello World | Windows x64 / Direct2D | 3.046 MB | 1.381 MB |
-| Hello World | Windows x64 / MewVG | 3.211 MB | 1.458 MB |
-| Hello World | Linux x64 / X11 + MewVG | 4.414 MB | 2.126 MB |
-| Hello World | macOS arm64 / MewVG | 2.635 MB | 1.186 MB |
-| Gallery | Windows x64 / GDI | 5.838 MB | 2.564 MB |
-| Gallery | Windows x64 / Direct2D | 5.959 MB | 2.612 MB |
-| Gallery | Windows x64 / MewVG | 6.176 MB | 2.707 MB |
-| Gallery | Linux x64 / X11 + MewVG | 7.420 MB | 3.518 MB |
-| Gallery | macOS arm64 / MewVG | 5.625 MB | 2.555 MB |
+For reproducible size probes, regression budgets, and NativeAOT map analysis, see the [NativeAOT size tools](tools/aot-size/README.md).
 
-<img src="https://github.com/user-attachments/assets/92dae0e7-6ecb-46f8-b405-2fcab629375b" />
+![MewUI publish size comparison](docs/assets/nativeaot-size-chart.svg)
+
+![MewUI publish size table](docs/assets/nativeaot-size-table.svg)
+
+[Measurement data](tools/aot-size/release-sizes.json)
 
 The Gallery is a full-featured showcase sample. Use the Hello World rows as the minimum deployment-size baseline.
 
 ---
 ## 🔗 State & Binding (AOT-friendly)
 
-Bindings are explicit and delegate-based (no reflection):
+Bindings are explicit and delegate-based, with no reflection. Three kinds of source are supported: `ObservableValue<T>`, a view model implementing `INotifyPropertyChanged`, and another element's `MewProperty<T>`. You can mix them within a single path, and `INotifyCollectionChanged` notifications are picked up as well.
 
 ```csharp
 using Aprillz.MewUI.Binding;
@@ -203,43 +196,36 @@ var label  = new Label()
             .BindText(percent, v => $"Percent ({v:P0})");
 ```
 
-**Nested sources** - `BindingPath<TRoot, TValue>` binds through a chain of nested sources without property-name strings, reflection, or generated code. Each `Then` appends a segment; observed segments rewire automatically when an intermediate is replaced.
+**INotifyPropertyChanged** - an ordinary MVVM view model is used as-is, with no wrapper. Subscriptions are held weakly, so a view model never keeps UI objects alive in memory.
 
 ```csharp
-// binds [source].Customer.City
-var city = new TextBlock().Bind(
-    TextBlock.TextProperty,
-    order,
-    BindingPath
-        .From<OrderViewModel>()
-        .Then(order => order.Customer)      // observed segment: rewires when replaced
-        .Then(customer => customer!.City),  // leaf
-    mode: BindingMode.OneWay,
-    fallbackValue: "-");
+new Label().Bind(Label.TextProperty, vm, x => x.UserName);
+
+// TextBox is two-way by default, so typed text is written back to the view model
+new TextBox().Bind(TextBox.TextProperty, vm, x => x.UserName);
 ```
 
-A `MewProperty<T>` also works as a segment:
+**Nested paths** - a dotted expression is decomposed into per-step segments at compile time. No strings, no reflection, and when an intermediate value is replaced, every step after it is rewired automatically.
 
 ```csharp
-// binds [source].Padding.Left
-var readout = new TextBlock().Bind(
-    TextBlock.TextProperty,
-    source,
-    BindingPath
-        .From<Control>()
-        .Then(Control.PaddingProperty)   // MewProperty segment: observed
-        .Then(padding => padding.Left),  // leaf
-    convert: left => $"{left}px",
-    mode: BindingMode.OneWay);
+// order.Customer.City
+var city = new TextBlock().Bind(TextBlock.TextProperty, order, x => x.Customer.City);
+
+// Indexer. Updates when item 0 changes, or when items are inserted or removed before it
+var first = new TextBlock().Bind(TextBlock.TextProperty, order, x => x.Lines[0].ProductName);
 ```
 
-See [Binding](docs/Binding.md) for observed vs snapshot segments, null/fallback, TwoWay, and lifetime rules.
+Each step picks how to observe from the member's type: `PropertyChanged` for `INotifyPropertyChanged`, its own notification for `ObservableValue<T>`, the matching `MewProperty` for a `MewObject`, and `CollectionChanged` for a notifying collection.
+
+This one-line syntax works when building with a .NET 9 or later SDK. Below that, the same path is written out explicitly with `BindingPath` and `ThenNotifying`; what you lose is the syntax, not the capability.
+
+See [Binding](docs/Binding.md) for segment kinds, null/fallback, TwoWay, collections, and lifetime rules.
 
 ---
 ## 🧱 Controls / Panels
 
 Controls (Implemented):
-- `Button`, `ToggleButton`
+- `Button`, `ToggleButton`, `RepeatButton`, `SplitButton`, `DropDownButton`
 - `Label`, `TextBlock`, `Image`
 - `TextBox`, `MultiLineTextBox`, `SyntaxViewer`, `PasswordBox`
 - `CheckBox`, `RadioButton`, `ToggleSwitch`
@@ -248,6 +234,8 @@ Controls (Implemented):
 - `TabControl`, `GroupBox`, `Expander`, `Border`
 - `ColorPicker`, `DatePicker`, `Calendar`
 - `MenuBar`, `ContextMenu`, `ToolTip` (in-window popups)
+- `ToolBar` (declared bands of command groups, dragged by their grips)
+- `NavigationView`
 - `ScrollViewer`
 - `Window`, `DispatcherTimer`
 

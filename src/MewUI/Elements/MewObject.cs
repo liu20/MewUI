@@ -1,3 +1,6 @@
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
+
 namespace Aprillz.MewUI.Controls;
 
 /// <summary>
@@ -134,6 +137,26 @@ public abstract class MewObject : IPropertyOwner
     protected virtual void OnMewPropertyChanged(MewProperty property) { }
 
     /// <summary>
+    /// Called when a mutation through this object's API moved a property to a different value tier,
+    /// whether or not the effective value changed. Override for state that depends on which tier
+    /// supplies a value (e.g. "the caller supplied content" versus "nothing did") rather than on the
+    /// value itself.
+    /// </summary>
+    /// <param name="property">The property whose value source changed.</param>
+    protected virtual void OnValueSourceChanged(MewProperty property) { }
+
+    // A mutation can move a property between tiers while the effective value stays equal, and the
+    // change pipeline stays silent then (see PropertyValueStore.SetValueCore). Provenance-dependent
+    // state would go stale, so the tier transition itself is reported here.
+    private void NotifyIfValueSourceChanged(MewProperty property, ValueSource oldSource)
+    {
+        if (PropertyStore.GetSource(property.Id) != oldSource)
+        {
+            OnValueSourceChanged(property);
+        }
+    }
+
+    /// <summary>
     /// Gets the current (possibly interpolated) value of a visual property.
     /// For properties with <see cref="MewPropertyOptions.Inherits"/>, walks the parent chain
     /// when no local or style value exists on this element.
@@ -211,10 +234,13 @@ public abstract class MewObject : IPropertyOwner
                 $"Use SetValue(MewPropertyKey<T>, T) with the registered key.");
         }
 
+        var oldSource = PropertyStore.GetSource(property.Id);
+
         bool hadBinding = HasPropertyBinding(property.Id);
         if (!hadBinding)
         {
             PropertyStore.SetLocal(property, value);
+            NotifyIfValueSourceChanged(property, oldSource);
             return;
         }
 
@@ -223,6 +249,7 @@ public abstract class MewObject : IPropertyOwner
         DisposeExistingBinding(property.Id);
         PropertyStore.SetLocalPrevalidated(property, value);
         PropertyStore.ClearSource(property.Id, ValueSource.Binding);
+        NotifyIfValueSourceChanged(property, oldSource);
     }
 
     /// <summary>
@@ -455,7 +482,10 @@ public abstract class MewObject : IPropertyOwner
         {
             BindingDiagnostics.ReportLocalClear(this, property);
         }
+
+        var oldSource = PropertyStore.GetSource(property.Id);
         PropertyStore.ClearLocalValue(property);
+        NotifyIfValueSourceChanged(property, oldSource);
     }
 
     /// <summary>
@@ -630,6 +660,112 @@ public abstract class MewObject : IPropertyOwner
     }
 
     /// <summary>
+    /// Binds a property to a single notifying property of <paramref name="source"/>. Omitting
+    /// <paramref name="setter"/> makes the binding OneWay. Replaces any existing binding for the
+    /// same property.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// Thrown when <paramref name="getter"/> is not a single member access such as
+    /// <c>x =&gt; x.Name</c>.
+    /// </exception>
+    public void SetBinding<TSource, T>(
+        MewProperty<T> property,
+        TSource source,
+        Func<TSource, T> getter,
+        Action<TSource, T>? setter = null,
+        BindingMode? mode = null,
+        [CallerArgumentExpression(nameof(getter))] string? getterExpression = null)
+        where TSource : class, INotifyPropertyChanged
+    {
+        ArgumentNullException.ThrowIfNull(property);
+        ArgumentNullException.ThrowIfNull(source);
+
+        var path = BindingPath.From<TSource>().ThenNotifying(getter, setter, getterExpression);
+
+        var resolvedMode = mode ?? (property.BindsTwoWayByDefault
+            ? BindingMode.TwoWay
+            : BindingMode.OneWay);
+        if (resolvedMode == BindingMode.TwoWay && setter == null)
+        {
+            throw new ArgumentException(BuildMissingSetterMessage(property), nameof(setter));
+        }
+
+        SetBinding(property, source, path, resolvedMode, fallbackValue: default!);
+    }
+
+    /// <summary>
+    /// Binds a property to a single notifying property of <paramref name="source"/> with type
+    /// conversion. The binding is TwoWay only when both <paramref name="setter"/> and
+    /// <paramref name="convertBack"/> are supplied.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// Thrown when <paramref name="getter"/> is not a single member access such as
+    /// <c>x =&gt; x.Name</c>.
+    /// </exception>
+    public void SetBinding<TProp, TSource, TValue>(
+        MewProperty<TProp> property,
+        TSource source,
+        Func<TSource, TValue> getter,
+        Func<TValue, TProp> convert,
+        Action<TSource, TValue>? setter = null,
+        Func<TProp, TValue>? convertBack = null,
+        BindingMode? mode = null,
+        [CallerArgumentExpression(nameof(getter))] string? getterExpression = null)
+        where TSource : class, INotifyPropertyChanged
+    {
+        ArgumentNullException.ThrowIfNull(property);
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(convert);
+
+        var path = BindingPath.From<TSource>().ThenNotifying(getter, setter, getterExpression);
+
+        var resolvedMode = mode ?? (property.BindsTwoWayByDefault
+            ? BindingMode.TwoWay
+            : BindingMode.OneWay);
+        if (resolvedMode == BindingMode.TwoWay && setter == null)
+        {
+            throw new ArgumentException(BuildMissingSetterMessage(property), nameof(setter));
+        }
+
+        if (resolvedMode == BindingMode.TwoWay && convertBack == null)
+        {
+            resolvedMode = BindingMode.OneWay;
+        }
+
+        SetBinding(
+            property, source, path, convert, convertBack, resolvedMode, fallbackValue: default!);
+    }
+
+    /// <summary>
+    /// Binds a property to an <see cref="ObservableValue{T}"/> reached through
+    /// <paramref name="source"/>. The wrapper supplies the change notification, so
+    /// <paramref name="source"/> need not raise property change events.
+    /// </summary>
+    public void SetBinding<TSource, T>(
+        MewProperty<T> property,
+        TSource source,
+        Func<TSource, ObservableValue<T>> selector,
+        BindingMode? mode = null)
+        where TSource : class
+    {
+        ArgumentNullException.ThrowIfNull(property);
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(selector);
+
+        SetBinding(
+            property,
+            source,
+            BindingPath.From<TSource>().Then(selector),
+            mode,
+            fallbackValue: default!);
+    }
+
+    private static string BuildMissingSetterMessage(MewProperty property)
+        => $"A TwoWay binding to '{property.Name}' needs a way to write back. Pass a setter, "
+            + "bind with BindingMode.OneWay, or build with an SDK new enough to run the MewUI "
+            + "binding path generator, which writes the setter for you.";
+
+    /// <summary>
     /// Removes the binding and its target value from the specified property, revealing the next
     /// lower value source.
     /// </summary>
@@ -640,8 +776,11 @@ public abstract class MewObject : IPropertyOwner
         {
             BindingDiagnostics.ReportBindingClear(this, property);
         }
+
+        var oldSource = PropertyStore.GetSource(property.Id);
         DisposeExistingBinding(property.Id);
         PropertyStore.ClearSource(property.Id, ValueSource.Binding);
+        NotifyIfValueSourceChanged(property, oldSource);
     }
 
     private static void ThrowIfReadOnly(MewProperty property)
@@ -832,6 +971,7 @@ public abstract class MewObject : IPropertyOwner
 
     private void ActivatePropertyBinding(int propertyId, IPropertyBinding binding)
     {
+        var oldSource = PropertyStore.GetSource(propertyId);
         StorePropertyBinding(propertyId, binding);
         try
         {
@@ -842,6 +982,11 @@ public abstract class MewObject : IPropertyOwner
             DisposeExistingBinding(propertyId);
             PropertyStore.ClearSource(propertyId, ValueSource.Binding);
             throw;
+        }
+
+        if (MewPropertyRegistry.GetProperty(propertyId) is MewProperty property)
+        {
+            NotifyIfValueSourceChanged(property, oldSource);
         }
     }
 

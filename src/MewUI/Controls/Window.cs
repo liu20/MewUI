@@ -77,6 +77,11 @@ public sealed class ClosingDeferral : IDisposable
 /// </summary>
 public partial class Window : ContentControl, ILayoutRoundingHost
 {
+    static Window() { }
+
+    private static readonly bool _defaultStyleRegistered =
+        DefaultStyles.Register<Window>(DefaultStyles.CreateWindowStyle);
+
     private readonly DispatcherMergeKey _updatePassMergeKey = new(DispatcherPriority.Layout);
     private readonly DispatcherMergeKey _renderMergeKey = new(DispatcherPriority.Render);
 
@@ -126,6 +131,9 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     // target once per change and accepts whatever client size the platform applies.
     private Size _requestedClientSize;
     private bool _hasRequestedClientSize;
+    // DPI the last client-size request was converted with; a request is stale once the window moves
+    // to a monitor with a different scale, even when the content's DIP size is unchanged.
+    private uint _requestedClientSizeDpi;
 
     private Size _clientSizeDip = new(DefaultWidth, DefaultHeight);
     private Size _lastLayoutClientSizeDip = Size.Empty;
@@ -1980,10 +1988,11 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             // applies - possibly clamped to an OS minimum. The fit contract is
             // max(content, OS minimum); a clamped result is never re-fought (issue #199).
             var target = new Size(fitWidth, fitHeight);
-            if (!_hasRequestedClientSize || target != _requestedClientSize)
+            if (!_hasRequestedClientSize || target != _requestedClientSize || Dpi != _requestedClientSizeDpi)
             {
                 _hasRequestedClientSize = true;
                 _requestedClientSize = target;
+                _requestedClientSizeDpi = Dpi;
                 _backend?.SetClientSize(target.Width, target.Height);
             }
         }
@@ -2448,6 +2457,24 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     }
 
     internal void SetDpi(uint dpi) => Dpi = dpi;
+
+    /// <summary>
+    /// Client size this window last asked the platform for, or null while no fit target stands.
+    /// A platform driving an OS-owned resize can hold its rectangle to this instead of letting the
+    /// window settle at a size layout already replaced.
+    /// </summary>
+    internal Size? RequestedClientSize => _hasRequestedClientSize ? _requestedClientSize : null;
+
+    /// <summary>
+    /// Forgets the client size this window last asked the platform for, so the next layout submits
+    /// its fit target again. Needed after something outside layout resizes the window, such as the
+    /// OS move loop stamping its own rectangle over a resize made while a drag was in flight.
+    /// </summary>
+    internal void InvalidateSizingTransaction()
+    {
+        _hasRequestedClientSize = false;
+        InvalidateMeasure();
+    }
 
     internal void SetClientSizeDip(double widthDip, double heightDip) => _clientSizeDip = new Size(widthDip, heightDip);
 
@@ -3158,12 +3185,10 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     internal void CloseAllPopups()
         => _popupManager.CloseAllPopups();
 
-    internal Rect ShowPopup(UIElement owner, UIElement popup, Rect bounds, bool sizeToContent = false, bool staysOpen = false)
-        => _popupManager.ShowPopup(owner, popup, bounds, sizeToContent, staysOpen);
-
     /// <summary>
     /// Opens a popup whose placement is measured only after it is rooted and style-resolved in this
-    /// window. Use this overload when the placement math depends on the popup's own measured size.
+    /// window. Placement is always a callback: measuring a popup before it is rooted reads registered
+    /// defaults rather than this window's styles, fonts, theme and DPI.
     /// </summary>
     internal Rect ShowPopup(UIElement owner, UIElement popup, Func<Window, Rect> measureBounds, bool sizeToContent = false, bool staysOpen = false)
         => _popupManager.ShowPopup(owner, popup, measureBounds, sizeToContent, staysOpen);
@@ -3207,11 +3232,8 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             Math.Max(0, bottomRight.Y - topLeft.Y));
     }
 
-    internal Size MeasureToolTip(Element content, Size availableSize)
-        => _popupManager.MeasureToolTip(content, availableSize);
-
-    internal void ShowToolTip(UIElement owner, Element content, Rect bounds)
-        => _popupManager.ShowToolTip(owner, content, bounds);
+    internal void ShowToolTip(UIElement owner, Element content, Size availableSize, Func<Size, Rect> place)
+        => _popupManager.ShowToolTip(owner, content, availableSize, place);
 
     internal void CloseToolTip(UIElement? owner = null)
         => _popupManager.CloseToolTip(owner);

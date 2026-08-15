@@ -9,6 +9,11 @@ namespace Aprillz.MewUI.Controls;
 /// </summary>
 public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHost, ISelector, IIndexedSelector, IMultiSelector
 {
+    static ListBox() { }
+
+    private static readonly bool _defaultStyleRegistered =
+        DefaultStyles.Register<ListBox>(DefaultStyles.CreateListBoxStyle);
+
     public static readonly MewProperty<int> SelectedIndexProperty =
         MewProperty<int>.Register<ListBox>(nameof(SelectedIndex), -1,
             MewPropertyOptions.BindsTwoWayByDefault,
@@ -252,7 +257,7 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
     /// The item's rectangle in this control's coordinate space, spanning the item's full width.
     /// False when the index is out of range or the list cannot say where the item sits, which a
     /// variable-height list answers for an item it has not measured yet. The rectangle can fall
-    /// outside the viewport; intersect it with <see cref="UIElement.Bounds"/> for the visible part.
+    /// outside the viewport; intersect it with <see cref="Element.Bounds"/> for the visible part.
     /// </summary>
     public bool TryGetItemBounds(int index, out Rect bounds)
         => TryMapItemIndexToBounds(index, _presenter, out bounds);

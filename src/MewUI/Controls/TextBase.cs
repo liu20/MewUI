@@ -13,8 +13,11 @@ namespace Aprillz.MewUI.Controls;
 /// </summary>
 // Rebuilt hierarchy (agent/textBase/plan.md). Text-surface exposure is deferred to leaves:
 // the base owns document/session/IME/clipboard machinery but no public Text/SelectedText.
-public abstract class TextBase : Control, ITextCompositionClient, ITextCompositionEditor, ITextInputClient
+public abstract partial class TextBase : Control, ITextCompositionClient, ITextCompositionEditor, ITextInputClient
 {
+    private static readonly bool _defaultStyleRegistered =
+        DefaultStyles.Register<TextBase>(DefaultStyles.CreateTextBaseStyle);
+
     public static readonly MewProperty<ImeMode> ImeModeProperty =
         MewProperty<ImeMode>.Register<TextBase>(nameof(ImeMode), ImeMode.Auto);
 
@@ -220,7 +223,7 @@ public abstract class TextBase : Control, ITextCompositionClient, ITextCompositi
             static textBase => !textBase.IsReadOnly && textBase._editor.Selection.Length > 0);
         Commands.Register(StandardCommands.Paste, this,
             static textBase => textBase.Paste(),
-            static textBase => !textBase.IsReadOnly);
+            static textBase => !textBase.IsReadOnly && textBase.ClipboardHasText());
         Commands.Register(StandardCommands.SelectAll, this,
             static textBase => textBase.SelectAll(),
             static textBase => textBase._document.TextLength > 0);
@@ -381,7 +384,7 @@ public abstract class TextBase : Control, ITextCompositionClient, ITextCompositi
             return;
         }
 
-        var color = Theme.Palette.WindowText;
+        var color = Foreground;
         int index = 0;
         while (index < _compositionLength)
         {
@@ -648,9 +651,18 @@ public abstract class TextBase : Control, ITextCompositionClient, ITextCompositi
     private protected bool TryGetClipboardText(out string text)
     {
         text = string.Empty;
-        var clipboard = ClipboardService ?? (Application.IsRunning ? Application.Current.PlatformServices.Clipboard : null);
+        var clipboard = ResolveClipboard();
         return clipboard is not null && clipboard.TryGetText(out text);
     }
+
+    private bool ClipboardHasText()
+    {
+        var clipboard = ResolveClipboard();
+        return clipboard is not null && clipboard.HasText();
+    }
+
+    private IClipboardService? ResolveClipboard()
+        => ClipboardService ?? (Application.IsRunning ? Application.Current.PlatformServices.Clipboard : null);
 
     /// <summary>
     /// Returns the rectangle at the given character index in window coordinates (DIPs).

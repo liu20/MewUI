@@ -30,7 +30,7 @@ public sealed record class ThemeMetrics
     {
         BaseControlHeight = 28,
         ControlCornerRadius = 4,
-        ControlBorderThickness = 1,
+        ControlBorderThickness = 0.5,
         ItemPadding = new Thickness(8, 2, 8, 2),
         ContainerPadding = new Thickness(8),
         FontFamily = SystemFontFamily,
@@ -46,8 +46,7 @@ public sealed record class ThemeMetrics
         ScrollWheelStep = 50,
         ScrollBarSmallChange = 24,
         ScrollBarLargeChange = 120,
-        ContextMenuIconSize = 16,
-        ToolBarIconSize = 24
+        CommandIconSize = 16
     };
 
     /// <summary>
@@ -151,12 +150,7 @@ public sealed record class ThemeMetrics
     public required double ScrollBarLargeChange { get; init; }
 
     /// <summary>
-    /// Gets the command icon size used by context menus and menu-bar dropdowns (in DIPs).
+    /// Gets the size a command's icon is drawn at wherever a command is presented (in DIPs).
     /// </summary>
-    public double ContextMenuIconSize { get; init; } = 16;
-
-    /// <summary>
-    /// Gets the default command icon size reserved for toolbar presenters (in DIPs).
-    /// </summary>
-    public double ToolBarIconSize { get; init; } = 24;
+    public double CommandIconSize { get; init; } = 16;
 }

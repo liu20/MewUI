@@ -6,16 +6,42 @@ namespace Aprillz.MewUI.Controls;
 /// <summary>
 /// A tabbed control with header buttons and content display.
 /// </summary>
-public sealed class TabControl : Control, ISelector, IIndexedSelector, ILogicalTreeHost
+public sealed partial class TabControl : Control, ISelector, IIndexedSelector, ILogicalTreeHost
     , IVisualTreeHost
     , IFocusTraversalScope
 {
+    private static readonly bool _defaultStyleRegistered =
+        DefaultStyles.Register<TabControl>(DefaultStyles.CreateTabControlStyle);
+
     private const double HeaderSpacing = 2.0;
 
     private readonly List<TabItem> _tabs = new();
     private readonly List<TabHeaderButton> _headers = new();
+    private static DelegateControlTemplate<DropDownButton>? _overflowButtonTemplate;
+
+    private static DelegateControlTemplate<DropDownButton> OverflowButtonTemplate
+        => _overflowButtonTemplate ??= new DelegateControlTemplate<DropDownButton>(static (owner, ctx) =>
+        {
+            var face = new Button
+            {
+                StyleName = BuiltInStyles.FlatButton,
+                Padding = new Thickness(0),
+                // The flat style inherits the base control height, which would make the chevron as tall
+                // as an ordinary button and leave the owner's own minimum with nothing to say.
+                MinHeight = 0,
+                Focusable = false,
+                IsTabStop = false,
+                Content = new GlyphElement { Kind = GlyphKind.ChevronDown },
+            };
+            ctx.Register(DropDownButton.PART_DROP_DOWN_BUTTON, face);
+            return face;
+        });
+
     private readonly HashSet<TabHeaderButton> _hiddenHeaders = new();
-    private readonly Button _overflowButton;
+    private readonly Menu _overflowMenu = new();
+    private readonly List<CommandRegistration> _overflowRegistrations = new();
+    private readonly DropDownButton _overflowButton;
+    private int _openOverflowSignature;
     private TabItem? _lastTab;
     private Element? _lastContent;
     private int _cachedFocusedHeaderIndex = -1;
@@ -129,17 +155,21 @@ public sealed class TabControl : Control, ISelector, IIndexedSelector, ILogicalT
 
     public TabControl()
     {
-        _overflowButton = new Button
+        _overflowButton = new DropDownButton
         {
-            Content = new GlyphElement { Kind = GlyphKind.ChevronDown },
-            StyleName = BuiltInStyles.FlatButton,
-            Padding = new Thickness(0),
+            // The default template adds a content presenter and chrome; the strip wants a bare flat
+            // chevron, so the overflow supplies its own face part through the public part contract.
+            Template = OverflowButtonTemplate,
+            DropDownMenu = _overflowMenu,
             MinWidth = 18,
             MinHeight = 18,
+            // The strip is taller than the chevron, so the button centres itself in the row it is given
+            // rather than the arrange pass doing that arithmetic.
+            VerticalAlignment = VerticalAlignment.Center,
             Focusable = false,
             IsTabStop = false,
         };
-        _overflowButton.Click += ShowOverflowMenu;
+        _overflowButton.DropDownOpening += RebuildOverflowMenu;
         _overflowButton.Parent = this;
     }
 
@@ -708,6 +738,15 @@ public sealed class TabControl : Control, ISelector, IIndexedSelector, ILogicalT
 
     private void ArrangeHeaders(Rect headerBounds)
     {
+        ArrangeHeadersCore(headerBounds);
+
+        // Runs after every arrange path, so an open menu never survives a layout that changed which
+        // tabs are hidden.
+        CloseOverflowMenuIfTargetsChanged();
+    }
+
+    private void ArrangeHeadersCore(Rect headerBounds)
+    {
         if (_headers.Count == 0)
         {
             _hiddenHeaders.Clear();
@@ -755,10 +794,8 @@ public sealed class TabControl : Control, ISelector, IIndexedSelector, ILogicalT
         if (_overflowActive)
         {
             double width = Math.Min(_overflowButton.DesiredSize.Width, headerBounds.Width);
-            double height = Math.Min(_overflowButton.DesiredSize.Height, headerBounds.Height);
             double buttonX = Math.Max(headerBounds.X, headerBounds.Right - width);
-            double buttonY = headerBounds.Y + Math.Max(0, (headerBounds.Height - height) / 2);
-            _overflowButton.Arrange(new Rect(buttonX, buttonY, width, height));
+            _overflowButton.Arrange(new Rect(buttonX, headerBounds.Y, width, headerBounds.Height));
         }
         else
         {
@@ -853,16 +890,18 @@ public sealed class TabControl : Control, ISelector, IIndexedSelector, ILogicalT
         }
     }
 
-    private void ShowOverflowMenu()
+    private void RebuildOverflowMenu()
     {
-        if (_hiddenHeaders.Count == 0)
+        // Each rebuild drops the previous handlers and entries so repeated opens do not accumulate
+        // registrations for tabs that are no longer hidden.
+        for (int i = 0; i < _overflowRegistrations.Count; i++)
         {
-            return;
+            _overflowRegistrations[i].Dispose();
         }
 
-        var menu = new ContextMenu();
-        var commandScope = new CommandScope();
-        menu.SetCommandTarget(CommandTarget.From(commandScope));
+        _overflowRegistrations.Clear();
+        _overflowMenu.Items.Clear();
+
         for (int i = 0; i < _tabs.Count && i < _headers.Count; i++)
         {
             if (!_hiddenHeaders.Contains(_headers[i]))
@@ -873,12 +912,41 @@ public sealed class TabControl : Control, ISelector, IIndexedSelector, ILogicalT
             int index = i;
             var tab = _tabs[i];
             var command = new Command($"tab.select.{index}", GetOverflowMenuText(tab, i));
-            commandScope.Register(command, () => CommitSelection(index), () => tab.IsEnabled);
-            menu.AddItem(command);
+            _overflowRegistrations.Add(
+                _overflowButton.Commands.Register(command, () => CommitSelection(index), () => tab.IsEnabled));
+            _overflowMenu.Item(command);
         }
 
-        var buttonBounds = _overflowButton.Bounds;
-        menu.ShowAt(_overflowButton, new Point(buttonBounds.X, buttonBounds.Bottom));
+        _openOverflowSignature = GetHiddenHeaderSignature();
+    }
+
+    // Identifies the hidden set an open menu was built from, so a layout change that alters that set
+    // closes the menu instead of leaving it pointing at stale tabs.
+    private int GetHiddenHeaderSignature()
+    {
+        int signature = _hiddenHeaders.Count;
+        for (int i = 0; i < _headers.Count; i++)
+        {
+            if (_hiddenHeaders.Contains(_headers[i]))
+            {
+                signature = HashCode.Combine(signature, i);
+            }
+        }
+
+        return signature;
+    }
+
+    private void CloseOverflowMenuIfTargetsChanged()
+    {
+        if (!_overflowButton.IsDropDownOpen)
+        {
+            return;
+        }
+
+        if (!_overflowActive || GetHiddenHeaderSignature() != _openOverflowSignature)
+        {
+            _overflowButton.IsDropDownOpen = false;
+        }
     }
 
     private static string GetOverflowMenuText(TabItem tab, int index)

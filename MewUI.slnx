@@ -7,13 +7,14 @@
     <File Path="build/MewUI.Meta.props" />
   </Folder>
   <Folder Name="/samples/">
-    <Project Path="samples/MewDock.Sample/MewDock.Sample.csproj" />
     <Project Path="samples/MewUI.Gallery/MewUI.Gallery.csproj" />
+    <Project Path="samples/MewUI.MewDock.Sample/MewUI.MewDock.Sample.csproj" />
     <Project Path="samples/MewUI.MewvalonEdit.Sample/MewUI.MewvalonEdit.Sample.csproj" />
     <Project Path="samples/MewUI.MewCharts.Sample/MewUI.MewCharts.Sample.csproj" />
     <Project Path="samples/MewUI.Sample/MewUI.Sample.csproj" />
     <Project Path="samples/MewUI.Skia.Sample/MewUI.Skia.Sample.csproj" />
     <Project Path="samples/MewUI.Svg.Sample/MewUI.Svg.Sample.csproj" />
+    <Project Path="samples/MewUI.TaskManager.Sample/MewUI.TaskManager.Sample.csproj" />
     <Project Path="samples/MewUI.Video.Sample/MewUI.Video.Sample.csproj" />
     <Project Path="samples/MewUI.WebView2.Win32.Sample/MewUI.WebView2.Win32.Sample.csproj" />
     <Project Path="samples/MewUI.Windowless.Sample/MewUI.Windowless.Sample.csproj" />
@@ -30,6 +31,7 @@
     <Project Path="src/MewUI.Backend.MewVG.MacOS/MewUI.Backend.MewVG.MacOS.csproj" />
     <Project Path="src/MewUI.Backend.MewVG.Win32/MewUI.Backend.MewVG.Win32.csproj" />
     <Project Path="src/MewUI.Backend.MewVG.X11/MewUI.Backend.MewVG.X11.csproj" />
+    <Project Path="src/MewUI.Generators/MewUI.Generators.csproj" />
     <Project Path="src/MewUI.Platform.MacOS/MewUI.Platform.MacOS.csproj" />
     <Project Path="src/MewUI.Platform.Win32/MewUI.Platform.Win32.csproj" />
     <Project Path="src/MewUI.Platform.X11/MewUI.Platform.X11.csproj" />
@@ -73,8 +75,10 @@
   <Folder Name="/tests/">
     <Project Path="tests/MewUI.Analyzers.Test/MewUI.Analyzers.Test.csproj" />
     <Project Path="tests/Aprillz.MewUI.Benchmarks/Aprillz.MewUI.Benchmarks.csproj" />
+    <Project Path="tests/MewUI.Generators.Test/MewUI.Generators.Test.csproj" />
     <Project Path="tests/MewUI.GraphicsBackendTest/MewUI.GraphicsBackendTest.csproj" />
     <Project Path="tests/Aprillz.MewUI.Test/Aprillz.MewUI.Test.csproj" />
     <Project Path="tests/MewUI.MewvalonEdit.Test/MewUI.MewvalonEdit.Test.csproj" />
+    <Project Path="tests/MewUI.WindowAutomationTest/MewUI.WindowAutomationTest.csproj" />
   </Folder>
 </Solution>

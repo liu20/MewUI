@@ -5,10 +5,10 @@ using Aprillz.MewUI.Controls;
 namespace Aprillz.MewUI.Animation;
 
 /// <summary>
-/// Drives all active <see cref="AnimationClock"/> instances synchronized with the platform render pulse. While any
-/// clock is active it sets <see cref="RenderLoopSettings.AnimationActive"/> so the host continues pulsing, and
-/// clears it when idle. Per-window demand lets the host render only the surfaces that consumed that pulse. It never
-/// touches the user's <see cref="RenderLoopSettings.Continuous"/> flag.
+/// Drives all active <see cref="AnimationClock"/> instances synchronized with the platform render pulse.
+/// <see cref="RenderLoopSettings.AnimationActive"/> reads <see cref="HasUnpausedClocks"/> each frame, so the host
+/// keeps pulsing while any clock runs. Per-window demand lets the host render only the surfaces that consumed that
+/// pulse. It never touches the user's <see cref="RenderLoopSettings.Continuous"/> flag.
 /// </summary>
 public sealed class AnimationManager
 {
@@ -25,6 +25,16 @@ public sealed class AnimationManager
     private readonly HashSet<Window> _pulseDemandWindows = new(ReferenceEqualityComparer.Instance);
     private bool _pulseHasApplicationDemand;
     private bool _isUpdating;
+
+    // Read by the render loop every frame, so it is cached rather than recomputed under _sync. Every
+    // mutation of the clock set or of a pause state refreshes it.
+    private int _hasUnpausedClock;
+
+    /// <summary>
+    /// Whether any registered clock is running and unpaused. The render loop pulls this each frame, so a
+    /// clock registered before the application ran still starts pulsing once the loop begins.
+    /// </summary>
+    internal bool HasUnpausedClocks => Volatile.Read(ref _hasUnpausedClock) != 0;
 
     internal AnimationManager() { }
 
@@ -100,7 +110,7 @@ public sealed class AnimationManager
                 _active.Add(clock);
             }
 
-            EnableContinuousMode();
+            RefreshActiveState();
         }
     }
 
@@ -115,7 +125,7 @@ public sealed class AnimationManager
             else
             {
                 _active.Remove(clock);
-                DisableContinuousModeIfIdle();
+                RefreshActiveState();
             }
         }
     }
@@ -124,14 +134,7 @@ public sealed class AnimationManager
     {
         lock (_sync)
         {
-            if (HasUnpausedClock())
-            {
-                EnableContinuousMode();
-            }
-            else
-            {
-                DisableContinuousModeIfIdle();
-            }
+            RefreshActiveState();
         }
     }
 
@@ -139,7 +142,14 @@ public sealed class AnimationManager
     /// Updates all active animation clocks. Called once by the platform host before selecting and
     /// rendering the windows that consumed the pulse.
     /// </summary>
-    public void Update()
+    public void Update() => UpdateAt(Stopwatch.GetTimestamp());
+
+    /// <summary>
+    /// Ticks every active clock against <paramref name="timestamp"/>, in <see cref="Stopwatch"/> ticks.
+    /// A caller that supplies the timestamp can step a transition frame by frame, which reading the
+    /// wall clock cannot: a test would only ever sample progress zero.
+    /// </summary>
+    internal void UpdateAt(long timestamp)
     {
         lock (_sync)
         {
@@ -151,7 +161,7 @@ public sealed class AnimationManager
                 return;
             }
 
-            long now = Stopwatch.GetTimestamp();
+            long now = timestamp;
 
             // Capture demand before ticking. A clock may complete and unregister during Update, but
             // its final callback still needs one frame on the surface it updated.
@@ -203,7 +213,7 @@ public sealed class AnimationManager
                 _pendingRemove.Clear();
             }
 
-            DisableContinuousModeIfIdle();
+            RefreshActiveState();
         }
     }
 
@@ -235,30 +245,10 @@ public sealed class AnimationManager
         }
     }
 
-    private void EnableContinuousMode()
-    {
-        if (!Application.IsRunning)
-        {
-            return;
-        }
+    // Callers hold _sync: every clock-set and pause-state mutation ends here.
+    private void RefreshActiveState()
+        => Volatile.Write(ref _hasUnpausedClock, HasUnpausedClock() ? 1 : 0);
 
-        Application.Current.RenderLoopSettings.AnimationActive = true;
-    }
-
-    private void DisableContinuousModeIfIdle()
-    {
-        if (HasUnpausedClock())
-        {
-            return;
-        }
-
-        if (!Application.IsRunning)
-        {
-            return;
-        }
-
-        Application.Current.RenderLoopSettings.AnimationActive = false;
-    }
 
     private bool HasUnpausedClock()
     {
@@ -328,7 +318,7 @@ public sealed class AnimationManager
                 instance._pendingRemove.Clear();
                 instance._pulseDemandWindows.Clear();
                 instance._pulseHasApplicationDemand = false;
-                instance.DisableContinuousModeIfIdle();
+                instance.RefreshActiveState();
             }
         }
     }

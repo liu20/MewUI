@@ -6,9 +6,14 @@ namespace Aprillz.MewUI.Controls;
 /// <summary>
 /// Base class for all controls.
 /// </summary>
-public abstract class Control : TextElement
+public abstract partial class Control : TextElement
     , IVisualTreeHost
 {
+    static Control() { }
+
+    private static readonly bool _defaultStyleRegistered =
+        DefaultStyles.Register<Control>(DefaultStyles.CreateControlBaseStyle);
+
     #region MewProperty Declarations
 
     /// <summary>Background color property.</summary>
@@ -88,11 +93,13 @@ public abstract class Control : TextElement
     private bool _forceApplyStyle;
     private bool _styleNameResolved;
 
-    // ContextVersion at the time _style was resolved; a mismatch means the ancestor
+    // ContextVersion at the time the style cascade was resolved; a mismatch means the ancestor
     // chain changed since and the style must be re-resolved.
     private int _styleContextVersion = -1;
 
+    private Style? _defaultStyle;
     private Style? _style;
+    private HashSet<Style>? _applicationStyleChain;
     private string? _styleName;
     private Dictionary<int, ValidationError>? _validationErrors;
 
@@ -402,6 +409,14 @@ public abstract class Control : TextElement
 
     internal bool HasTemplateInstance => _templateInstance != null;
 
+    /// <summary>
+    /// The slot a <see cref="ContentPresenter"/> projects when its ContentSource is not set.
+    /// Null leaves such a presenter empty.
+    /// </summary>
+    private protected virtual MewProperty<Element?>? DefaultContentSource => null;
+
+    internal MewProperty<Element?>? ResolveDefaultContentSource() => DefaultContentSource;
+
     internal void RefreshTemplatePresenters(MewProperty property)
     {
         var instance = _templateInstance;
@@ -412,7 +427,7 @@ public abstract class Control : TextElement
 
         for (int i = 0; i < instance.Presenters.Count; i++)
         {
-            if (instance.Presenters[i].ContentSource == property)
+            if (instance.Presenters[i].ResolvedContentSource == property)
             {
                 instance.Presenters[i].UpdateProjection();
             }
@@ -516,6 +531,16 @@ public abstract class Control : TextElement
     internal void SetStyle(Style? style, bool snap = true)
     {
         style?.Freeze();
+        ValidateStyleTarget(style);
+
+        var defaultStyle = style?.OverridesDefaultStyle == true
+            ? null
+            : ResolveFrameworkDefaultStyle();
+        defaultStyle?.Freeze();
+        ValidateStyleTarget(defaultStyle);
+
+        _applicationStyleChain = BuildStyleIdentitySet(style);
+        _defaultStyle = defaultStyle;
         _style = style;
         _styleContextVersion = ContextVersion;
 
@@ -531,11 +556,53 @@ public abstract class Control : TextElement
         InvalidateVisual();
     }
 
+    private Style? ResolveFrameworkDefaultStyle()
+    {
+        for (Type? type = GetType();
+             type != null && typeof(Control).IsAssignableFrom(type);
+             type = type.BaseType)
+        {
+            var style = DefaultStyles.GetStyle(type);
+            if (style != null)
+            {
+                return style;
+            }
+        }
+
+        return null;
+    }
+
+    private void ValidateStyleTarget(Style? style)
+    {
+        if (style != null && !style.TargetType.IsAssignableFrom(GetType()))
+        {
+            throw new InvalidOperationException(
+                $"Style targeting '{style.TargetType.FullName}' cannot be applied to " +
+                $"control type '{GetType().FullName}'.");
+        }
+    }
+
+    private static HashSet<Style>? BuildStyleIdentitySet(Style? style)
+    {
+        if (style == null)
+        {
+            return null;
+        }
+
+        var result = new HashSet<Style>(ReferenceEqualityComparer.Instance);
+        for (var current = style; current != null; current = current.BasedOn)
+        {
+            result.Add(current);
+        }
+
+        return result;
+    }
+
     /// <summary>
     /// Resolves the effective Style for this control from:
     /// 1. StyleName (named style from nearest StyleSheet)
     /// 2. StyleSheet type rule (nearest container's type-matched rule)
-    /// 3. Theme (type-based default)
+    /// The selected named or type-rule style is layered over the nearest framework default style.
     /// </summary>
     /// <param name="animate">When true, a runtime style swap applies with the new style's transitions.</param>
     internal void ResolveAndApplyStyle(bool animate = false)
@@ -575,28 +642,9 @@ public abstract class Control : TextElement
 
         _styleNameResolved = true;
 
-        // 3. Theme default style (walk type hierarchy)
-        if (resolved == null)
-        {
-            var type = GetType();
-            while (type != null && type != typeof(UIElement))
-            {
-                resolved = Style.ForType(type);
-                if (resolved != null) break;
-                type = type.BaseType;
-            }
-        }
-
-        if (resolved != null && !resolved.TargetType.IsAssignableFrom(GetType()))
-        {
-            throw new InvalidOperationException(
-                $"Style targeting '{resolved.TargetType.FullName}' cannot be applied to " +
-                $"control type '{GetType().FullName}'.");
-        }
-
         // Transitions only make sense for a runtime swap on an attached, already-styled
         // control; initial attach, theme change, and detached resolution snap.
-        bool snap = !animate || _style == null || FindVisualRoot() is not Window;
+        bool snap = !animate || (_style == null && _defaultStyle == null) || FindVisualRoot() is not Window;
         SetStyle(resolved, snap);
     }
 
@@ -650,7 +698,13 @@ public abstract class Control : TextElement
     {
         _nextStyleValues ??= new();
         _nextStyleValues.Clear();
-        CollectResolvedValues(_style, flags, Theme, _nextStyleValues);
+        CollectResolvedValues(
+            _defaultStyle,
+            flags,
+            Theme,
+            _nextStyleValues,
+            _applicationStyleChain);
+        CollectResolvedValues(_style, flags, Theme, _nextStyleValues, skippedStyles: null);
 
         if (_appliedStyleValues != null)
         {
@@ -688,7 +742,20 @@ public abstract class Control : TextElement
         var entries = new List<StyleCascadeEntryTrace>();
         int finalEntryIndex = -1;
         CollectStyleCascadeTrace(
+            _defaultStyle,
+            StyleCascadeLayer.FrameworkDefault,
+            isNewlyInherited: _style != null,
+            _applicationStyleChain,
+            property,
+            _visualState.Flags,
+            Theme,
+            entries,
+            ref finalEntryIndex);
+        CollectStyleCascadeTrace(
             _style,
+            StyleCascadeLayer.Application,
+            isNewlyInherited: false,
+            skippedStyles: null,
             property,
             _visualState.Flags,
             Theme,
@@ -721,19 +788,25 @@ public abstract class Control : TextElement
 
     private static void CollectStyleCascadeTrace(
         Style? style,
+        StyleCascadeLayer layer,
+        bool isNewlyInherited,
+        HashSet<Style>? skippedStyles,
         MewProperty property,
         VisualStateFlags flags,
         Theme theme,
         List<StyleCascadeEntryTrace> entries,
         ref int finalEntryIndex)
     {
-        if (style == null)
+        if (style == null || skippedStyles?.Contains(style) == true)
         {
             return;
         }
 
         CollectStyleCascadeTrace(
             style.BasedOn,
+            layer,
+            isNewlyInherited,
+            skippedStyles,
             property,
             flags,
             theme,
@@ -743,6 +816,8 @@ public abstract class Control : TextElement
         CollectStyleCascadeSetters(
             style,
             trigger: null,
+            layer,
+            isNewlyInherited,
             style.Setters,
             property,
             isActive: true,
@@ -756,6 +831,8 @@ public abstract class Control : TextElement
             CollectStyleCascadeSetters(
                 style,
                 trigger,
+                layer,
+                isNewlyInherited,
                 trigger.Setters,
                 property,
                 trigger.Matches(flags),
@@ -768,6 +845,8 @@ public abstract class Control : TextElement
     private static void CollectStyleCascadeSetters(
         Style style,
         StateTrigger? trigger,
+        StyleCascadeLayer layer,
+        bool isNewlyInherited,
         IReadOnlyList<SetterBase> setters,
         MewProperty property,
         bool isActive,
@@ -793,6 +872,8 @@ public abstract class Control : TextElement
             entries.Add(new StyleCascadeEntryTrace(
                 style,
                 trigger,
+                layer,
+                isNewlyInherited,
                 isActive,
                 isUnset,
                 hasResolvedValue,
@@ -810,13 +891,17 @@ public abstract class Control : TextElement
     }
 #endif
 
-    private static void CollectResolvedValues(Style? style, VisualStateFlags flags,
-        Theme theme, Dictionary<int, ResolvedStyleValue> result)
+    private static void CollectResolvedValues(
+        Style? style,
+        VisualStateFlags flags,
+        Theme theme,
+        Dictionary<int, ResolvedStyleValue> result,
+        HashSet<Style>? skippedStyles)
     {
-        if (style == null) return;
+        if (style == null || skippedStyles?.Contains(style) == true) return;
 
         // BasedOn first (lower priority - will be overwritten by derived)
-        CollectResolvedValues(style.BasedOn, flags, theme, result);
+        CollectResolvedValues(style.BasedOn, flags, theme, result, skippedStyles);
 
         // Base setters
         for (int i = 0; i < style.Setters.Count; i++)
@@ -853,7 +938,7 @@ public abstract class Control : TextElement
             : PropertyStore.ClearSource(property.Id, ValueSource.Style);
 
         if (!snap && mutation.IsEffectiveChange && from != null && mutation.NewValue != null &&
-            _style?.FindTransition(property.Id) is Transition transition)
+            FindStyleTransition(property.Id) is Transition transition)
         {
             Animator.AnimateFromTo(
                 property,
@@ -863,6 +948,10 @@ public abstract class Control : TextElement
                 transition.Easing);
         }
     }
+
+    internal Transition? FindStyleTransition(int propertyId)
+        => _style?.FindTransition(propertyId)
+            ?? _defaultStyle?.FindTransition(propertyId);
 
     protected override void OnThemeChanged(Theme oldTheme, Theme newTheme)
     {
@@ -896,7 +985,9 @@ public abstract class Control : TextElement
         if (newRoot == null)
         {
             // Detached from visual tree - release the resolved style reference.
+            _defaultStyle = null;
             _style = null;
+            _applicationStyleChain = null;
         }
         else
         {
@@ -1299,26 +1390,25 @@ public abstract class Control : TextElement
         }
 
         var region = window.GetPopupPlacementRegion(new Rect(anchor.X, anchor.Y, 0, 0));
-
-        const double dx = 12;
-        const double dy = 18;
-        double x = anchor.X + dx;
-        double y = anchor.Y + dy;
-
         var measureSize = new Size(Math.Max(0, region.Width), Math.Max(0, region.Height));
-        Size desired = window.MeasureToolTip(ToolTip!, measureSize);
 
-        double w = Math.Max(0, desired.Width);
-        double h = Math.Max(0, desired.Height);
-
-        x = PopupPlacement.ClampHorizontal(x, w, region, floorToLeftEdge: false);
-
-        if (y + h > region.Bottom)
+        window.ShowToolTip(this, ToolTip!, measureSize, desired =>
         {
-            y = Math.Max(region.Y, anchor.Y - h - dy);
-        }
+            const double dx = 12;
+            const double dy = 18;
+            double w = Math.Max(0, desired.Width);
+            double h = Math.Max(0, desired.Height);
 
-        window.ShowToolTip(this, ToolTip!, new Rect(x, y, w, h));
+            double x = PopupPlacement.ClampHorizontal(anchor.X + dx, w, region, floorToLeftEdge: false);
+            double y = anchor.Y + dy;
+
+            if (y + h > region.Bottom)
+            {
+                y = Math.Max(region.Y, anchor.Y - h - dy);
+            }
+
+            return new Rect(x, y, w, h);
+        });
     }
 
     private void HideToolTip()

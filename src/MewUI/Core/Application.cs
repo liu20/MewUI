@@ -103,12 +103,7 @@ public sealed class Application
     }
 
     private static StyleSheet CreateDefaultStyleSheet()
-    {
-        var sheet = new StyleSheet();
-        BuiltInStyles.Register(sheet);
-        FileDialogStyles.Register(sheet);
-        return sheet;
-    }
+        => new() { UsesFrameworkNamedStyles = true };
 
     /// <summary>
     /// Gets the render loop settings controlling frame scheduling.
@@ -303,7 +298,10 @@ public sealed class Application
         {
             if (_defaultPlatformHost == null)
             {
-                var host = MaybeTracePlatformHost(ResolvePlatformHost());
+                var host = ResolvePlatformHost();
+#if DEBUG
+                host = MaybeTracePlatformHost(host);
+#endif
                 var interceptor = PlatformHostInterceptor;
                 if (interceptor != null)
                 {
@@ -393,6 +391,9 @@ public sealed class Application
             Application? app = null;
             try
             {
+                // Each run starts from a clean exit code so a previous run's Shutdown value cannot be
+                // reported by this one.
+                Environment.ExitCode = 0;
                 var host = DefaultPlatformHost;
                 app = new Application(host);
                 _current = app;
@@ -554,15 +555,13 @@ public sealed class Application
     /// <param name="exitCode">Value assigned to <see cref="Environment.ExitCode"/>.</param>
     public static void Shutdown(int exitCode)
     {
-        if (_current == null)
-        {
-            return;
-        }
-
-        // Assigned before the loop exit request so the code survives even when Run rethrows a fatal
-        // exception instead of returning normally.
+        // Assigned before the exit request so the code survives a fatal exception rethrown from Run, and
+        // outside the running check so a request that raced the end of the loop still reports its code.
         Environment.ExitCode = exitCode;
-        _current.PlatformHost.Quit(_current);
+
+        // Read once: a run ending on another thread would otherwise null the field between the two uses.
+        var app = _current;
+        app?.PlatformHost.Quit(app);
     }
 
     /// <summary>
@@ -715,6 +714,7 @@ public sealed class Application
         Rendering.FontFallback.ApplyPlatformDefaults(host.DefaultFontFallbacks);
     }
 
+#if DEBUG
     private static IPlatformHost MaybeTracePlatformHost(IPlatformHost host)
     {
         if (!DiagLog.Enabled)
@@ -724,4 +724,5 @@ public sealed class Application
 
         return host is TracingPlatformHost ? host : new TracingPlatformHost(host);
     }
+#endif
 }

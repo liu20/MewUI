@@ -1,4 +1,5 @@
 using System.Collections.Specialized;
+using System.ComponentModel;
 using System.Runtime.CompilerServices;
 
 namespace Aprillz.MewUI;
@@ -77,6 +78,38 @@ internal static class WeakEventManager
     {
         Validate(eventKey, source, target, invoke);
         Add(source, new CollectionChangedRegistration<TSource, TTarget>(eventKey, source, target, invoke));
+    }
+
+    internal static void AddHandler<TSource, TTarget>(
+        WeakEventKey<TSource, PropertyChangedEventHandler> eventKey,
+        TSource source,
+        TTarget target,
+        string propertyName,
+        Action<TTarget> invoke)
+        where TSource : class
+        where TTarget : class
+    {
+        Validate(eventKey, source, target, invoke);
+        ArgumentException.ThrowIfNullOrEmpty(propertyName);
+        Add(source, new PropertyChangedRegistration<TSource, TTarget>(
+            eventKey, source, target, propertyName, matchPrefix: false, invoke));
+    }
+
+    /// <summary>
+    /// Subscribes to indexer change notifications, which name the property <c>Item[]</c> for every
+    /// indexer or <c>Item[0]</c> for one.
+    /// </summary>
+    internal static void AddIndexerHandler<TSource, TTarget>(
+        WeakEventKey<TSource, PropertyChangedEventHandler> eventKey,
+        TSource source,
+        TTarget target,
+        Action<TTarget> invoke)
+        where TSource : class
+        where TTarget : class
+    {
+        Validate(eventKey, source, target, invoke);
+        Add(source, new PropertyChangedRegistration<TSource, TTarget>(
+            eventKey, source, target, "Item[", matchPrefix: true, invoke));
     }
 
     internal static void RemoveHandler<TSource, THandler, TTarget>(
@@ -398,6 +431,56 @@ internal static class WeakEventManager
             }
         }
     }
+
+    private sealed class PropertyChangedRegistration<TSource, TTarget>
+        : Registration<TSource, TTarget, PropertyChangedEventHandler>
+        where TSource : class
+        where TTarget : class
+    {
+        private readonly string _propertyName;
+        private readonly bool _matchPrefix;
+        private readonly Action<TTarget> _invoke;
+        private readonly PropertyChangedEventHandler _handler;
+
+        public PropertyChangedRegistration(
+            WeakEventKey<TSource, PropertyChangedEventHandler> eventKey,
+            TSource source,
+            TTarget target,
+            string propertyName,
+            bool matchPrefix,
+            Action<TTarget> invoke)
+            : base(eventKey, source, target)
+        {
+            _propertyName = propertyName;
+            _matchPrefix = matchPrefix;
+            _invoke = invoke;
+            _handler = OnEvent;
+        }
+
+        protected override PropertyChangedEventHandler Handler => _handler;
+
+        private void OnEvent(object? sender, PropertyChangedEventArgs args)
+        {
+            if (TryGetLiveTarget(out var target))
+            {
+                // A null or empty name is the conventional "every property changed" signal.
+                string? changedName = args.PropertyName;
+                if (string.IsNullOrEmpty(changedName) || Matches(changedName!))
+                {
+                    _invoke(target);
+                }
+            }
+            else
+            {
+                RemoveDeadTarget();
+            }
+        }
+
+        private bool Matches(string changedName)
+            => _matchPrefix
+                ? changedName.StartsWith(_propertyName, StringComparison.Ordinal)
+                : string.Equals(changedName, _propertyName, StringComparison.Ordinal);
+    }
 }
 
 internal static class WeakEventDelegate
@@ -421,6 +504,14 @@ internal static class CollectionWeakEvents
         CollectionChanged = new(
             static (source, handler) => source.CollectionChanged += handler,
             static (source, handler) => source.CollectionChanged -= handler);
+}
+
+internal static class InpcWeakEvents
+{
+    internal static readonly WeakEventKey<INotifyPropertyChanged, PropertyChangedEventHandler>
+        PropertyChanged = new(
+            static (source, handler) => source.PropertyChanged += handler,
+            static (source, handler) => source.PropertyChanged -= handler);
 }
 
 internal static class ObservableValueWeakEvents<T>
