@@ -73,6 +73,40 @@ internal sealed class ReplacementOffsetMap(ReplacementOffsetMap.Segment[] segmen
             {
                 return segment.ProjectedStart;
             }
+            // Text standing at a source position rather than over one leaves that position in front
+            // of it, so the caret at the end of a line stays before an end-of-line marker.
+            if (segment.SourceLength == 0 && sourceOffset == segment.SourceStart)
+            {
+                return segment.ProjectedStart;
+            }
+            delta += segment.ProjectedLength - segment.SourceLength;
+        }
+        return sourceOffset + delta;
+    }
+
+    public TextRange MapRangeFromSource(int sourceOffset, int sourceLength)
+    {
+        int start = MapFromSource(sourceOffset);
+        return new TextRange(start, Math.Max(0, MapRangeEnd(sourceOffset + sourceLength) - start));
+    }
+
+    /// <summary>
+    /// Where a range ends, which is behind text the projection stands at that offset. A range of no
+    /// source length is the whole of that text rather than nothing.
+    /// </summary>
+    private int MapRangeEnd(int sourceOffset)
+    {
+        int delta = 0;
+        foreach (var segment in segments)
+        {
+            if (sourceOffset < segment.SourceStart)
+            {
+                break;
+            }
+            if (sourceOffset < segment.SourceStart + segment.SourceLength)
+            {
+                return segment.ProjectedStart + segment.ProjectedLength;
+            }
             delta += segment.ProjectedLength - segment.SourceLength;
         }
         return sourceOffset + delta;

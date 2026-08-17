@@ -1,5 +1,6 @@
 using System.Text;
 using Aprillz.MewUI.MewvalonEdit.Document;
+using Aprillz.MewUI.MewvalonEdit.Rendering;
 
 namespace Aprillz.MewUI.MewvalonEdit.Editing;
 
@@ -288,8 +289,10 @@ public sealed class RectangleSelection : Selection
     /// </summary>
     private static double GetX(TextArea textArea, TextViewPosition position)
     {
-        var line = textArea.Document.GetLineByNumber(position.Line);
-        var visualLine = textArea.TextView.GetOrConstructVisualLine(line);
+        // By offset rather than by line: a line laid out in slices has to answer with the one the
+        // position stands in.
+        var visualLine = textArea.TextView.GetOrConstructVisualLine(
+            textArea.Document.GetOffset(position.Line, position.Column));
         if (visualLine is null)
         {
             return 0;
@@ -307,25 +310,49 @@ public sealed class RectangleSelection : Selection
 
     private void CalculateSegments()
     {
-        // The original walks visual lines and skips folded spans through LastDocumentLine; the
-        // collapsed-line skip arrives with the folding integration.
-        int first = Math.Min(_startLine, _endLine);
-        int last = Math.Max(_startLine, _endLine);
-        for (int lineNumber = first; lineNumber <= last && lineNumber <= _document.LineCount; lineNumber++)
+        foreach (var line in CoveredLines())
         {
-            var visualLine = TextArea.TextView.GetOrConstructVisualLine(_document.GetLineByNumber(lineNumber));
+            (int startOffset, int startColumn) = Resolve(line, _startX);
+            (int endOffset, int endColumn) = Resolve(line, _endX);
+            _segments.Add(new SelectionSegment(startOffset, startColumn, endOffset, endColumn));
+        }
+    }
+
+    /// <summary>
+    /// Where an x stands on a line. A line long enough to be laid out in slices is read in the slice
+    /// the x falls in, so each edge of the rectangle answers from where it actually is. The offset
+    /// and the column belong together and are only ever used as a pair.
+    /// </summary>
+    private (int Offset, int VisualColumn) Resolve(DocumentLine line, double x)
+    {
+        var visualLine = TextArea.TextView.GetOrConstructVisualLine(line, x);
+        if (visualLine is null)
+        {
+            return (line.Offset, 0);
+        }
+        int column = visualLine.GetVisualColumn(new Point(x, 0), allowVirtualSpace: true);
+        return (visualLine.StartOffset + visualLine.GetRelativeOffset(column), column);
+    }
+
+    /// <summary>
+    /// The document lines the rectangle crosses, each laid-out line visited once. A collapsed folding
+    /// puts several document lines on one laid-out line, so the walk steps by the line it just
+    /// visited rather than by one document line, as the original does.
+    /// </summary>
+    private IEnumerable<DocumentLine> CoveredLines()
+    {
+        int last = Math.Min(Math.Max(_startLine, _endLine), _document.LineCount);
+        var line = _document.GetLineByNumber(Math.Min(_startLine, _endLine));
+        while (line is not null && line.LineNumber <= last)
+        {
+            var visualLine = TextArea.TextView.GetOrConstructVisualLine(line.Offset);
             if (visualLine is null)
             {
+                line = line.NextLine;
                 continue;
             }
-            int startColumn = visualLine.GetVisualColumn(new Point(_startX, 0), allowVirtualSpace: true);
-            int endColumn = visualLine.GetVisualColumn(new Point(_endX, 0), allowVirtualSpace: true);
-            int baseOffset = visualLine.FirstDocumentLine.Offset;
-            _segments.Add(new SelectionSegment(
-                baseOffset + visualLine.GetRelativeOffset(startColumn),
-                startColumn,
-                baseOffset + visualLine.GetRelativeOffset(endColumn),
-                endColumn));
+            yield return visualLine.FirstDocumentLine;
+            line = visualLine.LastDocumentLine.NextLine;
         }
     }
 
@@ -336,17 +363,9 @@ public sealed class RectangleSelection : Selection
     /// </summary>
     internal IEnumerable<(int Offset, int VisualColumn)> CaretEdges()
     {
-        int first = Math.Min(_startLine, _endLine);
-        int last = Math.Max(_startLine, _endLine);
-        for (int lineNumber = first; lineNumber <= last && lineNumber <= _document.LineCount; lineNumber++)
+        foreach (var line in CoveredLines())
         {
-            var visualLine = TextArea.TextView.GetOrConstructVisualLine(_document.GetLineByNumber(lineNumber));
-            if (visualLine is null)
-            {
-                continue;
-            }
-            int column = visualLine.GetVisualColumn(new Point(_endX, 0), allowVirtualSpace: true);
-            yield return (visualLine.FirstDocumentLine.Offset + visualLine.GetRelativeOffset(column), column);
+            yield return Resolve(line, _endX);
         }
     }
 

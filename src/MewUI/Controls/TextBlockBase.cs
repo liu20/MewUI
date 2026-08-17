@@ -167,7 +167,8 @@ public abstract partial class TextBlockBase : TextElement, IDisposable
         // key each time, so the resolved layout is held until an input actually changes. The inputs
         // are compared rather than trusted to invalidation because inherited font values change
         // without notifying this element.
-        var style = new TextRunStyle(FontFamily, FontSize, FontWeight);
+        // Built here rather than through Control's helper: a text block is a TextElement, not a Control.
+        var style = new TextRunStyle(FontFamily, FontSize, FontWeight, FontStyle == FontStyle.Italic);
         uint dpi = GetDpi();
         if (_layout is not null &&
             _layoutMaxWidth.Equals(maxWidth) &&
@@ -298,7 +299,7 @@ public abstract partial class TextBlockBase : TextElement, IDisposable
 
         var bounds = Bounds;
         ITextLayout layout;
-        using (ProfilerMarkers.TextLayout.Auto())
+        using (DevToolsGate.IsSupported ? ProfilerMarkers.TextLayout.Auto() : default)
         {
             layout = GetOrCreateTextLayout(ResolveWrapping(), bounds.Width, bounds.Height);
         }
@@ -318,7 +319,7 @@ public abstract partial class TextBlockBase : TextElement, IDisposable
             ? ReadOnlyMemory<TextPaintSpan>.Empty
             : _paintSpans.ToArray();
 
-        using (ProfilerMarkers.TextDraw.Auto())
+        using (DevToolsGate.IsSupported ? ProfilerMarkers.TextDraw.Auto() : default)
         {
             var options = new TextDrawOptions(Foreground, spans, Owner: this);
             var origin = new Point(bounds.X, y);

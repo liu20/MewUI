@@ -233,7 +233,7 @@ public sealed partial class SyntaxViewer : Control, IVisualTreeHost, ITextViewHo
         _view = new TextViewLayout(
             factory.TextEngine,
             _document,
-            new TextRunStyle(FontFamily, FontSize, FontWeight),
+            GetTextRunStyle(),
             new TextParagraphStyle
             {
                 Wrapping = Wrap ? TextWrapping.Wrap : TextWrapping.NoWrap,
@@ -282,6 +282,13 @@ public sealed partial class SyntaxViewer : Control, IVisualTreeHost, ITextViewHo
     {
         EnsureView();
         return _view?.GetLineLayout(documentOffset);
+    }
+
+    /// <inheritdoc/>
+    public ITextLineExtent? GetLineExtent(int documentOffset)
+    {
+        EnsureView();
+        return _view?.GetLineExtent(documentOffset);
     }
 
     /// <inheritdoc/>

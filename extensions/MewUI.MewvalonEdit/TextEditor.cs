@@ -30,7 +30,6 @@ public class TextEditor : Control, ITextEditorComponent
     private FrameworkElement? _pendingOverlay;
     private Adorner? _pendingAdorner;
     private HighlightingColorizer? _colorizer;
-    private readonly EndOfLineMarkerLayer _endOfLineMarkers;
     private readonly LineTransformerAdapter _lineTransformers;
     private readonly ElementGeneratorAdapter _elementGenerators;
     // Where the pointer last was, so the cursor can be re-asked for without it moving again.
@@ -47,7 +46,6 @@ public class TextEditor : Control, ITextEditorComponent
     {
         Options = new TextEditorOptions();
         IndentationStrategy = new DefaultIndentationStrategy();
-        _endOfLineMarkers = new EndOfLineMarkerLayer(Options, this);
         _lineTransformers = new LineTransformerAdapter(this);
         _elementGenerators = new ElementGeneratorAdapter(this);
         _backgroundRenderers = new BackgroundRendererRegistry(this);
@@ -123,7 +121,6 @@ public class TextEditor : Control, ITextEditorComponent
         InputMap.Map(EditingCommands.IndentSelection, new KeyGesture(Key.I, ModifierKeys.Primary));
         UpdateBuiltInElementGenerators();
         _backgroundRenderers.RegisterInto(_surface);
-        _surface.InsertLayer(_endOfLineMarkers, TextViewLayerAnchor.Text, TextLayerPosition.Below);
         _surface.InsertLayer(
             new CurrentLineLayer(Options, this), TextViewLayerAnchor.Background, TextLayerPosition.Above);
         _surface.InsertLayer(
@@ -321,7 +318,7 @@ public class TextEditor : Control, ITextEditorComponent
     {
         if (oldValue is not null)
         {
-            oldValue.Changed -= OnDocumentTextChanged;
+            oldValue.TextChanged -= OnDocumentTextChanged;
             oldValue.LineCountChanged -= OnDocumentLineCountChanged;
             oldValue.Surface = null;
         }
@@ -330,7 +327,7 @@ public class TextEditor : Control, ITextEditorComponent
             return;
         }
 
-        newValue.Changed += OnDocumentTextChanged;
+        newValue.TextChanged += OnDocumentTextChanged;
         newValue.LineCountChanged += OnDocumentLineCountChanged;
         newValue.Surface = _surface;
         _surface.Document = newValue.CoreDocument;
@@ -789,7 +786,7 @@ public class TextEditor : Control, ITextEditorComponent
     protected override void OnDispose()
     {
         Options.OptionChanged -= OnOptionsChanged;
-        Document.Changed -= OnDocumentTextChanged;
+        Document.TextChanged -= OnDocumentTextChanged;
         base.OnDispose();
     }
 
@@ -832,7 +829,10 @@ public class TextEditor : Control, ITextEditorComponent
         _surface.InvalidateTextRange(start, lastLine.Offset + lastLine.TotalLength - start);
     }
 
-    private void OnDocumentTextChanged(object? sender, DocumentChangeEventArgs e)
+    // The document raises this after its Changed handlers, so anything anchored to the document has
+    // already moved. A listener that recomputes offsets from the new text, such as a folding
+    // strategy, would otherwise have its result shifted a second time.
+    private void OnDocumentTextChanged(object? sender, EventArgs e)
         => TextChanged?.Invoke(this, EventArgs.Empty);
 
     private bool HasCopyableSelection()
@@ -1234,39 +1234,28 @@ public class TextEditor : Control, ITextEditorComponent
     {
         SetBuiltInGenerator(
             ref _singleCharacterGenerator,
-            Options.ShowSpaces || Options.ShowTabs || Options.ShowBoxForControlCharacters,
-            () => new SingleCharacterElementGenerator(Options, this));
-        SetBuiltInGenerator(ref _linkGenerator, Options.EnableHyperlinks, static () => new LinkElementGenerator());
-        SetBuiltInGenerator(ref _mailLinkGenerator, Options.EnableEmailHyperlinks, static () => new MailLinkElementGenerator());
-        if (_linkGenerator is not null)
-        {
-            _linkGenerator.RequireControlModifierForClick = Options.RequireControlModifierForHyperlinkClick;
-        }
-        if (_mailLinkGenerator is not null)
-        {
-            _mailLinkGenerator.RequireControlModifierForClick = Options.RequireControlModifierForHyperlinkClick;
-        }
+            Options.ShowSpaces || Options.ShowTabs || Options.ShowEndOfLine
+                || Options.ShowBoxForControlCharacters);
+        SetBuiltInGenerator(ref _linkGenerator, Options.EnableHyperlinks);
+        SetBuiltInGenerator(ref _mailLinkGenerator, Options.EnableEmailHyperlinks);
     }
 
-    private void SetBuiltInGenerator<TGenerator>(
-        ref TGenerator? generator,
-        bool wanted,
-        Func<TGenerator> create)
-        where TGenerator : VisualLineElementGenerator
+    private void SetBuiltInGenerator<TGenerator>(ref TGenerator? generator, bool wanted)
+        where TGenerator : VisualLineElementGenerator, IBuiltinElementGenerator, new()
     {
-        if (wanted == (generator is not null))
+        if (wanted != (generator is not null))
         {
-            return;
+            if (wanted)
+            {
+                generator = new TGenerator();
+                ElementGenerators.Add(generator);
+            }
+            else
+            {
+                ElementGenerators.Remove(generator!);
+                generator = null;
+            }
         }
-        if (wanted)
-        {
-            generator = create();
-            ElementGenerators.Add(generator);
-        }
-        else
-        {
-            ElementGenerators.Remove(generator!);
-            generator = null;
-        }
+        ((IBuiltinElementGenerator?)generator)?.FetchOptions(Options);
     }
 }

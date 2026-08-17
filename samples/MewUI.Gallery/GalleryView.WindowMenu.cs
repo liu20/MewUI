@@ -88,7 +88,7 @@ partial class GalleryView
                                         .Background(Color.Green.WithAlpha(64))
                                         .Child(
                                             new Image()
-                                                .Source(logo)
+                                                .BindSource(Resources.Logo)
                                                 .Apply(x => EnableWindowDrag(tw, x))
                                                 .Width(500)
                                                 .Height(128)
@@ -396,12 +396,15 @@ partial class GalleryView
         var p = ModifierKeys.Primary;
         IconTemplate MenuIcon(string name)
         {
-            var all = IconResource.GetAll();
-            var entry = Array.Find(all, x => x.Name == name) ?? all[0];
-            var geometry = PathGeometry.Parse(entry.PathData);
-            geometry.Freeze();
+            // Looked up when the menu is built rather than captured here, so a late-arriving icon
+            // dictionary still reaches it: menus are created when the user opens them.
             return new IconTemplate(size =>
             {
+                var all = IconResource.GetAll(Resources.Icons.Value);
+                var entry = Array.Find(all, x => x.Name == name);
+                var geometry = PathGeometry.Parse(entry?.PathData ?? FALLBACK_ICON);
+                geometry.Freeze();
+
                 var icon = new PathShape()
                     .Data(geometry)
                     .Size(size.Dip)
@@ -657,72 +660,75 @@ partial class GalleryView
             .Text("Shortcuts:\n- Inspector: Ctrl/Cmd+Shift+I\n- Visual Tree: Ctrl/Cmd+Shift+T");
 
         FrameworkElement content;
-#if DEBUG
-        bool updating = false;
-        var inspectorToggle = new ToggleButton()
-            .Content("Inspector Overlay");
-        var treeToggle = new ToggleButton()
-            .Content("Visual Tree Window");
-
-        void UpdateToggles()
+        if (window.DevTools is WindowDevTools devTools)
         {
-            updating = true;
-            try
+            bool updating = false;
+            var inspectorToggle = new ToggleButton()
+                .Content("Inspector Overlay");
+            var treeToggle = new ToggleButton()
+                .Content("Visual Tree Window");
+
+            void UpdateToggles()
             {
-                inspectorToggle.IsChecked = window.DevToolsInspectorIsOpen;
-                treeToggle.IsChecked = window.DevToolsVisualTreeIsOpen;
+                updating = true;
+                try
+                {
+                    inspectorToggle.IsChecked = devTools.InspectorIsVisible;
+                    treeToggle.IsChecked = devTools.VisualTreeIsOpen;
+                }
+                finally
+                {
+                    updating = false;
+                }
             }
-            finally
+
+            inspectorToggle.CheckedChanged += _ =>
             {
-                updating = false;
-            }
+                if (updating)
+                {
+                    return;
+                }
+
+                devTools.ToggleInspector();
+                UpdateToggles();
+            };
+
+            treeToggle.CheckedChanged += _ =>
+            {
+                if (updating)
+                {
+                    return;
+                }
+
+                devTools.ToggleVisualTree();
+                UpdateToggles();
+            };
+
+            devTools.InspectorVisibleChanged += _ => UpdateToggles();
+            devTools.VisualTreeOpenChanged += _ => UpdateToggles();
+            UpdateToggles();
+
+            content = new StackPanel()
+                .Vertical()
+                .Spacing(8)
+                .Children(
+                    inspectorToggle,
+                    treeToggle,
+                    shortcuts
+                );
         }
-
-        inspectorToggle.CheckedChanged += _ =>
+        else
         {
-            if (updating)
-            {
-                return;
-            }
-
-            window.DevToolsToggleInspector();
-            UpdateToggles();
-        };
-
-        treeToggle.CheckedChanged += _ =>
-        {
-            if (updating)
-            {
-                return;
-            }
-
-            window.DevToolsToggleVisualTree();
-            UpdateToggles();
-        };
-
-        window.DevToolsInspectorOpenChanged += _ => UpdateToggles();
-        window.DevToolsVisualTreeOpenChanged += _ => UpdateToggles();
-        UpdateToggles();
-
-        content = new StackPanel()
-            .Vertical()
-            .Spacing(8)
-            .Children(
-                inspectorToggle,
-                treeToggle,
-                shortcuts
-            );
-#else
-    content = new StackPanel()
-        .Vertical()
-        .Spacing(8)
-        .Children(
-            new TextBlock()
-                .FontSize(ThemeFontSize.Small)
-                .Text("DevTools are available in Debug builds only."),
-            shortcuts
-        );
-#endif
+            content = new StackPanel()
+                .Vertical()
+                .Spacing(8)
+                .Children(
+                    new TextBlock()
+                        .FontSize(ThemeFontSize.Small)
+                        .Text("DevTools are off in this build. Set <MewUIDevTools>true</MewUIDevTools> to enable them."),
+                    shortcuts
+                );
+        }
 
         return Card("DevTools", content);
     }

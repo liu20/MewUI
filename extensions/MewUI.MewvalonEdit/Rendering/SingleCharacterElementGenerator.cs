@@ -8,11 +8,32 @@ namespace Aprillz.MewUI.MewvalonEdit.Rendering;
 /// tab, and a box naming a control character. One generator decides all three because a tab is
 /// itself a control character, so which marker wins has to be settled in one place.
 /// </summary>
-internal sealed class SingleCharacterElementGenerator(TextEditorOptions options, TextEditor editor)
-    : VisualLineElementGenerator
+public sealed class SingleCharacterElementGenerator : VisualLineElementGenerator, IBuiltinElementGenerator
 {
     private const char SPACE_MARKER = '·';
     private const char TAB_MARKER = '»';
+    private const char END_OF_LINE_MARKER = '¶';
+
+    /// <summary>Marks a space with a dot.</summary>
+    public bool ShowSpaces { get; set; } = true;
+
+    /// <summary>Marks a tab with a guillemet, keeping the tab and its stop.</summary>
+    public bool ShowTabs { get; set; } = true;
+
+    /// <summary>Marks the end of a line that has one after it.</summary>
+    public bool ShowEndOfLine { get; set; } = true;
+
+    /// <summary>Boxes a control character with its name.</summary>
+    public bool ShowBoxForControlCharacters { get; set; } = true;
+
+    void IBuiltinElementGenerator.FetchOptions(TextEditorOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ShowSpaces = options.ShowSpaces;
+        ShowTabs = options.ShowTabs;
+        ShowEndOfLine = options.ShowEndOfLine;
+        ShowBoxForControlCharacters = options.ShowBoxForControlCharacters;
+    }
 
     public override int GetFirstInterestedOffset(int startOffset)
     {
@@ -30,7 +51,9 @@ internal sealed class SingleCharacterElementGenerator(TextEditorOptions options,
                 return offset;
             }
         }
-        return -1;
+        // The end-of-line marker stands at the line end rather than over a character, so it is asked
+        // for at the one offset the character scan above cannot reach.
+        return startOffset <= end && WantsEndOfLine(line) ? end : -1;
     }
 
     public override VisualLineElement? ConstructElement(int offset)
@@ -40,23 +63,24 @@ internal sealed class SingleCharacterElementGenerator(TextEditorOptions options,
         {
             return null;
         }
+        var style = context.DefaultStyle;
+        var currentLine = context.CurrentDocumentLine;
+        if (offset == currentLine.Offset + currentLine.Length)
+        {
+            return WantsEndOfLine(currentLine)
+                ? new EndOfLineMarkerElement(END_OF_LINE_MARKER.ToString(), style)
+                : null;
+        }
         char character = context.Document.GetCharAt(offset);
-        var style = new TextRunStyle(editor.FontFamily, editor.FontSize, editor.FontWeight);
-        if (character == ' ' && options.ShowSpaces)
+        if (character == ' ' && ShowSpaces)
         {
-            return new WhitespaceMarkerElement(SPACE_MARKER.ToString(), " ", style)
-            {
-                Foreground = editor.WhitespaceMarkerColor
-            };
+            return new WhitespaceMarkerElement(SPACE_MARKER.ToString(), " ", style);
         }
-        if (character == '\t' && options.ShowTabs)
+        if (character == '\t' && ShowTabs)
         {
-            return new TabMarkerElement(TAB_MARKER.ToString(), style)
-            {
-                Foreground = editor.WhitespaceMarkerColor
-            };
+            return new TabMarkerElement(TAB_MARKER.ToString(), style);
         }
-        if (options.ShowBoxForControlCharacters && char.IsControl(character))
+        if (ShowBoxForControlCharacters && char.IsControl(character))
         {
             return new ControlCharacterBoxElement(TextUtilities.GetControlCharacterName(character), style);
         }
@@ -69,10 +93,46 @@ internal sealed class SingleCharacterElementGenerator(TextEditorOptions options,
     /// </summary>
     private bool WantsCharacter(char character) => character switch
     {
-        ' ' => options.ShowSpaces,
-        '\t' => options.ShowTabs,
-        _ => options.ShowBoxForControlCharacters && char.IsControl(character)
+        ' ' => ShowSpaces,
+        '\t' => ShowTabs,
+        _ => ShowBoxForControlCharacters && char.IsControl(character)
     };
+
+    // The last line of a document has no line after it, so it has no line end to mark.
+    private bool WantsEndOfLine(DocumentLine line) => ShowEndOfLine && line.NextLine is not null;
+}
+
+/// <summary>
+/// The end-of-line marker, standing at the line end rather than over a character: one visual column
+/// for no document text. The column is what keeps virtual space starting after the glyph instead of
+/// on top of it.
+/// </summary>
+internal sealed class EndOfLineMarkerElement(string glyph, TextRunStyle style)
+    : VisualLineElement(1, 0)
+{
+    protected internal override string GetVisualText() => glyph;
+
+    protected internal override void PrepareForPaint(TextView textView)
+    {
+        ArgumentNullException.ThrowIfNull(textView);
+        Foreground = textView.ResolvedNonPrintableCharacter;
+    }
+
+    public override InlineMetrics Measure(uint dpi)
+    {
+        var layout = MarkerLayout.For(glyph, style, dpi);
+        return new InlineMetrics(
+            layout.MeasuredSize.Width,
+            layout.MeasuredSize.Height,
+            layout.Lines[0].Baseline);
+    }
+
+    public override void Draw(ITextRenderContext context, Point origin, uint dpi)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        var options = new TextDrawOptions(Foreground ?? Color.FromRgb(0x80, 0x80, 0x80));
+        context.Draw(MarkerLayout.For(glyph, style, dpi), origin, in options);
+    }
 }
 
 /// <summary>
@@ -85,6 +145,12 @@ internal sealed class WhitespaceMarkerElement(string glyph, string replaced, Tex
     : VisualLineElement(1, 1)
 {
     protected internal override string GetVisualText() => glyph;
+
+    protected internal override void PrepareForPaint(TextView textView)
+    {
+        ArgumentNullException.ThrowIfNull(textView);
+        Foreground = textView.ResolvedNonPrintableCharacter;
+    }
 
     /// <summary>The space it stands in for is where a line breaks, and it still is.</summary>
     protected internal override bool BreaksLine => replaced == " ";
@@ -123,6 +189,12 @@ internal sealed class TabMarkerElement(string glyph, TextRunStyle style) : Visua
     protected internal override string GetVisualText() => "￼\t";
 
     protected internal override int PaintedVisualLength => 1;
+
+    protected internal override void PrepareForPaint(TextView textView)
+    {
+        ArgumentNullException.ThrowIfNull(textView);
+        Foreground = textView.ResolvedNonPrintableCharacter;
+    }
 
     public override InlineMetrics Measure(uint dpi)
     {

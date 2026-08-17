@@ -69,6 +69,21 @@ public sealed class ToolBarTests
         return hosted;
     }
 
+    /// <summary>Lays out, then runs the control's colour transition out so the settled value is readable.</summary>
+    private static void Settle(Window window, Control control)
+    {
+        window.PerformLayout();
+        control.ForceStyleSnap();
+        window.UpdateVisualStates();
+
+        long start = System.Diagnostics.Stopwatch.GetTimestamp();
+        long frame = System.Diagnostics.Stopwatch.Frequency / 60;
+        for (int step = 0; step <= 30; step++)
+        {
+            Aprillz.MewUI.Animation.AnimationManager.Instance.UpdateAt(start + (frame * step));
+        }
+    }
+
     private static void DragGrip(Window window, ToolBar bar, int band, int group, Point to)
     {
         var grip = bar.VisualsInternal[band].Groups[group].Grip;
@@ -144,7 +159,7 @@ public sealed class ToolBarTests
         Assert.IsInstanceOfType<ToggleButton>(entries[1]);
         Assert.IsInstanceOfType<SplitButton>(entries[2]);
         Assert.IsInstanceOfType<DropDownButton>(entries[3]);
-        Assert.IsInstanceOfType<TextBlock>(entries[4]);
+        Assert.IsInstanceOfType<Label>(entries[4]);
         Assert.IsInstanceOfType<Border>(entries[5]);
     }
 
@@ -216,6 +231,86 @@ public sealed class ToolBarTests
 
         Assert.IsTrue(rows.Count > 0, "the cut entries did not reach the menu");
         Assert.IsInstanceOfType<MenuItem>(rows[0], "the menu opens on a separator");
+    }
+
+    [TestMethod]
+    public void ADisabledEntryDimsItsContentAndPaintsNoFill()
+    {
+        if (SkipOnNonWindows()) return;
+
+        var command = new Command("g1", "g1");
+        var group = new ToolBarGroup(
+            new ToolBarItem(command) { Presentation = CommandPresentationMode.Text },
+            new ToolBarToggleItem(command) { Presentation = CommandPresentationMode.Text });
+
+        var (window, bar) = Host(900, new ToolBarBand(group));
+        bar.Commands.Register(command, () => { }, () => false);
+        window.PerformLayout();
+
+        foreach (var entry in bar.VisualsInternal[0].Groups[0].Entries)
+        {
+            var control = (Control)entry;
+            control.ForceStyleSnap();
+            window.UpdateVisualStates();
+
+            Assert.IsFalse(control.IsEffectivelyEnabled, "the entry did not follow its command");
+            Assert.AreEqual(0, control.Background.A, "a disabled entry painted a block on the group's plate");
+            Assert.AreEqual(bar.ThemeInternal.Palette.DisabledText, control.Foreground, "the content is not dimmed");
+        }
+    }
+
+    [TestMethod]
+    public void ADisabledToggleReadsAsOnWithoutTheAccent()
+    {
+        if (SkipOnNonWindows()) return;
+
+        var command = new Command("g1", "g1");
+        var toggle = new ToolBarToggleItem(command)
+        {
+            IsChecked = true,
+            Presentation = CommandPresentationMode.Text,
+        };
+
+        var (window, bar) = Host(900, new ToolBarBand(new ToolBarGroup(toggle)));
+        bar.Commands.Register(command, () => { }, () => false);
+        window.PerformLayout();
+
+        var control = (Control)bar.VisualsInternal[0].Groups[0].Entries[0];
+        control.ForceStyleSnap();
+        window.UpdateVisualStates();
+
+        var palette = bar.ThemeInternal.Palette;
+        Assert.IsFalse(control.IsEffectivelyEnabled, "the toggle did not follow its command");
+        Assert.AreNotEqual(
+            Color.Composite(palette.ContainerBackground, palette.Accent.WithAlpha(96)),
+            control.Background,
+            "a disabled toggle kept the accent highlight");
+
+        // The tint a disabled ToggleButton keeps, laid over the surface this entry actually sits on.
+        Assert.AreEqual(
+            Color.Composite(palette.ContainerBackground, palette.WindowText.WithAlpha(48)),
+            control.Background,
+            "the on state reads differently here than on a plain toggle");
+    }
+
+    [TestMethod]
+    public void ALabelFollowsTheToolbarOutOfReach()
+    {
+        if (SkipOnNonWindows()) return;
+
+        var (window, bar) = Host(900, new ToolBarBand(new ToolBarGroup(new ToolBarLabelItem("Zoom"), Text("g1"))));
+        var label = (Control)bar.VisualsInternal[0].Groups[0].Entries[0];
+        var palette = bar.ThemeInternal.Palette;
+
+        Assert.AreNotEqual(palette.DisabledText, label.Foreground, "an enabled toolbar dimmed its label");
+
+        bar.IsEnabled = false;
+        Settle(window, label);
+        Assert.AreEqual(palette.DisabledText, label.Foreground, "the label stayed bright among dimmed entries");
+
+        bar.IsEnabled = true;
+        Settle(window, label);
+        Assert.AreNotEqual(palette.DisabledText, label.Foreground, "the label stayed dimmed after the toolbar came back");
     }
 
     [TestMethod]
@@ -671,6 +766,39 @@ public sealed class ToolBarTests
 
         Assert.AreEqual("1\n2\n3\n4\n5", Layout(bar), "the drop moved a group that had nowhere to go");
         Assert.HasCount(5, bar.Bands, "a band was opened or dropped");
+    }
+
+    [TestMethod]
+    public void TheMoveCursorHoldsForTheWholeDrag()
+    {
+        if (SkipOnNonWindows()) return;
+
+        var (window, bar) = HostFiveBands();
+        var grip = bar.VisualsInternal[1].Groups[0].Grip;
+
+        Assert.AreEqual(CursorType.SizeAll, grip.Cursor, "the grip does not offer the move cursor");
+        Assert.IsNull(bar.Cursor, "an idle toolbar claims a cursor of its own");
+
+        var start = grip.CenterOf();
+        window.SendMouseDown(start);
+        window.SendMouseMove(new Point(start.X + 40, start.Y + 40));
+
+        // The pointer is far from the grip by now, and the toolbar holds the capture. The grip's own
+        // cursor is not consulted here: resolution starts at the captured element, which is the toolbar.
+        var backend = (HeadlessWindowBackend)window.Backend!;
+        Assert.AreEqual(CursorType.SizeAll, bar.Cursor, "the move cursor was lost as soon as the drag began");
+        Assert.AreEqual(CursorType.SizeAll, backend.LastCursor, "the backend was not told to show the move cursor");
+
+        // Off the toolbar entirely: the capture keeps the cursor, which would otherwise flicker back to
+        // the arrow on the way out and to the move cursor on the way in.
+        window.SendMouseMove(new Point(bar.Bounds.Right + 40, bar.Bounds.Bottom + 40));
+        Assert.AreEqual(
+            CursorType.SizeAll,
+            backend.LastCursor,
+            "the cursor changed when the pointer left the toolbar mid-drag");
+
+        window.SendMouseUp(new Point(start.X + 40, start.Y + 40));
+        Assert.IsNull(bar.Cursor, "the toolbar kept the move cursor after the drop");
     }
 
     [TestMethod]

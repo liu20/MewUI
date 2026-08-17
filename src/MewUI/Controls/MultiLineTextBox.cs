@@ -1,4 +1,4 @@
-﻿using Aprillz.MewUI.Input;
+using Aprillz.MewUI.Input;
 using Aprillz.MewUI.Platform;
 using Aprillz.MewUI.Rendering;
 using Aprillz.MewUI.Text;
@@ -513,7 +513,7 @@ public sealed partial class MultiLineTextBox : TextBase, IVisualTreeHost, ITextV
         _view = new TextViewLayout(
             factory.TextEngine,
             _document,
-            new TextRunStyle(FontFamily, FontSize, FontWeight),
+            GetTextRunStyle(),
             new TextParagraphStyle
             {
                 Wrapping = Wrap ? TextWrapping.Wrap : TextWrapping.NoWrap,
@@ -565,6 +565,13 @@ public sealed partial class MultiLineTextBox : TextBase, IVisualTreeHost, ITextV
     {
         EnsureView();
         return _view?.GetLineLayout(documentOffset);
+    }
+
+    /// <inheritdoc/>
+    public ITextLineExtent? GetLineExtent(int documentOffset)
+    {
+        EnsureView();
+        return _view?.GetLineExtent(documentOffset);
     }
 
     /// <inheritdoc/>
@@ -777,7 +784,7 @@ public sealed partial class MultiLineTextBox : TextBase, IVisualTreeHost, ITextV
         {
             Text = text.AsMemory(),
             Dpi = GetDpi(),
-            DefaultStyle = new TextRunStyle(FontFamily, FontSize, FontWeight),
+            DefaultStyle = GetTextRunStyle(),
             Paragraph = new TextParagraphStyle
             {
                 MaxWidth = width,

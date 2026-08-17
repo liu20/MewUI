@@ -175,6 +175,22 @@ public abstract partial class Control : TextElement
     /// </summary>
     protected Rect ContentBounds => Bounds.Deflate(Padding);
 
+    /// <summary>
+    /// Takes focus when the control can hold it. A control that runs something on its access key says so
+    /// by overriding this; for the rest, taking focus is the whole of what the key can do, and letting it
+    /// bubble past a control that can be focused loses it.
+    /// </summary>
+    internal override void OnAccessKey()
+    {
+        if (Focusable && IsEffectivelyEnabled)
+        {
+            Focus();
+            return;
+        }
+
+        base.OnAccessKey();
+    }
+
     #region VisualState System
 
     /// <summary>
@@ -610,34 +626,32 @@ public abstract partial class Control : TextElement
         StyleSheet? applicationStyleSheet = Application.IsRunning
             ? Application.Current.StyleSheet
             : null;
-        Style? resolved;
-
         // 1. StyleName → walk StyleSheet chain
-        if (_styleName != null)
-        {
-            resolved = StyleScopeResolver.Resolve(this, _styleName, applicationStyleSheet);
-            if (resolved == null)
-            {
-                bool isAttached = FindVisualRoot() is Window;
-                if (!isAttached || applicationStyleSheet == null)
-                {
-                    // A detached control or a headless tree without an Application does not yet
-                    // have the complete scope chain. Retry on attach or the next layout pass.
-                    _styleNameResolved = false;
-                    return;
-                }
+        // 2. StyleSheet type rule → nearest container type-matched rule, which may name its style rather
+        //    than hold it. Either way an unresolved name is the same situation, so it is handled once.
+        var resolved = StyleScopeResolver.Resolve(
+            this, _styleName, applicationStyleSheet, out string? unresolvedName);
 
-                string scopes = StyleScopeResolver.DescribeScopes(this, includesApplication: true);
-                throw new InvalidOperationException(
-                    $"StyleName '{_styleName}' was not found for control type '{GetType().FullName}'. " +
-                    $"Searched scopes: {scopes}.");
-            }
+        if (_styleName != null && resolved == null)
+        {
+            unresolvedName = _styleName;
         }
 
-        // 2. StyleSheet type rule → nearest container type-matched rule
-        else
+        if (unresolvedName != null)
         {
-            resolved = StyleScopeResolver.Resolve(this, styleName: null, applicationStyleSheet);
+            bool isAttached = FindVisualRoot() is Window;
+            if (!isAttached || applicationStyleSheet == null)
+            {
+                // A detached control or a headless tree without an Application does not yet
+                // have the complete scope chain. Retry on attach or the next layout pass.
+                _styleNameResolved = false;
+                return;
+            }
+
+            string scopes = StyleScopeResolver.DescribeScopes(this, includesApplication: true);
+            throw new InvalidOperationException(
+                $"StyleName '{unresolvedName}' was not found for control type '{GetType().FullName}'. " +
+                $"Searched scopes: {scopes}.");
         }
 
         _styleNameResolved = true;
@@ -734,7 +748,6 @@ public abstract partial class Control : TextElement
         Style DeclaringStyle,
         StateTrigger? Trigger);
 
-#if DEBUG
     internal StyleCascadeTrace GetStyleCascadeTrace(MewProperty property)
     {
         ArgumentNullException.ThrowIfNull(property);
@@ -889,7 +902,6 @@ public abstract partial class Control : TextElement
             finalEntryIndex = entryIndex;
         }
     }
-#endif
 
     private static void CollectResolvedValues(
         Style? style,
@@ -1016,9 +1028,12 @@ public abstract partial class Control : TextElement
     {
     }
 
-    /// <summary>Returns this control's inherited font properties in text-engine form.</summary>
+    /// <summary>
+    /// Returns this control's inherited font properties in text-engine form. The style folds to the
+    /// engine's italic flag here: two states are all a font backend can tell apart today.
+    /// </summary>
     protected TextRunStyle GetTextRunStyle()
-        => new(FontFamily, FontSize, FontWeight);
+        => new(FontFamily, FontSize, FontWeight, FontStyle == FontStyle.Italic);
 
     protected Size MeasureEngineText(
         ReadOnlySpan<char> text,
