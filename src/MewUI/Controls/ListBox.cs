@@ -41,6 +41,8 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
 
     private int _hoverIndex = -1;
     private bool _hasLastMousePosition;
+    // Item a finger pressed, held until the release decides between a tap and a scroll.
+    private int _touchPressIndex = -1;
     private Point _lastMousePosition;
     private readonly SelectionSync _selection;
     private bool _suppressItemsSelectionChanged;
@@ -183,6 +185,13 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
     /// <summary>Returns whether the item at <paramref name="index"/> is selected.</summary>
     public bool IsSelected(int index) => _selection.IsSelected(index);
 
+    private protected override bool IsItemSelectedForContainer(int index) => _selection.IsSelected(index);
+
+    private protected override void ReapplyItemTemplate() => _presenter.ItemTemplate = WrapItemTemplate(_itemTemplate);
+
+    /// <summary>Visits the containers currently realized, with their item index.</summary>
+    internal void VisitRealizedContainers(Action<int, FrameworkElement> visitor) => _presenter.VisitRealized(visitor);
+
     /// <summary>
     /// Gets the currently selected item text.
     /// </summary>
@@ -230,7 +239,7 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
         {
             ArgumentNullException.ThrowIfNull(value);
             _itemTemplate = value;
-            _presenter.ItemTemplate = value;
+            _presenter.ItemTemplate = WrapItemTemplate(value);
             InvalidateItemBindings();
             InvalidateMeasure();
             InvalidateVisual();
@@ -372,7 +381,7 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
     private void InitializePresenter(IItemsPresenter presenter)
     {
         presenter.ItemsSource = _itemsSource;
-        presenter.ItemTemplate = _itemTemplate;
+        presenter.ItemTemplate = WrapItemTemplate(_itemTemplate);
         presenter.BeforeItemRender = OnBeforeItemRender;
         presenter.ItemPadding = ItemPadding;
         presenter.ItemHeightHint = ResolveItemHeight();
@@ -409,7 +418,7 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
         int count = ItemsSource.Count;
 
         // Desired width is the natural item width regardless of alignment: stretch is an arrange
-        // concern, and echoing the constraint made fit-content sizing impossible (issue #199).
+        // concern, and echoing the constraint made fit-content sizing impossible.
         {
             var factory = GetGraphicsFactory();
             var style = GetTextRunStyle();
@@ -588,20 +597,52 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
 
         if (TryGetItemIndexAt(e, out int index))
         {
-            var multi = MultiView;
-            if (multi != null && multi.SelectionMode != ItemsSelectionMode.Single)
+            // A finger press may still turn into a scroll, so touch waits for the release to commit.
+            // Mouse keeps committing here, where a drag selection has to start.
+            if (e.PointerType == PointerType.Touch)
             {
-                ItemsSelectionInput.HandleClick(multi, index, e.Modifiers);
-            }
-            else
-            {
-                CommitTargetValue(SelectedIndexProperty, index);
+                _touchPressIndex = index;
+                e.Handled = true;
+                return;
             }
 
-            ItemActivated?.Invoke(index);
-            InvalidateVisual();
+            SelectItem(index, e.Modifiers);
             e.Handled = true;
         }
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+
+        int pressed = _touchPressIndex;
+        _touchPressIndex = -1;
+        if (e.Handled || !IsEffectivelyEnabled || pressed < 0 || e.PointerType != PointerType.Touch)
+        {
+            return;
+        }
+
+        if (TryGetItemIndexAt(e, out int index) && index == pressed)
+        {
+            SelectItem(index, e.Modifiers);
+            e.Handled = true;
+        }
+    }
+
+    private void SelectItem(int index, ModifierKeys modifiers)
+    {
+        var multi = MultiView;
+        if (multi != null && multi.SelectionMode != ItemsSelectionMode.Single)
+        {
+            ItemsSelectionInput.HandleClick(multi, index, modifiers);
+        }
+        else
+        {
+            CommitTargetValue(SelectedIndexProperty, index);
+        }
+
+        ItemActivated?.Invoke(index);
+        InvalidateVisual();
     }
 
     protected override void OnKeyDown(KeyEventArgs e)
@@ -822,10 +863,10 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
             return;
         }
 
-        InvalidateItemBindings();
         _selection.SyncFromModel();
         SelectionChanged?.Invoke(_itemsSource.SelectedItem);
         ScrollIntoView(index);
+        RefreshContainerSelection(_presenter);
         InvalidateVisual();
     }
 
@@ -901,7 +942,7 @@ public partial class ListBox : ScrollableItemsBase, IVirtualizedTabNavigationHos
     {
         _selection.SyncFromModel();
         SelectedIndicesChanged?.Invoke();
-        InvalidateItemBindings();
+        RefreshContainerSelection(_presenter);
         InvalidateVisual();
     }
 }

@@ -46,6 +46,9 @@ internal static class NumericUpDownTemplate
             // Focus enters via SetIsEditing, not Tab; keeps the control a single tab stop while editing.
             IsTabStop = false,
             ImeMode = ImeMode.Disabled,
+            // The display text governs the control's width; the edit text must not
+            // resize it: clearing it shrank the control, longer input grew it.
+            MeasuresOwnTextWidth = false,
         };
         ctx.Register(NumericUpDown.PART_TEXT_BOX, editBox);
 

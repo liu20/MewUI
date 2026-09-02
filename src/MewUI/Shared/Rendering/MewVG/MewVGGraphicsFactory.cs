@@ -16,14 +16,19 @@ public sealed partial class MewVGX11GraphicsFactory
 #else
 public sealed partial class MewVGWin32GraphicsFactory 
 #endif
-    : IGraphicsFactory, ITextBackendFactory, IRenderDevice, IGpuInteropInvalidationSource, IWindowResourceReleaser, IWindowSurfacePresenter
+    : IGraphicsFactory, ITextBackendFactory, IRenderDevice, IGpuInteropInvalidationSource, IWindowResourceReleaser, IWindowSurfacePresenter,
+      IBackendRenderCacheMaintenance
 {
     public event EventHandler<GpuInteropInvalidatedEventArgs>? GpuInteropInvalidated;
 
     public ITextEngine TextEngine => TextServices.GetEngine(this);
 
     internal void RaiseGpuInteropInvalidated(GpuInteropInvalidatedEventArgs e)
-        => GpuInteropInvalidated?.Invoke(this, e);
+    {
+        unchecked { _renderDeviceGeneration++; }
+        _renderResourceCache.Maintain(RenderCacheMaintenanceMode.DeviceLost);
+        GpuInteropInvalidated?.Invoke(this, e);
+    }
 
 
 #if MEWUI_MEWVG_MACOS
@@ -36,6 +41,10 @@ public sealed partial class MewVGWin32GraphicsFactory
 
     private readonly ConcurrentDictionary<nint, IDisposable> _windows = new();
     private readonly RenderResourceCache _renderResourceCache = new();
+    private readonly ulong _renderDeviceId = RenderDeviceIdentity.AllocateDeviceId();
+    private uint _renderDeviceGeneration;
+
+    public RenderDeviceIdentity RenderIdentity => new(_renderDeviceId, _renderDeviceGeneration);
 
 
     /// <summary>
@@ -136,6 +145,11 @@ public sealed partial class MewVGWin32GraphicsFactory
     {
         ArgumentNullException.ThrowIfNull(target);
 
+        if (target is IRenderSurface surface)
+        {
+            target = RenderSurfaceResource.ResolveBackendSurface(surface);
+        }
+
         if (target is WindowRenderTarget windowTarget)
         {
             return CreateContextCore(windowTarget);
@@ -200,16 +214,25 @@ public sealed partial class MewVGWin32GraphicsFactory
             descriptor.RequiredCapabilities.HasFlag(SurfaceCapabilities.Alpha));
 
     public IGraphicsContext CreateContext(IRenderSurface surface)
-        => surface.Capabilities.HasFlag(SurfaceCapabilities.Renderable)
+    {
+        surface = RenderSurfaceResource.ResolveBackendSurface(surface);
+        return surface.Capabilities.HasFlag(SurfaceCapabilities.Renderable)
             ? CreateContext((IRenderTarget)surface)
             : throw new NotSupportedException(
                 $"{GetType().Name} can only create contexts for renderable surfaces.");
+    }
 
     public IImage CreateImageView(IRenderSurface surface)
-        => surface is IPixelBufferSource pixelSource
+    {
+        int logicalWidth = surface.PixelWidth;
+        int logicalHeight = surface.PixelHeight;
+        surface = RenderSurfaceResource.ResolveBackendSurface(surface);
+        var image = surface is IPixelBufferSource pixelSource
             ? CreateImageView(pixelSource)
             : throw new NotSupportedException(
                 $"{GetType().Name} can only create image views for pixel-backed surfaces.");
+        return ImageResource.WrapLogical(image, logicalWidth, logicalHeight);
+    }
 
     public IImage CreateImageView(IExternalRasterSource source)
         => CreateExternalRasterImage(source);
@@ -222,8 +245,44 @@ public sealed partial class MewVGWin32GraphicsFactory
 
     public IRenderOperation FlushAsyncWork() => RenderOperation.Completed;
 
+    void IBackendRenderCacheMaintenance.TrimBackendCaches(RenderCacheTrimReason reason)
+    {
+#if MEWUI_MEWVG_MACOS
+        MewVGMacOSGraphicsContext.TrimSharedGeometryCache();
+#elif MEWUI_MEWVG_X11
+        MewVGX11GraphicsContext.TrimSharedGeometryCache();
+#else
+        MewVGWin32GraphicsContext.TrimSharedGeometryCache();
+#endif
+
+        foreach (var resources in _windows.Values)
+        {
+            if (resources is IMewVGWindowCacheMaintenance maintenance)
+            {
+                maintenance.TrimCaches();
+            }
+        }
+    }
+
+    void IBackendRenderCacheMaintenance.MaintainBackendCaches(RenderCacheMaintenanceMode mode)
+    {
+        if (mode is RenderCacheMaintenanceMode.MemoryPressure
+            or RenderCacheMaintenanceMode.WindowClosed
+            or RenderCacheMaintenanceMode.DeviceLost
+            or RenderCacheMaintenanceMode.Shutdown)
+        {
+            ((IBackendRenderCacheMaintenance)this).TrimBackendCaches(
+                mode == RenderCacheMaintenanceMode.DeviceLost
+                    ? RenderCacheTrimReason.DeviceLost
+                    : mode == RenderCacheMaintenanceMode.MemoryPressure
+                        ? RenderCacheTrimReason.MemoryPressure
+                        : RenderCacheTrimReason.Manual);
+        }
+    }
+
     public void Dispose()
     {
+        ImageSource.RetireRealizationsForFactory(this);
         TextServices.ReleaseIfCreated(this);
         _renderResourceCache.Dispose();
 
@@ -290,4 +349,9 @@ internal sealed class MewVGNoOpRenderScope : IDisposable
 {
     public static readonly MewVGNoOpRenderScope Instance = new();
     public void Dispose() { }
+}
+
+internal interface IMewVGWindowCacheMaintenance
+{
+    void TrimCaches();
 }

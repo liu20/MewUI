@@ -25,9 +25,7 @@ internal sealed class OpenGLPixelRenderSurface : IPixelBufferSource, ICpuPixelSu
     private uint _fbo;
 
     private uint _texture;
-    private uint _stencilRenderbuffer;
     private bool _fboInitialized;
-    private bool _hasStencil;
 
     // HGLRC / GLXContext that created the FBO + texture + RB. Required by the
     // background-rebuild path because FBOs and renderbuffers are NOT shared across
@@ -48,6 +46,11 @@ internal sealed class OpenGLPixelRenderSurface : IPixelBufferSource, ICpuPixelSu
     private byte[]? _lockBuffer;
     private byte[]? _uploadBuffer;
     private Action? _releaseAction;
+
+    // Pixel extent of the last rendered content; a pooled allocation can be larger than what
+    // the last pass drew, and GL samplers need the content extent to crop correctly.
+    private int _contentWidthPx;
+    private int _contentHeightPx;
 
     // External retain count for the FBO color texture, used by zero-copy scratch-surface paths
     // (via IGpuTextureSource.RetainGpuHandle). MewVGImage takes a retain when it wraps our
@@ -91,6 +94,19 @@ internal sealed class OpenGLPixelRenderSurface : IPixelBufferSource, ICpuPixelSu
 
     public int Version => Volatile.Read(ref _version);
 
+    /// <summary>Content width of the last render pass, or the full width when never set.</summary>
+    internal int ContentWidthPx => _contentWidthPx > 0 ? Math.Min(_contentWidthPx, PixelWidth) : PixelWidth;
+
+    /// <summary>Content height of the last render pass, or the full height when never set.</summary>
+    internal int ContentHeightPx => _contentHeightPx > 0 ? Math.Min(_contentHeightPx, PixelHeight) : PixelHeight;
+
+    /// <summary>Records the pixel extent an offscreen pass is about to render into this surface.</summary>
+    internal void SetContentSize(int widthPx, int heightPx)
+    {
+        _contentWidthPx = widthPx;
+        _contentHeightPx = heightPx;
+    }
+
     /// <summary>
     /// Gets the FBO ID. Returns 0 if not initialized or disposed.
     /// </summary>
@@ -105,8 +121,6 @@ internal sealed class OpenGLPixelRenderSurface : IPixelBufferSource, ICpuPixelSu
     /// Gets whether FBO resources have been initialized.
     /// </summary>
     internal bool IsFboInitialized => _fboInitialized;
-
-    internal bool HasStencil => _hasStencil;
 
     /// <summary>HGLRC / GLXContext that owns the FBO + RB handles. The offscreen
     /// provider's deferred-disposal drain uses this to skip targets whose owning
@@ -407,6 +421,10 @@ internal sealed class OpenGLPixelRenderSurface : IPixelBufferSource, ICpuPixelSu
             throw new InvalidOperationException("OpenGL external write target could not initialize its FBO.");
         }
 
+        // External writers render the full allocation, so a smaller content extent recorded by a
+        // previous NVG pass on this pooled surface must not crop their result.
+        SetContentSize(PixelWidth, PixelHeight);
+
         if (_creationContext == 0 && _currentContextProvider is not null)
         {
             RecordCreationContext(_currentContextProvider());
@@ -481,13 +499,6 @@ internal sealed class OpenGLPixelRenderSurface : IPixelBufferSource, ICpuPixelSu
             _fbo = 0;
         }
 
-        if (_stencilRenderbuffer != 0)
-        {
-            uint rb = _stencilRenderbuffer;
-            OpenGLExt.DeleteRenderbuffers(1, &rb);
-            _stencilRenderbuffer = 0;
-        }
-
         if (_texture != 0)
         {
             uint tex = _texture;
@@ -495,7 +506,6 @@ internal sealed class OpenGLPixelRenderSurface : IPixelBufferSource, ICpuPixelSu
             _texture = 0;
         }
 
-        _hasStencil = false;
         _fboInitialized = false;
     }
 
@@ -548,44 +558,14 @@ internal sealed class OpenGLPixelRenderSurface : IPixelBufferSource, ICpuPixelSu
         OpenGLExt.FramebufferTexture2D(OpenGLExt.GL_FRAMEBUFFER, OpenGLExt.GL_COLOR_ATTACHMENT0,
             GL.GL_TEXTURE_2D, _texture, 0);
 
-        uint renderbuffer = 0;
-        OpenGLExt.GenRenderbuffers(1, &renderbuffer);
-        if (renderbuffer != 0)
-        {
-            _stencilRenderbuffer = renderbuffer;
-            OpenGLExt.BindRenderbuffer(OpenGLExt.GL_RENDERBUFFER, _stencilRenderbuffer);
-            OpenGLExt.RenderbufferStorage(OpenGLExt.GL_RENDERBUFFER, OpenGLExt.GL_DEPTH24_STENCIL8, PixelWidth, PixelHeight);
-            OpenGLExt.FramebufferRenderbuffer(OpenGLExt.GL_FRAMEBUFFER, OpenGLExt.GL_DEPTH_STENCIL_ATTACHMENT,
-                OpenGLExt.GL_RENDERBUFFER, _stencilRenderbuffer);
-            OpenGLExt.BindRenderbuffer(OpenGLExt.GL_RENDERBUFFER, 0);
-        }
-
         // Check completeness
         uint status = OpenGLExt.CheckFramebufferStatus(OpenGLExt.GL_FRAMEBUFFER);
-        if (status != OpenGLExt.GL_FRAMEBUFFER_COMPLETE && _stencilRenderbuffer != 0)
-        {
-            OpenGLExt.FramebufferRenderbuffer(OpenGLExt.GL_FRAMEBUFFER, OpenGLExt.GL_DEPTH_STENCIL_ATTACHMENT,
-                OpenGLExt.GL_RENDERBUFFER, 0);
-
-            uint rb = _stencilRenderbuffer;
-            OpenGLExt.DeleteRenderbuffers(1, &rb);
-            _stencilRenderbuffer = 0;
-
-            status = OpenGLExt.CheckFramebufferStatus(OpenGLExt.GL_FRAMEBUFFER);
-        }
-
         if (status != OpenGLExt.GL_FRAMEBUFFER_COMPLETE)
         {
             // Cleanup on failure
             OpenGLExt.BindFramebuffer(OpenGLExt.GL_FRAMEBUFFER, 0);
             OpenGLExt.DeleteFramebuffers(1, &fbo);
             _fbo = 0;
-            if (_stencilRenderbuffer != 0)
-            {
-                uint rb = _stencilRenderbuffer;
-                OpenGLExt.DeleteRenderbuffers(1, &rb);
-                _stencilRenderbuffer = 0;
-            }
             uint tex = _texture;
             GL.DeleteTextures(1, ref tex);
             _texture = 0;
@@ -594,7 +574,6 @@ internal sealed class OpenGLPixelRenderSurface : IPixelBufferSource, ICpuPixelSu
 
         OpenGLExt.BindFramebuffer(OpenGLExt.GL_FRAMEBUFFER, 0);
         GL.BindTexture(GL.GL_TEXTURE_2D, 0);
-        _hasStencil = _stencilRenderbuffer != 0;
         _fboInitialized = true;
     }
 
@@ -697,6 +676,9 @@ internal sealed class OpenGLPixelRenderSurface : IPixelBufferSource, ICpuPixelSu
                 GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, (nint)p);
         }
         GL.BindTexture(GL.GL_TEXTURE_2D, 0);
+
+        // The CPU mirror covers the full allocation.
+        SetContentSize(PixelWidth, PixelHeight);
     }
 
     private void FlipVertical(byte[] pixels)

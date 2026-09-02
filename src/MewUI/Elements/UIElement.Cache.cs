@@ -38,6 +38,9 @@ public abstract partial class UIElement
     private long _contentVersion;
 
     private CacheEntry? _cache;
+    private static long s_nextBitmapCacheOwnerId;
+    private readonly string _bitmapCacheScope =
+        $"BitmapCache:{Interlocked.Increment(ref s_nextBitmapCacheOwnerId)}";
 
     // What the last render pass observed: true while this element sat outside the cull viewport, and
     // false again once it is actually drawn. A repaint asked for from here reaches no pixels, so it
@@ -142,12 +145,41 @@ public abstract partial class UIElement
     /// Renders this element by serving its cached bitmap, (re)building the cache first if missing
     /// or stale. Falls back to live rendering when the cache cannot be produced (e.g. zero size).
     /// </summary>
+    // Two content changes closer than this are a stream (a scroll, an animation inside the cache),
+    // not an isolated repaint.
+    private const double RAPID_CONTENT_CHANGE_MS = 100;
+
+    private long _lastRenderedCacheVersion;
+    private long _lastCacheContentChangeTicks;
+
     private void RenderCached(IGraphicsContext context)
     {
         var window = FindVisualRoot() as Window;
         var factory = window?.GraphicsFactory ?? Application.DefaultGraphicsFactory;
         int deviceGeneration = window?.DeviceGeneration ?? 0;
         var bitmapCache = (BitmapCache)CacheMode!;
+
+        // Content changing on consecutive frames makes a capture per frame, which costs more than
+        // not caching at all: the subtree renders in full either way and the capture adds a target
+        // switch, a second flush and the blit. A stream of changes therefore renders live, and the
+        // first frame whose content held still captures once and goes back to serving the bitmap.
+        long version = _contentVersion;
+        bool liveStream = false;
+        if (version != _lastRenderedCacheVersion)
+        {
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            double sinceMs = (now - _lastCacheContentChangeTicks) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            liveStream = sinceMs <= RAPID_CONTENT_CHANGE_MS && bitmapCache.RenderAtScale == 1.0;
+            _lastCacheContentChangeTicks = now;
+            _lastRenderedCacheVersion = version;
+        }
+
+        if (liveStream)
+        {
+            OnRender(context);
+            RenderSubtree(context);
+            return;
+        }
 
         bool cacheRebuilt = EnsureCache(factory, context.DpiScale, deviceGeneration, bitmapCache);
 
@@ -157,7 +189,16 @@ public abstract partial class UIElement
             {
                 entry.InvalidationOverlayColor = window.NextBitmapCacheInvalidationOverlayColor();
             }
-            context.DrawImage(entry.Image, Bounds);
+            // Pixel-snapped 1:1 blit: the destination starts on the same snapped origin the capture
+            // used and spans exactly the painted pixels, so nothing is resampled at a fractional
+            // offset or squeezed by the ceil-sized snapshot.
+            double blitScale = entry.DpiScale;
+            var blitDest = new Rect(
+                Math.Floor(Bounds.Left * blitScale) / blitScale,
+                Math.Floor(Bounds.Top * blitScale) / blitScale,
+                entry.PixelWidth / blitScale,
+                entry.PixelHeight / blitScale);
+            context.DrawImage(entry.Image, blitDest, new Rect(0, 0, entry.PixelWidth, entry.PixelHeight));
             if (!IsRenderingToCache &&
                 window?.DevToolsBitmapCacheInvalidationOverlayEnabled == true)
             {
@@ -180,24 +221,67 @@ public abstract partial class UIElement
         // because subpixel coverage cannot be resolved against unknown backdrop pixels. The nearest
         // opaque background in the ancestry is what the cache would have been composited onto, so
         // priming it with that colour leaves the same pixels and keeps the text subpixel-rendered.
+        var bounds = Bounds;
+
         for (Element? element = this; element != null; element = element.Parent)
         {
-            if (element is not Controls.Control control || control.Background.A != 255)
+            if (element is Controls.Control control && control.Background.A == 255)
             {
-                continue;
+                // This element's own background only covers the whole box when it is not rounded; a
+                // rounded one leaves its corners to whatever is behind, which an ancestor colour supplies.
+                if (!ReferenceEquals(element, this) || control.CornerRadius <= 0)
+                {
+                    return control.Background;
+                }
             }
 
-            // This element's own background only covers the whole box when it is not rounded; a
-            // rounded one leaves its corners to whatever is behind, which an ancestor colour supplies.
-            if (ReferenceEquals(element, this) && control.CornerRadius > 0)
+            // A sibling overlapping this element paints between it and any ancestor background, so that
+            // background is not what the cache composites onto: filling with it would hide the sibling.
+            if (element.Parent is IVisualTreeHost host && HasOverlappingSibling(host, element, bounds))
             {
-                continue;
+                return null;
             }
-
-            return control.Background;
         }
 
         return null;
+    }
+
+    // Scratch for the sibling-overlap visitor; the visual tree is walked only on the UI thread.
+    private static Element? _overlapChild;
+    private static Rect _overlapBounds;
+    private static bool _overlapFound;
+
+    // Single static delegate - no per-call closure allocation on the render path.
+    private static readonly Func<Element, bool> _overlapVisitor = static sibling =>
+    {
+        if (ReferenceEquals(sibling, _overlapChild)
+            || sibling is not UIElement uiElement
+            || !uiElement.Bounds.IntersectsWith(_overlapBounds))
+        {
+            return true;
+        }
+
+        _overlapFound = true;
+        return false;
+    };
+
+    private static bool HasOverlappingSibling(IVisualTreeHost parent, Element child, Rect bounds)
+    {
+        _overlapChild = child;
+        _overlapBounds = bounds;
+        _overlapFound = false;
+
+        parent.VisitChildren(_overlapVisitor);
+
+        _overlapChild = null;
+        return _overlapFound;
+    }
+
+    private static int QuantizePixelPhase(Rect bounds, double scale)
+    {
+        double xPhase = bounds.Left * scale - Math.Floor(bounds.Left * scale);
+        double yPhase = bounds.Top * scale - Math.Floor(bounds.Top * scale);
+        return ((int)Math.Round(xPhase * 64) & 63) | (((int)Math.Round(yPhase * 64) & 63) << 6);
     }
 
     private bool EnsureCache(IGraphicsFactory factory, double dpiScale, int deviceGeneration, BitmapCache bitmapCache)
@@ -210,10 +294,29 @@ public abstract partial class UIElement
         }
 
         double effectiveDpiScale = dpiScale * Math.Max(0.01, bitmapCache.RenderAtScale);
-        int pixelWidth = Math.Max(1, (int)Math.Ceiling(bounds.Width * effectiveDpiScale));
-        int pixelHeight = Math.Max(1, (int)Math.Ceiling(bounds.Height * effectiveDpiScale));
+
+        // The capture runs from the element origin snapped down to the pixel grid, keeping the
+        // fractional remainder inside the snapshot. Glyphs then rasterize at the same subpixel
+        // phase the live subtree uses, so swapping between the blit and direct rendering does not
+        // shift them; a capture anchored at the raw origin bakes a phase of zero instead.
+        double snappedLeft = Math.Floor(bounds.Left * effectiveDpiScale) / effectiveDpiScale;
+        double snappedTop = Math.Floor(bounds.Top * effectiveDpiScale) / effectiveDpiScale;
+        int phaseQuantized = QuantizePixelPhase(bounds, effectiveDpiScale);
+        int pixelWidth = Math.Max(1, (int)Math.Ceiling((bounds.Right - snappedLeft) * effectiveDpiScale));
+        int pixelHeight = Math.Max(1, (int)Math.Ceiling((bounds.Bottom - snappedTop) * effectiveDpiScale));
         long version = _contentVersion;
         Color? opaqueFill = ResolveOpaqueCacheFill();
+
+        var cacheKey = new RenderCacheKey(
+            RenderCacheEntryKind.ViewportSnapshot,
+            pixelWidth,
+            pixelHeight,
+            effectiveDpiScale,
+            opaqueFill is null ? RenderPixelFormat.Bgra8888Premultiplied : RenderPixelFormat.Bgra8888,
+            // The phase is baked into the pixels, so it keys the snapshot alongside the content.
+            unchecked((ulong)version ^ ((ulong)(uint)phaseQuantized << 52)),
+            DeviceId: 0,
+            Scope: _bitmapCacheScope).ForDevice(factory);
 
         var entry = _cache;
         bool canReuse = entry != null
@@ -221,37 +324,85 @@ public abstract partial class UIElement
             && entry.PixelHeight == pixelHeight
             && entry.DpiScale == effectiveDpiScale
             && entry.DeviceGeneration == deviceGeneration
-            && entry.OpaqueFill == opaqueFill;
+            && entry.OpaqueFill == opaqueFill
+            && entry.PixelPhase == phaseQuantized;
 
         if (canReuse && entry!.Version == version)
         {
             return false;
         }
 
+        // Same surface, same image, same texture: only the content is stale, so it is repainted in
+        // place and the persistent registration moves to the key naming the new content. Retiring
+        // and re-acquiring here instead made every content change rebuild the lease, the image
+        // wrapper and the renderer image id, which during a scroll inside a cache is every frame.
+        if (canReuse && entry!.PersistentLease != null)
+        {
+            canReuse = factory.ResourceCache is RenderResourceCache resourceCache
+                && resourceCache.TryRekey(entry.PersistentKey, cacheKey);
+            if (canReuse)
+            {
+                entry.PersistentKey = cacheKey;
+            }
+        }
+
+
         if (!canReuse)
         {
             DisposeCacheEntry();
+            if (factory.ResourceCache?.TryGet(cacheKey, out var cached) == true)
+            {
+                entry = new CacheEntry
+                {
+                    Surface = cached.Surface,
+                    Image = cached.Image,
+                    PersistentLease = cached,
+                    PersistentKey = cacheKey,
+                    PixelWidth = pixelWidth,
+                    PixelHeight = pixelHeight,
+                    DpiScale = effectiveDpiScale,
+                    DeviceGeneration = deviceGeneration,
+                    OpaqueFill = opaqueFill,
+                    PixelPhase = phaseQuantized,
+                    AccountedBytes = RenderResourceMetrics.ScratchBytes(cached.Surface.PixelWidth, cached.Surface.PixelHeight),
+                    Version = version,
+                };
+                _cache = entry;
+                RenderResourceMetrics.BitmapCacheEntryAdded(entry.AccountedBytes);
+                return false;
+            }
 
-            IRenderSurface surface = factory.CreateSurface(
-                RenderSurfaceDescriptor.CachedImage(
-                    pixelWidth, pixelHeight, effectiveDpiScale, hasAlpha: opaqueFill is null));
+            // Pool-sized (approx-fitted) surface; PixelWidth/Height keep the painted content size
+            // and the blit reads just that region.
+            IRenderSurface surface = factory.AcquireScratchSurface(
+                pixelWidth, pixelHeight, effectiveDpiScale, hasAlpha: opaqueFill is null, debugName: "BitmapCache");
             try
             {
                 entry = new CacheEntry
                 {
                     Surface = surface,
                     Image = factory.CreateImageView(surface),
+                    PersistentKey = cacheKey,
                     PixelWidth = pixelWidth,
                     PixelHeight = pixelHeight,
                     DpiScale = effectiveDpiScale,
                     DeviceGeneration = deviceGeneration,
                     OpaqueFill = opaqueFill,
+                    PixelPhase = phaseQuantized,
+                    AccountedBytes = RenderResourceMetrics.ScratchBytes(surface.PixelWidth, surface.PixelHeight),
                 };
+                if (factory.ResourceCache is { } resourceCache)
+                {
+                    entry.PersistentLease = resourceCache.Add(cacheKey, entry.Surface, entry.Image);
+                    entry.Surface = entry.PersistentLease.Surface;
+                    entry.Image = entry.PersistentLease.Image;
+                }
                 _cache = entry;
+                RenderResourceMetrics.BitmapCacheEntryAdded(entry.AccountedBytes);
             }
             catch
             {
-                surface.Dispose();
+                factory.ReleaseScratchSurface(surface);
                 throw;
             }
         }
@@ -260,7 +411,7 @@ public abstract partial class UIElement
         {
             cacheContext.BeginFrame(entry.Surface);
             cacheContext.Clear(opaqueFill ?? Color.Transparent);
-            cacheContext.Translate(-bounds.Left, -bounds.Top);
+            cacheContext.Translate(-snappedLeft, -snappedTop);
 
             _cacheSnapshotDepth++;
             try
@@ -285,26 +436,56 @@ public abstract partial class UIElement
 
     private void DisposeCacheEntry()
     {
-        _cache?.Dispose();
+        if (_cache is not { } entry)
+        {
+            return;
+        }
         _cache = null;
+        RenderResourceMetrics.BitmapCacheEntryRemoved(entry.AccountedBytes);
+
+        if (entry.PersistentLease != null)
+        {
+            entry.PersistentLease.Dispose();
+            if (entry.Version != _contentVersion)
+            {
+                // The key embeds the version, so a stale snapshot can never be looked up again;
+                // retiring it now hands its surface back to the scratch pool instead of parking it
+                // until idle eviction, which would starve the reacquisition that follows.
+                var cacheDevice = Application.IsRunning ? Application.Current.GraphicsFactory : Application.DefaultGraphicsFactory;
+                cacheDevice?.ResourceCache?.Release(entry.PersistentKey);
+            }
+            return;
+        }
+
+        entry.Image.Dispose();
+        // The surface itself goes back to the device scratch pool so the next cache (any element,
+        // any window) can repaint into it instead of allocating.
+        var device = Application.IsRunning ? Application.Current.GraphicsFactory : Application.DefaultGraphicsFactory;
+        if (device != null)
+        {
+            device.ReleaseScratchSurface(entry.Surface);
+        }
+        else
+        {
+            entry.Surface.Dispose();
+        }
     }
 
-    private sealed class CacheEntry : IDisposable
+
+    private sealed class CacheEntry
     {
-        public required IRenderSurface Surface { get; init; }
-        public required IImage Image { get; init; }
+        public required IRenderSurface Surface { get; set; }
+        public required IImage Image { get; set; }
+        public IRenderCacheEntry? PersistentLease { get; set; }
+        public required RenderCacheKey PersistentKey { get; set; }
         public required int PixelWidth { get; init; }
         public required int PixelHeight { get; init; }
         public required double DpiScale { get; init; }
         public required int DeviceGeneration { get; init; }
         public required Color? OpaqueFill { get; init; }
+        public required int PixelPhase { get; init; }
+        public required long AccountedBytes { get; init; }
         public long Version { get; set; }
         public Color InvalidationOverlayColor { get; set; }
-
-        public void Dispose()
-        {
-            Image.Dispose();
-            Surface.Dispose();
-        }
     }
 }

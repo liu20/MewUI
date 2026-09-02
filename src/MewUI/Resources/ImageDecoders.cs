@@ -192,4 +192,53 @@ public static class ImageDecoders
 
         return null;
     }
+
+    internal static bool TryReadMetadata(ReadOnlySpan<byte> encoded, out ImageMetadata metadata)
+    {
+        var decoder = FindDecoder(encoded);
+        if (decoder is IImageMetadataDecoder metadataDecoder
+            && metadataDecoder.TryReadMetadata(encoded, out metadata))
+        {
+            return true;
+        }
+
+        metadata = default;
+        return false;
+    }
+
+    internal static bool TryDecode(
+        byte[] encoded,
+        int targetPixelWidth,
+        int targetPixelHeight,
+        out Bgra32PixelBuffer bitmap,
+        out ImageOrientation orientation)
+    {
+        ArgumentNullException.ThrowIfNull(encoded);
+        orientation = ImageOrientation.Identity;
+
+        var decoder = FindDecoder(encoded);
+        if (decoder == null)
+        {
+            bitmap = default;
+            return false;
+        }
+
+        bool decoded = decoder is ITargetSizeImageDecoder targetDecoder
+            ? targetDecoder.TryDecode(encoded, targetPixelWidth, targetPixelHeight, out bitmap)
+            : decoder is IByteArrayImageDecoder fast
+                ? fast.TryDecode(encoded, out bitmap)
+                : decoder.TryDecode(encoded, out bitmap);
+        if (!decoded)
+        {
+            bitmap = default;
+            return false;
+        }
+
+        if (bitmap.WidthPx > targetPixelWidth || bitmap.HeightPx > targetPixelHeight)
+        {
+            bitmap = Bgra32ImageResampler.FitWithin(bitmap, targetPixelWidth, targetPixelHeight);
+        }
+        orientation = decoder.ReadOrientation(encoded);
+        return true;
+    }
 }

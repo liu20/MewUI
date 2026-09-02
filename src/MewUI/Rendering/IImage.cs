@@ -39,3 +39,42 @@ public interface IImage : IDisposable
     /// </summary>
     bool TrySetPostReleaseCallback(Action callback) => false;
 }
+
+internal interface IBackendImageProvider
+{
+    IImage BackendImage { get; }
+}
+
+internal static class ImageResource
+{
+    public static IImage ResolveBackendImage(IImage image)
+    {
+        while (image is IBackendImageProvider provider)
+        {
+            image = provider.BackendImage;
+        }
+        return image;
+    }
+
+    public static IImage WrapLogical(IImage image, int pixelWidth, int pixelHeight)
+        => image.PixelWidth == pixelWidth && image.PixelHeight == pixelHeight
+            ? image
+            : new LogicalBackendImageView(image, pixelWidth, pixelHeight);
+
+    private sealed class LogicalBackendImageView(IImage backendImage, int pixelWidth, int pixelHeight)
+        : IImage, IBackendImageProvider
+    {
+        private IImage? _backendImage = backendImage;
+
+        public int PixelWidth { get; } = pixelWidth;
+        public int PixelHeight { get; } = pixelHeight;
+
+        IImage IBackendImageProvider.BackendImage => Volatile.Read(ref _backendImage)
+            ?? throw new ObjectDisposedException(nameof(LogicalBackendImageView));
+
+        public bool TrySetPostReleaseCallback(Action callback)
+            => Volatile.Read(ref _backendImage)?.TrySetPostReleaseCallback(callback) == true;
+
+        public void Dispose() => Interlocked.Exchange(ref _backendImage, null)?.Dispose();
+    }
+}

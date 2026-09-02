@@ -82,7 +82,160 @@ public abstract class FrameworkElement : UIElement, IDisposable
     public static readonly MewProperty<object?> TagProperty =
         MewProperty<object?>.Register<FrameworkElement>(nameof(Tag), null, MewPropertyOptions.None);
 
+    public static readonly MewProperty<Element?> ToolTipProperty =
+        MewProperty<Element?>.Register<FrameworkElement>(nameof(ToolTip), null, MewPropertyOptions.None);
+
+    public static readonly MewProperty<ContextMenu?> ContextMenuProperty =
+        MewProperty<ContextMenu?>.Register<FrameworkElement>(nameof(ContextMenu), null, MewPropertyOptions.None);
+
     #endregion
+
+    private Point _lastMousePositionInWindow;
+
+    /// <summary>
+    /// Gets or sets what to show when the pointer rests on this element.
+    /// Use the <c>ToolTip(string)</c> extension method for simple text tooltips.
+    /// </summary>
+    public Element? ToolTip
+    {
+        get => GetValue(ToolTipProperty);
+        set => SetValue(ToolTipProperty, value);
+    }
+
+    /// <summary>
+    /// Gets or sets the menu shown when the pointer is right-pressed over this element.
+    /// </summary>
+    public ContextMenu? ContextMenu
+    {
+        get => GetValue(ContextMenuProperty);
+        set => SetValue(ContextMenuProperty, value);
+    }
+
+    protected override void OnMouseEnter()
+    {
+        base.OnMouseEnter();
+        ShowToolTip();
+    }
+
+    protected override void OnMouseLeave()
+    {
+        base.OnMouseLeave();
+        HideToolTip();
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        _lastMousePositionInWindow = e.Position;
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+
+        HideToolTip();
+
+        if (e.Handled)
+        {
+            return;
+        }
+
+        if (e.Button == MouseButton.Right && ContextMenu is ContextMenu menu)
+        {
+            if (menu.Placement == MenuPlacement.Pointer)
+            {
+                menu.Show(this, e.Position);
+            }
+            else
+            {
+                menu.Show(this);
+            }
+
+            e.Handled = true;
+        }
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+
+        if (e.Handled)
+        {
+            return;
+        }
+
+        HideToolTip();
+    }
+
+    /// <summary>
+    /// What to show when the pointer rests on this element, or <see langword="null"/> to show nothing.
+    /// Called each time a tooltip is about to appear, so an element that builds its content from something
+    /// that changes can build it here rather than keeping <see cref="ToolTip"/> in step.
+    /// </summary>
+    protected virtual Element? ResolveToolTipContent() => ToolTip;
+
+    internal Element? ResolveToolTipContentInternal() => ResolveToolTipContent();
+
+    private void ShowToolTip()
+    {
+        if (!IsMouseOver)
+        {
+            return;
+        }
+
+        if (ResolveToolTipContent() is not Element content)
+        {
+            return;
+        }
+
+        var root = FindVisualRoot();
+        if (root is not Window window)
+        {
+            return;
+        }
+
+        var anchor = window.LastMousePositionDip;
+        if (anchor.X == 0 && anchor.Y == 0)
+        {
+            anchor = _lastMousePositionInWindow;
+        }
+        if (anchor.X == 0 && anchor.Y == 0 && Bounds.Width > 0 && Bounds.Height > 0)
+        {
+            anchor = new Point(Bounds.X + Bounds.Width / 2, Bounds.Bottom);
+        }
+
+        var region = window.GetPopupPlacementRegion(new Rect(anchor.X, anchor.Y, 0, 0));
+        var measureSize = new Size(Math.Max(0, region.Width), Math.Max(0, region.Height));
+
+        window.ShowToolTip(this, content, measureSize, desired =>
+        {
+            const double dx = 12;
+            const double dy = 18;
+            double w = Math.Max(0, desired.Width);
+            double h = Math.Max(0, desired.Height);
+
+            double x = PopupPlacement.ClampHorizontal(anchor.X + dx, w, region, floorToLeftEdge: false);
+            double y = anchor.Y + dy;
+
+            if (y + h > region.Bottom)
+            {
+                y = Math.Max(region.Y, anchor.Y - h - dy);
+            }
+
+            return new Rect(x, y, w, h);
+        });
+    }
+
+    private protected void HideToolTip()
+    {
+        var root = FindVisualRoot();
+        if (root is not Window window)
+        {
+            return;
+        }
+
+        window.CloseToolTip(this);
+    }
 
     /// <summary>
     /// Occurs when the element's size changes.
@@ -231,7 +384,12 @@ public abstract class FrameworkElement : UIElement, IDisposable
             }
             else
             {
-                return ThemeManager.GetDefaultTheme(ThemeManager.ResolveVariantForStartup(ThemeManager.Default));
+                // Stamp the provisional pre-run resolution so Window.Show can reconcile it once Run decides the theme.
+                if (GetValue(ThemeProperty) is null)
+                {
+                    SetValue(ThemeProperty, ThemeManager.GetDefaultTheme(ThemeManager.ResolveVariantForStartup(ThemeManager.Default)));
+                }
+                return GetValue(ThemeProperty);
             }
         }
         set => SetValue(ThemeProperty, value);
@@ -245,6 +403,8 @@ public abstract class FrameworkElement : UIElement, IDisposable
         }
 
         _disposed = true;
+
+        HideToolTip();
 
         // Release extension-managed bindings (and any other UIElement-registered disposables).
         DisposeBindings();
@@ -280,6 +440,18 @@ public abstract class FrameworkElement : UIElement, IDisposable
             InvalidateMeasure();
             InvalidateVisual();
         }
+    }
+
+    /// <summary>Re-runs the theme pass when this element's stored theme differs from <paramref name="currentTheme"/>.</summary>
+    internal void ReconcileTheme(Theme currentTheme)
+    {
+        var stored = GetValue(ThemeProperty);
+        if (stored is null || stored == currentTheme)
+        {
+            return;
+        }
+
+        NotifyThemeChanged(stored, currentTheme);
     }
 
     internal void RegisterThemeCallback(Action<Theme, FrameworkElement> callback, bool invokeImmediately = true)

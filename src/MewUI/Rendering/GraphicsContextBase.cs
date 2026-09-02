@@ -43,6 +43,10 @@ internal abstract class GraphicsContextBase : IGraphicsContext, ITextBackendRend
     /// <summary>Whether a frame is currently active (between BeginFrame and EndFrame).</summary>
     protected bool IsActive { get; private set; }
 
+    /// <summary>Logical frame extent retained when the backend receives a larger pooled target.</summary>
+    protected int FramePixelWidth { get; private set; }
+    protected int FramePixelHeight { get; private set; }
+
     /// <summary>Whether this context has been permanently disposed.</summary>
     private bool _disposed;
 
@@ -75,7 +79,10 @@ internal abstract class GraphicsContextBase : IGraphicsContext, ITextBackendRend
     /// </summary>
     public void BeginFrame(IRenderTarget target)
     {
+        ArgumentNullException.ThrowIfNull(target);
         if (IsActive) EndFrame();
+        FramePixelWidth = target.PixelWidth;
+        FramePixelHeight = target.PixelHeight;
         _cullRect = InfiniteCullRect;
         _cullStack.Clear();
         _drawCalls = 0;
@@ -95,7 +102,9 @@ internal abstract class GraphicsContextBase : IGraphicsContext, ITextBackendRend
         _drawTextCount = 0;
         _drawImageCount = 0;
         IsActive = true;
-        OnBeginFrame(target);
+        OnBeginFrame(target is IRenderSurface surface
+            ? RenderSurfaceResource.ResolveBackendSurface(surface)
+            : target);
     }
 
     /// <summary>
@@ -229,8 +238,41 @@ internal abstract class GraphicsContextBase : IGraphicsContext, ITextBackendRend
 
     public void SetTransform(Matrix3x2 matrix)
     {
-        _cullRect = InfiniteCullRect;
+        // Carry the cull rect into the new coordinate space instead of dropping it. Callers that
+        // replace the whole transform (an SVG viewBox, an element's own matrix) would otherwise
+        // erase the viewport for everything drawn afterwards, and consumers that size work to the
+        // visible area - filter source layers most of all - fall back to the full element extent.
+        var previous = GetTransformCore();
         SetTransformCore(matrix);
+        if (_cullRect.Equals(InfiniteCullRect))
+        {
+            return;
+        }
+
+        // The rect is in the old local space; map it to world through the old transform, then
+        // back through the new one. A non-invertible new transform leaves nothing to cull against.
+        if (!Matrix3x2.Invert(matrix, out var inverse))
+        {
+            _cullRect = InfiniteCullRect;
+            return;
+        }
+
+        _cullRect = TransformRect(TransformRect(_cullRect, previous), inverse);
+    }
+
+    /// <summary>Axis-aligned bounds of <paramref name="rect"/> after <paramref name="matrix"/>.</summary>
+    private static Rect TransformRect(Rect rect, Matrix3x2 matrix)
+    {
+        var topLeft = Vector2.Transform(new Vector2((float)rect.X, (float)rect.Y), matrix);
+        var topRight = Vector2.Transform(new Vector2((float)rect.Right, (float)rect.Y), matrix);
+        var bottomLeft = Vector2.Transform(new Vector2((float)rect.X, (float)rect.Bottom), matrix);
+        var bottomRight = Vector2.Transform(new Vector2((float)rect.Right, (float)rect.Bottom), matrix);
+
+        double left = Math.Min(Math.Min(topLeft.X, topRight.X), Math.Min(bottomLeft.X, bottomRight.X));
+        double top = Math.Min(Math.Min(topLeft.Y, topRight.Y), Math.Min(bottomLeft.Y, bottomRight.Y));
+        double right = Math.Max(Math.Max(topLeft.X, topRight.X), Math.Max(bottomLeft.X, bottomRight.X));
+        double bottom = Math.Max(Math.Max(topLeft.Y, topRight.Y), Math.Max(bottomLeft.Y, bottomRight.Y));
+        return new Rect(left, top, right - left, bottom - top);
     }
 
     public Matrix3x2 GetTransform() => GetTransformCore();
@@ -464,14 +506,20 @@ internal abstract class GraphicsContextBase : IGraphicsContext, ITextBackendRend
     {
         _drawImageCount++;
         if (IsCulled(destRect)) return;
-        DrawImageCore(image, destRect);
+        // Take the source extent from the logical image, which hides how large the pooled
+        // allocation behind it actually is. Letting the backend default to the resolved image's
+        // size samples the unused band of an oversized surface and squashes the content.
+        DrawImageCore(
+            ImageResource.ResolveBackendImage(image),
+            destRect,
+            new Rect(0, 0, image.PixelWidth, image.PixelHeight));
     }
 
     public void DrawImage(IImage image, Rect destRect, Rect sourceRect)
     {
         _drawImageCount++;
         if (IsCulled(destRect)) return;
-        DrawImageCore(image, destRect, sourceRect);
+        DrawImageCore(ImageResource.ResolveBackendImage(image), destRect, sourceRect);
     }
 
     protected abstract void DrawImageCore(IImage image, Rect destRect);

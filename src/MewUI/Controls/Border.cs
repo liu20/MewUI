@@ -12,8 +12,20 @@ public sealed partial class Border : Control, IVisualTreeHost, ILogicalTreeHost
     private static readonly bool _defaultStyleRegistered =
         DefaultStyles.Register<Border>(DefaultStyles.CreateBorderStyle);
 
-    private PathGeometry? _cachedOuterPath;
+    private PathGeometry? _cachedBorderPath;
     private PathGeometry? _cachedBgPath;
+    private BorderGeometryCacheKey _cachedBorderKey;
+    private BorderGeometryCacheKey _cachedBgKey;
+
+    // Frozen-geometry cache key: the generated contours depend only on these
+    // inputs. Freezing the regenerated paths lets the backend reuse its
+    // per-geometry fill caches across frames instead of re-tessellating.
+    private readonly record struct BorderGeometryCacheKey(
+        Rect Bounds,
+        double DpiScale,
+        Thickness BorderThickness,
+        CornerRadius CornerRadius,
+        bool RingHides);
 
     public static readonly MewProperty<Thickness> NonUniformBorderThicknessProperty =
         MewProperty<Thickness>.Register<Border>(nameof(NonUniformBorderThickness), default,
@@ -136,6 +148,21 @@ public sealed partial class Border : Control, IVisualTreeHost, ILogicalTreeHost
             var bounds = metrics.Bounds;
             var radius = metrics.UniformRadius;
 
+            // The background stops at the stroke's centre line, the way WPF draws its simple
+            // border: filled to the outer contour it would sit under the stroke's outer
+            // antialiased fringe and bleed past the border.
+            if (metrics.UniformThickness > 0 && borderBrush.A > 0)
+            {
+                double inset = metrics.UniformThickness / 2;
+                bounds = bounds.Inflate(-inset, -inset);
+                radius = Math.Max(0, radius - inset);
+            }
+
+            if (bounds.Width <= 0 || bounds.Height <= 0)
+            {
+                return;
+            }
+
             if (radius > 0)
             {
                 context.FillRoundedRectangle(bounds, radius, radius, bg);
@@ -147,25 +174,55 @@ public sealed partial class Border : Control, IVisualTreeHost, ILogicalTreeHost
         }
         else
         {
-            // Non-uniform: border first (outer fill), then background on top (inner fill).
-            // Border color extends under background - no seam at boundary.
-            if (borderBrush.A > 0 && metrics.BorderThickness != Thickness.Zero)
-            {
-                _cachedOuterPath ??= new PathGeometry();
-                BorderGeometry.GenerateOuterContour(_cachedOuterPath, in metrics);
-                if (!_cachedOuterPath.IsEmpty)
-                {
-                    context.FillPath(_cachedOuterPath, borderBrush);
-                }
-            }
-
+            // Non-uniform: background first, then the border ring on top. The ring carries its own
+            // hole, so a transparent background leaves the middle empty instead of filled with the
+            // border colour. Where an opaque ring is about to cover it, the background runs to the
+            // outer contour so their shared edge has no antialiased seam; anywhere else it stops at
+            // the inner contour, which is the only area it may paint.
+            bool ringHides = borderBrush.A == 255 && metrics.BorderThickness != Thickness.Zero;
             if (bg.A > 0)
             {
-                _cachedBgPath ??= new PathGeometry();
-                BorderGeometry.GenerateBackgroundRegion(_cachedBgPath, in metrics);
+                var key = new BorderGeometryCacheKey(
+                    metrics.Bounds, metrics.DpiScale, metrics.BorderThickness, metrics.CornerRadius, ringHides);
+                if (_cachedBgPath == null || _cachedBgKey != key)
+                {
+                    var path = new PathGeometry();
+                    if (ringHides)
+                    {
+                        BorderGeometry.GenerateOuterContour(path, in metrics);
+                    }
+                    else
+                    {
+                        BorderGeometry.GenerateBackgroundRegion(path, in metrics);
+                    }
+
+                    path.Freeze();
+                    _cachedBgPath = path;
+                    _cachedBgKey = key;
+                }
+
                 if (!_cachedBgPath.IsEmpty)
                 {
                     context.FillPath(_cachedBgPath, bg);
+                }
+            }
+
+            if (borderBrush.A > 0 && metrics.BorderThickness != Thickness.Zero)
+            {
+                var key = new BorderGeometryCacheKey(
+                    metrics.Bounds, metrics.DpiScale, metrics.BorderThickness, metrics.CornerRadius, RingHides: false);
+                if (_cachedBorderPath == null || _cachedBorderKey != key)
+                {
+                    var path = new PathGeometry();
+                    BorderGeometry.GenerateBorderRegion(path, in metrics);
+                    path.Freeze();
+                    _cachedBorderPath = path;
+                    _cachedBorderKey = key;
+                }
+
+                if (!_cachedBorderPath.IsEmpty)
+                {
+                    context.FillPath(_cachedBorderPath, borderBrush);
                 }
             }
         }

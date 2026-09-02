@@ -40,10 +40,111 @@ internal sealed partial class MewVGWin32GraphicsContext : GraphicsContextBase
     // semantics auto-collect entries when PathGeometry key is GC'd)
     private static readonly ConditionalWeakTable<PathGeometry, FrozenFillCacheEntry> _fillCache = new();
 
+    // Budget for the tessellation cache. Keys live as long as their PathGeometry, so a document
+    // holding thousands of frozen paths (an icon list) would otherwise pin an unbounded amount of
+    // tessellation data (measured: 3,445 icons kept ~150 MB live through a forced gen2).
+    private const long FILL_CACHE_BUDGET_BYTES = 48L * 1024 * 1024;
+
+
+    // Guards the byte accounting and eviction sweep; entries themselves stay CWT-managed.
+    private static readonly object _fillCacheGate = new();
+    private static long _fillCacheBytes;
+    private static long _fillCacheStamp;
+
     private sealed class FrozenFillCacheEntry
     {
         public FrozenFillCache? NonZero;
         public FrozenFillCache? EvenOdd;
+        public long AccountedBytes;
+        public long LastUse;
+
+        public long CurrentBytes => (NonZero?.EstimatedBytes ?? 0) + (EvenOdd?.EstimatedBytes ?? 0);
+
+        ~FrozenFillCacheEntry()
+        {
+            var bytes = Interlocked.Exchange(ref AccountedBytes, 0);
+            if (bytes == 0)
+            {
+                return;
+            }
+
+            lock (_fillCacheGate)
+            {
+                _fillCacheBytes -= bytes;
+                RenderResourceMetrics.GeometryCacheBytesChanged(-bytes);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Re-accounts <paramref name="entry"/> after a (re)build and evicts least-recently-used cache
+    /// entries until the total is back under budget. An evicted path re-tessellates on its next
+    /// draw, so eviction trades reuse for a bounded live-heap footprint.
+    /// </summary>
+    private static void AccountFillCacheAndEvict(FrozenFillCacheEntry entry)
+    {
+        lock (_fillCacheGate)
+        {
+            _fillCacheBytes += entry.CurrentBytes - entry.AccountedBytes;
+            RenderResourceMetrics.GeometryCacheBytesChanged(entry.CurrentBytes - entry.AccountedBytes);
+            entry.AccountedBytes = entry.CurrentBytes;
+            entry.LastUse = ++_fillCacheStamp;
+
+            if (_fillCacheBytes <= FILL_CACHE_BUDGET_BYTES)
+            {
+                return;
+            }
+
+            // Collect and sort the live entries by last use; oldest evicted first. The sweep is
+            // O(n log n) but runs only when the budget trips, which a steady scene never does.
+            var candidates = new List<KeyValuePair<PathGeometry, FrozenFillCacheEntry>>();
+            foreach (var pair in _fillCache)
+            {
+                if (!ReferenceEquals(pair.Value, entry))
+                {
+                    candidates.Add(pair);
+                }
+            }
+            candidates.Sort(static (a, b) => a.Value.LastUse.CompareTo(b.Value.LastUse));
+
+            foreach (var victim in candidates)
+            {
+                if (_fillCacheBytes <= FILL_CACHE_BUDGET_BYTES)
+                {
+                    break;
+                }
+                _fillCacheBytes -= victim.Value.AccountedBytes;
+                RenderResourceMetrics.GeometryCacheBytesChanged(-victim.Value.AccountedBytes);
+                victim.Value.AccountedBytes = 0;
+                _fillCache.Remove(victim.Key);
+            }
+        }
+    }
+
+    private static void TouchFillCache(FrozenFillCacheEntry entry)
+        => entry.LastUse = Interlocked.Increment(ref _fillCacheStamp);
+
+    internal static void TrimSharedGeometryCache()
+    {
+        lock (_fillCacheGate)
+        {
+            foreach (var pair in _fillCache)
+            {
+                var entry = pair.Value;
+                if (entry.AccountedBytes != 0)
+                {
+                    _fillCacheBytes -= entry.AccountedBytes;
+                    RenderResourceMetrics.GeometryCacheBytesChanged(-entry.AccountedBytes);
+                    entry.AccountedBytes = 0;
+                }
+
+                entry.NonZero = null;
+                entry.EvenOdd = null;
+            }
+
+            _fillCache.Clear();
+            _fillCacheBytes = 0;
+        }
     }
 
     private double _dpiScale;
@@ -54,8 +155,8 @@ internal sealed partial class MewVGWin32GraphicsContext : GraphicsContextBase
     protected override void OnBeginFrame(IRenderTarget target)
     {
         _dpiScale = target.DpiScale <= 0 ? 1.0 : target.DpiScale;
-        _viewportWidthPx = Math.Max(1, target.PixelWidth);
-        _viewportHeightPx = Math.Max(1, target.PixelHeight);
+        _viewportWidthPx = Math.Max(1, FramePixelWidth);
+        _viewportHeightPx = Math.Max(1, FramePixelHeight);
         _viewportWidthDip = _viewportWidthPx / DpiScale;
         _viewportHeightDip = _viewportHeightPx / DpiScale;
 
@@ -359,7 +460,11 @@ internal sealed partial class MewVGWin32GraphicsContext : GraphicsContextBase
 
         ReplayNvgPathCommands(path);
         _vg.StrokeColor(ToNvgColor(color));
-        NvgStrokeWidth((float)thickness);
+        // Path strokes keep their exact width: vector artwork (SVG) relies on
+        // fractional and sub-pixel stroke weights, which the core renders via
+        // coverage-emulating alpha. Pixel snapping stays on the UI primitives
+        // (lines, rectangles, ellipses) only.
+        _vg.StrokeWidth((float)thickness);
         _vg.Stroke();
     }
 
@@ -374,29 +479,8 @@ internal sealed partial class MewVGWin32GraphicsContext : GraphicsContextBase
             return;
         }
 
-        if (path.IsFrozen)
+        if (TryGetFrozenFill(path, fillRule, out var cached, out var windingRule))
         {
-            var windingRule = fillRule == FillRule.EvenOdd
-                ? TessWindingRule.Odd : TessWindingRule.NonZero;
-
-            var entry = _fillCache.GetOrCreateValue(path);
-            var cached = fillRule == FillRule.EvenOdd ? entry.EvenOdd : entry.NonZero;
-
-            if (cached == null || cached.IsStale(_vg.TessTol))
-            {
-                // First use or DPI changed: build object-space cache (identity transform)
-                ReplayNvgPathCommands(path, fillRule, identityTransform: true);
-                cached = _vg.BuildFillCache(windingRule);
-
-                // Store back into entry
-                if (fillRule == FillRule.EvenOdd)
-                    entry.EvenOdd = cached;
-                else
-                    entry.NonZero = cached;
-
-                _fillCache.AddOrUpdate(path, entry);
-            }
-
             // Every frame: render from cache with current transform
             _vg.FillColor(ToNvgColor(color));
             _vg.FillFromCache(cached, windingRule);
@@ -406,6 +490,53 @@ internal sealed partial class MewVGWin32GraphicsContext : GraphicsContextBase
         ReplayNvgPathCommands(path, fillRule);
         _vg.FillColor(ToNvgColor(color));
         _vg.Fill();
+    }
+
+    /// <summary>Tessellation of frozen geometry, built once in object space and reused across
+    /// draws. False when the geometry is not frozen and the caller has to replay it per draw.</summary>
+    private bool TryGetFrozenFill(PathGeometry path, FillRule fillRule,
+        out FrozenFillCache cached, out TessWindingRule windingRule)
+    {
+        windingRule = fillRule == FillRule.EvenOdd ? TessWindingRule.Odd : TessWindingRule.NonZero;
+        cached = null!;
+        if (!path.IsFrozen)
+        {
+            return false;
+        }
+
+        var entry = _fillCache.GetOrCreateValue(path);
+        var existing = fillRule == FillRule.EvenOdd ? entry.EvenOdd : entry.NonZero;
+
+        // Scale-aware staleness: the cached flattening is calibrated for the
+        // scale it was built at, so drawing the same frozen geometry larger
+        // (an icon size slider, zoom) must rebuild it or curves turn faceted.
+        var xform = _vg.GetTransformMatrix();
+        var scaleX = MathF.Sqrt(xform.M11 * xform.M11 + xform.M12 * xform.M12);
+        var scaleY = MathF.Sqrt(xform.M21 * xform.M21 + xform.M22 * xform.M22);
+        var currentScale = MathF.Max(scaleX, scaleY);
+
+        if (existing == null || existing.IsStale(_vg.TessTol, windingRule, currentScale))
+        {
+            // First use or DPI changed: build object-space cache (identity transform)
+            ReplayNvgPathCommands(path, fillRule, identityTransform: true);
+            existing = _vg.BuildFillCache(windingRule);
+
+            // Store back into entry
+            if (fillRule == FillRule.EvenOdd)
+                entry.EvenOdd = existing;
+            else
+                entry.NonZero = existing;
+
+            _fillCache.AddOrUpdate(path, entry);
+            AccountFillCacheAndEvict(entry);
+        }
+        else
+        {
+            TouchFillCache(entry);
+        }
+
+        cached = existing;
+        return true;
     }
 
     public override void DrawLine(Point start, Point end, Pen pen)
@@ -504,7 +635,7 @@ internal sealed partial class MewVGWin32GraphicsContext : GraphicsContextBase
 
         ReplayNvgPathCommands(path);
         NvgStrokeHelper.ApplyPenStyle(_vg, pen);
-        NvgStrokeWidth((float)pen.Thickness);
+        _vg.StrokeWidth((float)pen.Thickness);
         NvgStrokeHelper.ApplyStrokeBrush(_vg, pen, NvgStrokeHelper.ComputePathBounds(path));
         _vg.Stroke();
     }
@@ -584,17 +715,45 @@ internal sealed partial class MewVGWin32GraphicsContext : GraphicsContextBase
         }
         if (path == null) return;
         if (brush is SolidColorBrush solid) { FillPath(path, solid.Color, fillRule); return; }
+        // Frozen geometry takes the same tessellation cache as a solid fill: the cache holds
+        // geometry only, and FillFromCache draws it with whatever paint the state carries.
+        bool frozen = TryGetFrozenFill(path, fillRule, out var cached, out var windingRule);
+
         if (brush is ImageBrush imageBrush)
         {
-            ReplayNvgPathCommands(path, fillRule);
-            if (ApplyImageBrushPaint(imageBrush)) _vg.Fill();
+            if (!frozen)
+            {
+                ReplayNvgPathCommands(path, fillRule);
+            }
+            if (!ApplyImageBrushPaint(imageBrush))
+            {
+                return;
+            }
+            if (frozen)
+            {
+                _vg.FillFromCache(cached, windingRule);
+            }
+            else
+            {
+                _vg.Fill();
+            }
             return;
         }
         if (brush is not GradientBrush gradient) return;
 
-        ReplayNvgPathCommands(path, fillRule);
+        if (!frozen)
+        {
+            ReplayNvgPathCommands(path, fillRule);
+        }
         NvgStrokeHelper.ApplyGradientPaint(_vg, gradient, NvgStrokeHelper.ComputePathBounds(path));
-        _vg.Fill();
+        if (frozen)
+        {
+            _vg.FillFromCache(cached, windingRule);
+        }
+        else
+        {
+            _vg.Fill();
+        }
     }
 
     /// <summary>

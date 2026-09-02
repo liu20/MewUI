@@ -28,22 +28,34 @@ Write-Step "Checking the repository"
 
 Assert-ReleasableWorktree -Tag $tag
 
-# Everything a release writes was committed by the prepare step, so anything left here was not part
-# of it and would be pushed without having been looked at.
-$dirty = Invoke-Git status --porcelain --untracked-files=no
-if ($dirty) {
-    throw "The working tree has uncommitted changes:`n$dirty"
-}
-
 Assert-OriginReady -Tag $tag
+
+# A push carries commits, not the working tree, so what a release has to answer for is the commits
+# about to leave this machine rather than whatever is left uncommitted beside them.
+$unpushed = Invoke-Git log --oneline origin/main..HEAD
+if ($unpushed) {
+    Write-Host "  commits this push will publish:"
+    foreach ($line in $unpushed) {
+        Write-Host "    $line"
+    }
+} else {
+    Write-Host "  nothing new to push; the tag will point at origin/main"
+}
 
 Write-Step "Checking what was prepared"
 
-$declared = Get-DeclaredVersion
-if ($declared -ne $Version) {
-    throw "MewUIVersion is $declared but $Version is being published. Run Prepare-Release.ps1 first."
+$committed = Get-CommittedVersion
+if ($committed -ne $Version) {
+    throw "The commit to tag declares MewUIVersion $committed but $Version is being published. Run Prepare-Release.ps1 first."
 }
-Write-Host "  MewUIVersion is $Version"
+Write-Host "  the commit to tag declares MewUIVersion $Version"
+
+# An uncommitted bump would leave the tag on the version before it, which is the mistake this pair of
+# checks exists to catch.
+$declared = Get-DeclaredVersion
+if ($declared -ne $committed) {
+    throw "MewUIVersion is $declared here but $committed in the commit to tag. Commit it or restore it."
+}
 
 if (-not (Test-FbaGalleryCurrent)) {
     throw "samples/FBASample/fba_gallery.cs is not what the gallery generates. Run Prepare-Release.ps1 again."

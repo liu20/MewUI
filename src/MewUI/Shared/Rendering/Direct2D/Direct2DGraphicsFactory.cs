@@ -9,7 +9,8 @@ using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI.Rendering.Direct2D;
 
-public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, ITextBackendFactory, IRenderDevice, IGpuInteropInvalidationSource, IWindowResourceReleaser, IWin32TransparencyCapabilities, IWindowSurfacePresenter, IDisposable
+public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, ITextBackendFactory, IRenderDevice, IGpuInteropInvalidationSource, IWindowResourceReleaser, IWin32TransparencyCapabilities, IWindowSurfacePresenter,
+    IBackendRenderCacheMaintenance, IDisposable
 {
     public const string BackendIdentifier = "Direct2D";
 
@@ -47,6 +48,9 @@ public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, I
     private readonly Dictionary<nint, long> _lastExternalMismatchNotificationTicks = new();
     private readonly Dictionary<StrokeStyle, nint> _strokeStyles = new();
     private readonly RenderResourceCache _renderResourceCache = new();
+    private readonly ulong _renderDeviceId = RenderDeviceIdentity.AllocateDeviceId();
+
+    public RenderDeviceIdentity RenderIdentity => new(_renderDeviceId, unchecked((uint)_gpuDeviceGeneration));
     // Opaque windows use ID2D1HwndRenderTarget by default. Windows that render external
     // DXGI images are promoted to a device-context swap-chain target because those
     // images need ID2D1DeviceContext bitmap creation and same-device resource binding.
@@ -61,8 +65,36 @@ public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, I
 
     internal Direct2DGraphicsFactory() { }
 
+    void IBackendRenderCacheMaintenance.TrimBackendCaches(RenderCacheTrimReason reason)
+        => TrimBackendCachesCore();
+
+    void IBackendRenderCacheMaintenance.MaintainBackendCaches(RenderCacheMaintenanceMode mode)
+    {
+        if (mode is RenderCacheMaintenanceMode.MemoryPressure
+            or RenderCacheMaintenanceMode.WindowClosed
+            or RenderCacheMaintenanceMode.DeviceLost
+            or RenderCacheMaintenanceMode.Shutdown)
+        {
+            TrimBackendCachesCore();
+        }
+    }
+
+    private void TrimBackendCachesCore()
+    {
+        TextFormatCache.ReleaseAll();
+        lock (_rtLock)
+        {
+            foreach (var strokeStyle in _strokeStyles.Values)
+            {
+                ComHelpers.Release(strokeStyle);
+            }
+            _strokeStyles.Clear();
+        }
+    }
+
     public void Dispose()
     {
+        ImageSource.RetireRealizationsForFactory(this);
         TextServices.ReleaseIfCreated(this);
         _renderResourceCache.Dispose();
         DisposeLayeredTargets();
@@ -478,6 +510,11 @@ public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, I
     {
         ArgumentNullException.ThrowIfNull(target);
 
+        if (target is IRenderSurface surface)
+        {
+            target = RenderSurfaceResource.ResolveBackendSurface(surface);
+        }
+
         if (target is WindowRenderTarget windowTarget)
         {
             if (windowTarget.Surface is not IWin32WindowSurface win32Surface || win32Surface.Hwnd == 0)
@@ -647,13 +684,19 @@ public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, I
     }
 
     public IGraphicsContext CreateContext(IRenderSurface surface)
-        => surface.Capabilities.HasFlag(SurfaceCapabilities.Renderable)
+    {
+        surface = RenderSurfaceResource.ResolveBackendSurface(surface);
+        return surface.Capabilities.HasFlag(SurfaceCapabilities.Renderable)
             ? CreateContext((IRenderTarget)surface)
             : throw new NotSupportedException(
                 $"{GetType().Name} can only create contexts for renderable surfaces.");
+    }
 
     public IImage CreateImageView(IRenderSurface surface)
     {
+        int logicalWidth = surface.PixelWidth;
+        int logicalHeight = surface.PixelHeight;
+        surface = RenderSurfaceResource.ResolveBackendSurface(surface);
         // GPU-resident surfaces that also implement IExternalRasterSource go through the
         // DXGI bridge so any D2D DC can sample them zero-copy. Prefer this path over the
         // IPixelBufferSource fallback - otherwise Direct2DGpuPixelRenderSurface (created
@@ -661,10 +704,13 @@ public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, I
         // surface.DpiScale is forwarded so the bridge bitmap reports the correct logical
         // size when sampled from an RT with a different dpi.
         if (surface is IExternalRasterSource externalSource)
-            return CreateImageView(externalSource, surface.DpiScale);
+            return ImageResource.WrapLogical(
+                CreateImageView(externalSource, surface.DpiScale),
+                logicalWidth,
+                logicalHeight);
 
         if (surface is IPixelBufferSource pixelSource)
-            return CreateImageView(pixelSource);
+            return ImageResource.WrapLogical(CreateImageView(pixelSource), logicalWidth, logicalHeight);
 
         throw new NotSupportedException(
             $"{GetType().Name} can only create image views for pixel-backed or externally-rastered surfaces.");
@@ -764,7 +810,10 @@ public sealed unsafe partial class Direct2DGraphicsFactory : IGraphicsFactory, I
     }
 
     private void OnGpuInteropInvalidated(GpuInteropInvalidatedEventArgs e)
-        => GpuInteropInvalidated?.Invoke(this, e);
+    {
+        _renderResourceCache.Maintain(RenderCacheMaintenanceMode.DeviceLost);
+        GpuInteropInvalidated?.Invoke(this, e);
+    }
 
     private void QueueGpuInteropInvalidated(GpuInteropInvalidatedEventArgs e)
     {

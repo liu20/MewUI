@@ -1,11 +1,10 @@
 using System.Globalization;
 using System.Runtime.CompilerServices;
-using System.Text;
 using Aprillz.MewUI.Rendering;
 
 namespace Aprillz.MewUI.Text;
 
-internal sealed class ManagedTextEngine : ITextEngine, IDisposable
+internal sealed partial class ManagedTextEngine : ITextEngine, IDisposable
 {
     // GDI DrawText stops reporting reliable extents above its 16-bit-era text limit.
     private const int FastPathSegmentLength = 32 * 1024;
@@ -93,7 +92,6 @@ internal sealed class ManagedTextEngine : ITextEngine, IDisposable
             var line = new ManagedTextLine(
                 new TextLayoutLineMetrics(
                     0, snapshot.Text.Length, 0, new Rect(x, 0, width, boxHeight), baseline - trimTop, trailingWhitespace),
-                clusters: null,
                 fastSegments: segments)
             {
                 TrimTop = trimTop,
@@ -102,37 +100,7 @@ internal sealed class ManagedTextEngine : ITextEngine, IDisposable
             return new ManagedTextLayout(this, snapshot, [line], new Size(width, boxHeight), isFastPath: true);
         }
 
-        var clusters = MeasureClusters(context, snapshot, 0, snapshot.Text.Length);
-        var lines = AssembleLines(context, snapshot, clusters);
-        ApplyTrimming(context, snapshot, lines);
-        ApplyLineBoxTrim(snapshot, lines);
-        double measuredWidth = 0;
-        for (int index = 0; index < lines.Count; index++)
-        {
-            var metrics = lines[index].Metrics;
-            // Trailing spaces count toward the width only where a hard break or the end of the text
-            // ended the line, never where a wrap did or an ellipsis replaced them.
-            bool countTrailingWhitespace = !lines[index].IsTrimmed &&
-                (metrics.NewLineLength > 0 || index == lines.Count - 1);
-            measuredWidth = Math.Max(
-                measuredWidth, countTrailingWhitespace ? metrics.Bounds.Width : metrics.VisibleWidth);
-        }
-        double contentHeight = lines.Count == 0 ? 0 : lines[^1].Metrics.Bounds.Bottom;
-        return new ManagedTextLayout(
-            this,
-            snapshot,
-            lines,
-            new Size(measuredWidth, contentHeight),
-            isFastPath: false);
-    }
-
-    internal List<ManagedTextCluster> MeasureClusters(
-        TextLayoutRequestSnapshot snapshot,
-        int start,
-        int length)
-    {
-        using var context = CreateMeasurementContext(snapshot.Dpi);
-        return MeasureClusters(context, snapshot, start, length);
+        return CreateRunLayout(context, snapshot);
     }
 
     internal double MeasureFastPathRange(TextLayoutRequestSnapshot snapshot, int start, int length)
@@ -222,323 +190,6 @@ internal sealed class ManagedTextEngine : ITextEngine, IDisposable
         return text.Length;
     }
 
-    private List<ManagedTextCluster> MeasureClusters(
-        ITextBackendMeasurementContext context,
-        TextLayoutRequestSnapshot snapshot,
-        int start,
-        int length)
-    {
-        int end = checked(start + length);
-        var boundaries = GetTextElementBoundaries(snapshot.Text, start, end);
-        var clusters = new List<ManagedTextCluster>(boundaries.Count);
-        bool hasAdvanceSource = context.SupportsUtf16PrefixAdvances;
-
-        for (int i = 0; i < boundaries.Count; i++)
-        {
-            int clusterStart = boundaries[i];
-            int clusterEnd = i + 1 < boundaries.Count ? boundaries[i + 1] : end;
-            int clusterLength = clusterEnd - clusterStart;
-            var style = snapshot.GetStyle(clusterStart);
-            var font = GetFont(style, snapshot.Dpi);
-
-            if (snapshot.TryGetInline(clusterStart, out var inline))
-            {
-                var metrics = inline.Object.Measure();
-                clusters.Add(new ManagedTextCluster(
-                    clusterStart,
-                    Math.Max(clusterLength, inline.Length),
-                    0,
-                    // Whole device pixels, as every text advance already is. An object free to
-                    // report a fractional width, such as a box with padding around a glyph, would
-                    // otherwise push the rest of the line off the pixel grid, and each run after it
-                    // would round on its own.
-                    LayoutRounding.RoundToPixel(metrics.Width, snapshot.Dpi / 96.0),
-                    metrics.Height,
-                    metrics.Baseline,
-                    style,
-                    font,
-                    inline.Object,
-                    ManagedTextClusterKind.Inline,
-                    inline.BreaksLine));
-                int inlineEnd = checked(inline.Position + inline.Length);
-                while (i + 1 < boundaries.Count && boundaries[i + 1] < inlineEnd)
-                {
-                    i++;
-                }
-                continue;
-            }
-
-            var span = snapshot.Text.AsSpan(clusterStart, clusterLength);
-            if (span is ['\r'] or ['\n'] or ['\r', '\n'])
-            {
-                clusters.Add(new ManagedTextCluster(
-                    clusterStart,
-                    clusterLength,
-                    0,
-                    0,
-                    font.Ascent + font.Descent,
-                    font.Ascent,
-                    style,
-                    font,
-                    null,
-                    ManagedTextClusterKind.NewLine));
-                continue;
-            }
-
-            if (span is ['\t'])
-            {
-                clusters.Add(new ManagedTextCluster(
-                    clusterStart,
-                    clusterLength,
-                    0,
-                    0,
-                    font.Ascent + font.Descent,
-                    font.Ascent,
-                    style,
-                    font,
-                    null,
-                    ManagedTextClusterKind.Tab));
-                continue;
-            }
-
-            // A backend advance source measures each style run whole below and overwrites both
-            // values, so measuring every cluster here would be discarded work.
-            var measured = !hasAdvanceSource ? context.Measure(span, font) : Size.Empty;
-            clusters.Add(new ManagedTextCluster(
-                clusterStart,
-                clusterLength,
-                0,
-                Math.Max(0, measured.Width + snapshot.Paragraph.LetterSpacing),
-                Math.Max(font.Ascent + font.Descent, measured.Height),
-                font.Ascent,
-                style,
-                font,
-                null,
-                ManagedTextClusterKind.Text));
-        }
-
-        ApplyBackendAdvances(context, snapshot, clusters);
-        return clusters;
-    }
-
-    private static void ApplyBackendAdvances(
-        ITextBackendMeasurementContext context,
-        TextLayoutRequestSnapshot snapshot,
-        List<ManagedTextCluster> clusters)
-    {
-        if (!context.SupportsUtf16PrefixAdvances)
-        {
-            return;
-        }
-
-        int index = 0;
-        while (index < clusters.Count)
-        {
-            var first = clusters[index];
-            if (first.Kind != ManagedTextClusterKind.Text)
-            {
-                index++;
-                continue;
-            }
-
-            int endIndex = index + 1;
-            while (endIndex < clusters.Count &&
-                   clusters[endIndex].Kind == ManagedTextClusterKind.Text &&
-                   clusters[endIndex].Style == first.Style &&
-                   clusters[endIndex].Start == clusters[endIndex - 1].End)
-            {
-                endIndex++;
-            }
-
-            int textStart = first.Start;
-            int textEnd = clusters[endIndex - 1].End;
-            var runText = snapshot.Text.AsSpan(textStart, textEnd - textStart);
-            var cumulative = context.GetUtf16PrefixAdvances(runText, first.Font);
-            if (cumulative is null)
-            {
-                return;
-            }
-            // Line height takes the maximum over clusters, so one measurement per run carries the
-            // same result as measuring every cluster, including taller fallback glyphs.
-            double runHeight = Math.Max(
-                first.Font.Ascent + first.Font.Descent,
-                context.Measure(runText, first.Font).Height);
-            double previous = 0;
-            for (int clusterIndex = index; clusterIndex < endIndex; clusterIndex++)
-            {
-                var cluster = clusters[clusterIndex];
-                int relativeEnd = cluster.End - textStart;
-                double current = cumulative[relativeEnd - 1];
-                cluster.Width = Math.Max(0, current - previous + snapshot.Paragraph.LetterSpacing);
-                cluster.Height = runHeight;
-                previous = current;
-            }
-            index = endIndex;
-        }
-    }
-
-    private List<ManagedTextLine> AssembleLines(
-        ITextBackendMeasurementContext context,
-        TextLayoutRequestSnapshot snapshot,
-        List<ManagedTextCluster> clusters)
-    {
-        var lines = new List<ManagedTextLine>();
-        double y = 0;
-        int lineStart = 0;
-        int index = 0;
-        double maxWidth = NormalizeMaxWidth(snapshot.Paragraph.MaxWidth);
-        // Measured once per font rather than per tab: a deeply indented document would otherwise
-        // create a measurement context and re-measure a space for every tab character.
-        Dictionary<IFont, double>? spaceWidths = null;
-
-        while (index < clusters.Count)
-        {
-            int scan = index;
-            int lastBreak = -1;
-            double width = 0;
-            bool explicitBreak = false;
-
-            while (scan < clusters.Count)
-            {
-                var cluster = clusters[scan];
-                if (cluster.Kind == ManagedTextClusterKind.NewLine)
-                {
-                    explicitBreak = true;
-                    break;
-                }
-
-                double clusterWidth = cluster.Kind == ManagedTextClusterKind.Tab
-                    ? GetTabWidth(snapshot.Paragraph, width, GetSpaceWidth(context, cluster.Font, ref spaceWidths))
-                    : cluster.Width;
-                bool exceeds = snapshot.Paragraph.Wrapping != TextWrapping.NoWrap &&
-                               !double.IsPositiveInfinity(maxWidth) &&
-                               width + clusterWidth > maxWidth + WrapTolerance(maxWidth) &&
-                               scan > index;
-                if (exceeds)
-                {
-                    if (snapshot.Paragraph.Wrapping == TextWrapping.Wrap && lastBreak >= index)
-                    {
-                        scan = lastBreak + 1;
-                    }
-                    else if (snapshot.Paragraph.Wrapping == TextWrapping.WrapWithOverflow && lastBreak < index)
-                    {
-                        width += clusterWidth;
-                        scan++;
-                        continue;
-                    }
-
-                    break;
-                }
-
-                cluster.Width = clusterWidth;
-                width += clusterWidth;
-                if (cluster.IsBreakOpportunity(snapshot.Text))
-                {
-                    lastBreak = scan;
-                }
-                scan++;
-            }
-
-            int contentEnd = scan;
-            if (contentEnd == index && !explicitBreak && scan < clusters.Count)
-            {
-                contentEnd = ++scan;
-            }
-
-            var lineClusters = clusters.GetRange(index, contentEnd - index);
-            var line = CreateLine(
-                context, snapshot, lineClusters, y, explicitBreak ? clusters[scan].Length : 0, lineStart);
-            lines.Add(line);
-            // A tightening (negative) spacing may overlap lines but must never move the next line
-            // above the current one: line search by Y assumes monotonically increasing tops.
-            y = Math.Max(line.Metrics.Bounds.Y, line.Metrics.Bounds.Bottom + snapshot.Paragraph.LineSpacing);
-
-            if (explicitBreak)
-            {
-                lineStart = clusters[scan].End;
-                index = scan + 1;
-            }
-            else
-            {
-                lineStart = contentEnd < clusters.Count ? clusters[contentEnd].Start : snapshot.Text.Length;
-                index = contentEnd;
-            }
-        }
-
-        if (clusters.Count == 0 || clusters[^1].Kind == ManagedTextClusterKind.NewLine)
-        {
-            var font = GetFont(snapshot.DefaultStyle, snapshot.Dpi);
-            double fontHeight = GetFontLineHeight(context, font);
-            double height = ResolveLineHeight(snapshot.Paragraph, fontHeight, fontHeight);
-            lines.Add(new ManagedTextLine(
-                new TextLayoutLineMetrics(
-                    snapshot.Text.Length,
-                    0,
-                    0,
-                    new Rect(0, y, 0, height),
-                    ApplyHalfLeading(font.Ascent, height, font.Ascent + font.Descent)),
-                []));
-        }
-
-        return lines;
-    }
-
-    private ManagedTextLine CreateLine(
-        ITextBackendMeasurementContext context,
-        TextLayoutRequestSnapshot snapshot,
-        List<ManagedTextCluster> clusters,
-        double y,
-        int newLineLength,
-        int fallbackStart)
-    {
-        double width = clusters.Sum(static cluster => cluster.Width);
-        double naturalHeight = clusters.Count == 0
-            ? 0
-            : clusters.Max(static cluster => cluster.Height);
-        double baseline = clusters.Count == 0
-            ? 0
-            : clusters.Max(static cluster => cluster.Baseline);
-        var defaultFont = GetFont(snapshot.DefaultStyle, snapshot.Dpi);
-        double height = ResolveLineHeight(
-            snapshot.Paragraph, GetFontLineHeight(context, defaultFont), naturalHeight);
-        if (baseline <= 0)
-        {
-            baseline = defaultFont.Ascent;
-        }
-
-        // Measured against the fonts' own ascent and descent, not the cluster heights: a cluster's height
-        // already carries the font's line gap, so comparing with it would find nothing to split and leave
-        // that gap under the text.
-        double textHeight = clusters.Count == 0
-            ? defaultFont.Ascent + defaultFont.Descent
-            : clusters.Max(static cluster => cluster.Font.Ascent + cluster.Font.Descent);
-        baseline = ApplyHalfLeading(baseline, height, textHeight);
-
-        // Alignment ignores the space a wrap left at the end of the line, so right-aligned text ends
-        // flush with the edge instead of one space short of it.
-        (double trailingWhitespace, int trailingWhitespaceLength) = GetTrailingWhitespace(snapshot, clusters);
-        double x = ResolveLineX(snapshot.Paragraph, width - trailingWhitespace);
-        double cursor = x;
-        foreach (var cluster in clusters)
-        {
-            cluster.X = cursor;
-            cursor += cluster.Width;
-        }
-
-        int textStart = clusters.Count == 0 ? fallbackStart : clusters[0].Start;
-        int textLength = clusters.Count == 0 ? 0 : clusters[^1].End - textStart;
-        return new ManagedTextLine(
-            new TextLayoutLineMetrics(
-                textStart,
-                textLength,
-                newLineLength,
-                new Rect(x, y, width, height),
-                baseline,
-                trailingWhitespace,
-                trailingWhitespaceLength),
-            clusters);
-    }
-
     /// <summary>
     /// The height a line of this font takes. A run of glyphs reports the measured height, which
     /// some backends pad to whole device pixels above the design metrics; a line that renders no
@@ -576,14 +227,15 @@ internal sealed class ManagedTextEngine : ITextEngine, IDisposable
         return font;
     }
 
-    private static List<int> GetTextElementBoundaries(string text, int start, int end)
+    /// <summary>Writes the text element starts of the range into <paramref name="destination"/> and returns how many there were.</summary>
+    private static int GetTextElementBoundaries(string text, int start, int end, int[] destination)
     {
         if (start == end)
         {
-            return [];
+            return 0;
         }
 
-        var result = new List<int>();
+        int count = 0;
         var enumerator = StringInfo.GetTextElementEnumerator(text, start);
         while (enumerator.MoveNext())
         {
@@ -593,15 +245,16 @@ internal sealed class ManagedTextEngine : ITextEngine, IDisposable
                 break;
             }
 
+            // A CR LF pair is one break, so the LF does not start an element of its own.
             if (index > start && text[index - 1] == '\r' && text[index] == '\n')
             {
                 continue;
             }
 
-            result.Add(index);
+            destination[count++] = index;
         }
 
-        return result;
+        return count;
     }
 
     private static double NormalizeMaxWidth(double width)
@@ -635,31 +288,6 @@ internal sealed class ManagedTextEngine : ITextEngine, IDisposable
     /// character count is what column arithmetic needs, since a caller placing a selection works in
     /// columns and cannot divide a width back into characters.
     /// </summary>
-    private static (double Width, int Length) GetTrailingWhitespace(
-        TextLayoutRequestSnapshot snapshot,
-        List<ManagedTextCluster> clusters)
-    {
-        double width = 0;
-        int length = 0;
-        for (int index = clusters.Count - 1; index >= 0; index--)
-        {
-            var cluster = clusters[index];
-            if (cluster.Kind == ManagedTextClusterKind.NewLine)
-            {
-                continue;
-            }
-            if (cluster.Kind != ManagedTextClusterKind.Text ||
-                !IsWhitespaceRun(snapshot.Text, cluster.Start, cluster.Length))
-            {
-                break;
-            }
-
-            width += cluster.Width;
-            length += cluster.Length;
-        }
-        return (width, length);
-    }
-
     private static bool IsWhitespaceRun(string text, int start, int length)
     {
         for (int index = start; index < start + length; index++)
@@ -710,8 +338,31 @@ internal sealed class ManagedTextEngine : ITextEngine, IDisposable
     private static double ApplyHalfLeading(double baseline, double lineHeight, double textHeight)
         => baseline + (Math.Max(0, lineHeight - textHeight) / 2);
 
+    private double ResolveLineCapHeight(
+        ManagedTextLine line,
+        TextLayoutRequestSnapshot snapshot,
+        List<ManagedTextRun> runs)
+    {
+        double maxAscent = double.MinValue;
+        double capHeight = 0;
+        for (int index = 0; index < line.RunCount; index++)
+        {
+            var font = runs[line.RunStart + index].Font;
+            if (font.Ascent > maxAscent)
+            {
+                maxAscent = font.Ascent;
+                capHeight = font.CapHeight;
+            }
+        }
+
+        return line.RunCount > 0 ? capHeight : GetFont(snapshot.DefaultStyle, snapshot.Dpi).CapHeight;
+    }
+
     /// <summary>Trims the first line's box to its cap height and, when requested, the last line's bottom to its baseline.</summary>
-    private void ApplyLineBoxTrim(TextLayoutRequestSnapshot snapshot, List<ManagedTextLine> lines)
+    private void ApplyLineBoxTrim(
+        TextLayoutRequestSnapshot snapshot,
+        List<ManagedTextLine> lines,
+        List<ManagedTextRun> runs)
     {
         if (snapshot.Paragraph.LineBoxTrim == LineBoxTrim.None || lines.Count == 0)
         {
@@ -719,7 +370,7 @@ internal sealed class ManagedTextEngine : ITextEngine, IDisposable
         }
 
         var first = lines[0];
-        double topTrim = Math.Max(0, first.Metrics.Baseline - ResolveLineCapHeight(first, snapshot));
+        double topTrim = Math.Max(0, first.Metrics.Baseline - ResolveLineCapHeight(first, snapshot, runs));
         if (topTrim > 0)
         {
             first.TrimTop = topTrim;
@@ -755,142 +406,6 @@ internal sealed class ManagedTextEngine : ITextEngine, IDisposable
         }
     }
 
-    /// <summary>Cap height of the font that defines the line's baseline; the tallest ascent wins.</summary>
-    private double ResolveLineCapHeight(ManagedTextLine line, TextLayoutRequestSnapshot snapshot)
-    {
-        var clusters = line.Clusters;
-        if (clusters == null || clusters.Count == 0)
-        {
-            return GetFont(snapshot.DefaultStyle, snapshot.Dpi).CapHeight;
-        }
-
-        double maxAscent = double.MinValue;
-        double capHeight = 0;
-        foreach (var cluster in clusters)
-        {
-            if (cluster.Font.Ascent > maxAscent)
-            {
-                maxAscent = cluster.Font.Ascent;
-                capHeight = cluster.Font.CapHeight;
-            }
-        }
-        return capHeight;
-    }
-
-    /// <summary>
-    /// Applies character-ellipsis trimming, matching the legacy rasterizer rules: without wrapping
-    /// every line that overflows the width is trimmed, and with wrapping the lines past the height
-    /// are dropped and the last visible line always takes an ellipsis.
-    /// </summary>
-    private void ApplyTrimming(
-        ITextBackendMeasurementContext context,
-        TextLayoutRequestSnapshot snapshot,
-        List<ManagedTextLine> lines)
-    {
-        var paragraph = snapshot.Paragraph;
-        if (paragraph.Trimming != TextTrimming.CharacterEllipsis || lines.Count == 0)
-        {
-            return;
-        }
-
-        double maxWidth = NormalizeMaxWidth(paragraph.MaxWidth);
-        if (double.IsPositiveInfinity(maxWidth) || maxWidth <= 0)
-        {
-            return;
-        }
-
-        var defaultFont = GetFont(snapshot.DefaultStyle, snapshot.Dpi);
-        double ellipsisWidth = context.Measure(ELLIPSIS, defaultFont).Width;
-
-        if (paragraph.Wrapping == TextWrapping.NoWrap)
-        {
-            foreach (var line in lines)
-            {
-                if (line.Metrics.Bounds.Width > maxWidth)
-                {
-                    TrimLine(snapshot, line, maxWidth, ellipsisWidth, force: false);
-                }
-            }
-            return;
-        }
-
-        double maxHeight = paragraph.MaxHeight;
-        if (double.IsNaN(maxHeight) || double.IsPositiveInfinity(maxHeight) || maxHeight <= 0)
-        {
-            return;
-        }
-
-        int visibleCount = 0;
-        while (visibleCount < lines.Count && lines[visibleCount].Metrics.Bounds.Bottom <= maxHeight)
-        {
-            visibleCount++;
-        }
-        visibleCount = Math.Max(1, visibleCount);
-        if (visibleCount >= lines.Count)
-        {
-            return;
-        }
-
-        lines.RemoveRange(visibleCount, lines.Count - visibleCount);
-        TrimLine(snapshot, lines[^1], maxWidth, ellipsisWidth, force: true);
-    }
-
-    /// <summary>
-    /// Drops trailing clusters until the remaining content plus the ellipsis fits. <paramref name="force"/>
-    /// marks the line trimmed even when it already fits, which wrap overflow requires.
-    /// </summary>
-    private static void TrimLine(
-        TextLayoutRequestSnapshot snapshot,
-        ManagedTextLine line,
-        double maxWidth,
-        double ellipsisWidth,
-        bool force)
-    {
-        var clusters = line.Clusters;
-        if (clusters is null || clusters.Count == 0)
-        {
-            return;
-        }
-
-        double target = maxWidth - ellipsisWidth;
-        int keep = clusters.Count;
-        double width = clusters.Sum(static cluster => cluster.Width);
-        while (keep > 0 && width > target)
-        {
-            keep--;
-            width -= clusters[keep].Width;
-        }
-
-        if (keep == clusters.Count && !force)
-        {
-            return;
-        }
-
-        if (keep < clusters.Count)
-        {
-            clusters.RemoveRange(keep, clusters.Count - keep);
-        }
-
-        line.IsTrimmed = true;
-        var bounds = line.Metrics.Bounds;
-        double x = ResolveLineX(snapshot.Paragraph, width + ellipsisWidth);
-        double cursor = x;
-        foreach (var cluster in clusters)
-        {
-            cluster.X = cursor;
-            cursor += cluster.Width;
-        }
-
-        int textStart = clusters.Count == 0 ? line.Metrics.TextStart : clusters[0].Start;
-        int textLength = clusters.Count == 0 ? 0 : clusters[^1].End - textStart;
-        line.Metrics = new TextLayoutLineMetrics(
-            textStart,
-            textLength,
-            line.Metrics.NewLineLength,
-            new Rect(x, bounds.Y, width + ellipsisWidth, bounds.Height),
-            line.Metrics.Baseline);
-    }
-
     private static double GetSpaceWidth(ITextBackendMeasurementContext context, IFont font, ref Dictionary<IFont, double>? cache)
     {
         cache ??= [];
@@ -913,11 +428,12 @@ internal sealed class ManagedTextEngine : ITextEngine, IDisposable
     /// </summary>
     private static double GetTabWidth(TextParagraphStyle paragraph, double x, double spaceWidth)
     {
-        foreach (double stop in paragraph.TabStops)
+        var stops = paragraph.TabStops;
+        for (int index = 0; index < stops.Count; index++)
         {
-            if (stop > x)
+            if (stops[index] > x)
             {
-                return stop - x;
+                return stops[index] - x;
             }
         }
 
@@ -947,8 +463,8 @@ internal sealed class ManagedTextEngine : ITextEngine, IDisposable
 
 internal sealed class TextLayoutRequestSnapshot
 {
-    private string? _contentKey;
-    private string? _ownerKey;
+    private ulong? _contentKey;
+    private ulong? _ownerKey;
 
     private TextLayoutRequestSnapshot(
         string text,
@@ -981,9 +497,27 @@ internal sealed class TextLayoutRequestSnapshot
     public TextFidelity Fidelity { get; }
     public long Revision { get; }
     public bool Transient { get; }
-    public string ContentKey => _contentKey ??= CreateCacheKey(includeText: true);
-    public string OwnerKey => _ownerKey ??= CreateCacheKey(includeText: false);
-    internal bool HasMaterializedContentKey => _contentKey is not null;
+    /// <summary>64-bit hash of every layout input including the text; equal inputs hash equal, so a hit still needs <see cref="ContentEquals"/>.</summary>
+    public ulong ContentKey
+    {
+        get
+        {
+            _contentKey ??= CreateCacheKey(includeText: true);
+            return _contentKey.Value;
+        }
+    }
+
+    /// <summary>64-bit hash of every layout input except the text, for owner-keyed caching.</summary>
+    public ulong OwnerKey
+    {
+        get
+        {
+            _ownerKey ??= CreateCacheKey(includeText: false);
+            return _ownerKey.Value;
+        }
+    }
+
+    internal bool HasMaterializedContentKey => _contentKey.HasValue;
 
     public static TextLayoutRequestSnapshot Create(TextLayoutRequest request)
     {
@@ -1052,6 +586,23 @@ internal sealed class TextLayoutRequestSnapshot
             request.Transient);
     }
 
+    /// <summary>Index of the run that styles this position in <see cref="Runs"/>, or -1 for the default style.</summary>
+    public int GetStyleIndex(int textIndex)
+    {
+        for (int index = 0; index < Runs.Length; index++)
+        {
+            if (textIndex >= Runs[index].Start && textIndex < Runs[index].End)
+            {
+                return index;
+            }
+            if (Runs[index].Start > textIndex)
+            {
+                break;
+            }
+        }
+        return -1;
+    }
+
     public TextRunStyle GetStyle(int textIndex)
     {
         foreach (var run in Runs)
@@ -1086,47 +637,141 @@ internal sealed class TextLayoutRequestSnapshot
         return false;
     }
 
-    private string CreateCacheKey(bool includeText)
+    /// <summary>True when <paramref name="other"/> lays out the same text with the same inputs.</summary>
+    public bool ContentEquals(TextLayoutRequestSnapshot other)
+        => OwnerEquals(other) && string.Equals(Text, other.Text, StringComparison.Ordinal);
+
+    /// <summary>True when <paramref name="other"/> shares every layout input except the text itself.</summary>
+    public bool OwnerEquals(TextLayoutRequestSnapshot other)
     {
-        var builder = new StringBuilder(includeText ? Text.Length + 128 : 128);
-        if (includeText)
+        if (Dpi != other.Dpi ||
+            Fidelity != other.Fidelity ||
+            !DefaultStyle.Equals(other.DefaultStyle) ||
+            !ParagraphEquals(Paragraph, other.Paragraph) ||
+            !Runs.AsSpan().SequenceEqual(other.Runs) ||
+            Inlines.Length != other.Inlines.Length)
         {
-            builder.Append(Text);
+            return false;
         }
-        builder.Append('\u001f').Append(Dpi).Append('\u001f').Append((int)Fidelity)
-            .Append('\u001f').Append(Paragraph.MaxWidth.ToString("R", CultureInfo.InvariantCulture))
-            .Append('\u001f').Append(Paragraph.MaxHeight.ToString("R", CultureInfo.InvariantCulture))
-            .Append('\u001f').Append((int)Paragraph.Wrapping).Append('\u001f').Append((int)Paragraph.Trimming)
-            .Append('\u001f').Append((int)Paragraph.Alignment).Append('\u001f').Append((int)Paragraph.FlowDirection)
-            .Append('\u001f').Append(Paragraph.Culture.Name).Append('\u001f').Append(Paragraph.Language)
-            .Append('\u001f').Append(Paragraph.LineHeight?.ToString("R", CultureInfo.InvariantCulture))
-            .Append('\u001f').Append(Paragraph.LineSpacing.ToString("R", CultureInfo.InvariantCulture))
-            .Append('\u001f').Append(Paragraph.LetterSpacing.ToString("R", CultureInfo.InvariantCulture))
-            .Append('\u001f').Append((int)Paragraph.LineBoxTrim).Append(':').Append(Paragraph.TabSize);
-        AppendStyle(builder, DefaultStyle);
-        foreach (double tab in Paragraph.TabStops)
+
+        for (int index = 0; index < Inlines.Length; index++)
         {
-            builder.Append('\u001e').Append(tab.ToString("R", CultureInfo.InvariantCulture));
+            var inline = Inlines[index];
+            var otherInline = other.Inlines[index];
+            if (inline.Position != otherInline.Position ||
+                inline.Length != otherInline.Length ||
+                inline.BreaksLine != otherInline.BreaksLine ||
+                !ReferenceEquals(inline.Object, otherInline.Object))
+            {
+                return false;
+            }
         }
-        foreach (var run in Runs)
-        {
-            builder.Append('\u001d').Append(run.Start).Append(':').Append(run.Length);
-            AppendStyle(builder, run.Style);
-        }
-        foreach (var inline in Inlines)
-        {
-            builder.Append('\u001c').Append(inline.Position).Append(':').Append(inline.Length)
-                .Append(':').Append(RuntimeHelpers.GetHashCode(inline.Object));
-        }
-        return builder.ToString();
+
+        return true;
     }
 
-    private static void AppendStyle(StringBuilder builder, TextRunStyle style)
-        => builder.Append('\u001b').Append(style.FontFamily)
-            .Append(':').Append(style.FontSize.ToString("R", CultureInfo.InvariantCulture))
-            .Append(':').Append((int)style.Weight).Append(':').Append(style.Italic)
-            .Append(':').Append((int)style.Decoration).Append(':').Append(style.Culture?.Name)
-            .Append(':').Append(style.Language);
+    private static bool ParagraphEquals(TextParagraphStyle left, TextParagraphStyle right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        return left.MaxWidth.Equals(right.MaxWidth) &&
+            left.MaxHeight.Equals(right.MaxHeight) &&
+            left.Wrapping == right.Wrapping &&
+            left.Trimming == right.Trimming &&
+            left.Alignment == right.Alignment &&
+            left.FlowDirection == right.FlowDirection &&
+            string.Equals(left.Culture.Name, right.Culture.Name, StringComparison.Ordinal) &&
+            string.Equals(left.Language, right.Language, StringComparison.Ordinal) &&
+            Nullable.Equals(left.LineHeight, right.LineHeight) &&
+            left.LineSpacing.Equals(right.LineSpacing) &&
+            left.LetterSpacing.Equals(right.LetterSpacing) &&
+            left.LineBoxTrim == right.LineBoxTrim &&
+            left.TabSize == right.TabSize &&
+            TabStopsEqual(left.TabStops, right.TabStops);
+    }
+
+    private static bool TabStopsEqual(IReadOnlyList<double> left, IReadOnlyList<double> right)
+    {
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < left.Count; index++)
+        {
+            if (!left[index].Equals(right[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private ulong CreateCacheKey(bool includeText)
+    {
+        var hash = new RapidHashBuilder();
+        if (includeText)
+        {
+            hash.Add(Text.AsSpan());
+        }
+
+        hash.Add(Dpi);
+        hash.Add((int)Fidelity);
+        hash.Add(Paragraph.MaxWidth);
+        hash.Add(Paragraph.MaxHeight);
+        hash.Add((int)Paragraph.Wrapping);
+        hash.Add((int)Paragraph.Trimming);
+        hash.Add((int)Paragraph.Alignment);
+        hash.Add((int)Paragraph.FlowDirection);
+        hash.Add(Paragraph.Culture.Name);
+        hash.Add(Paragraph.Language);
+        hash.Add(Paragraph.LineHeight.HasValue);
+        hash.Add(Paragraph.LineHeight ?? 0);
+        hash.Add(Paragraph.LineSpacing);
+        hash.Add(Paragraph.LetterSpacing);
+        hash.Add((int)Paragraph.LineBoxTrim);
+        hash.Add(Paragraph.TabSize);
+        AddStyle(ref hash, DefaultStyle);
+        hash.Add(Paragraph.TabStops.Count);
+        foreach (double tab in Paragraph.TabStops)
+        {
+            hash.Add(tab);
+        }
+
+        hash.Add(Runs.Length);
+        foreach (var run in Runs)
+        {
+            hash.Add(run.Start);
+            hash.Add(run.Length);
+            AddStyle(ref hash, run.Style);
+        }
+
+        hash.Add(Inlines.Length);
+        foreach (var inline in Inlines)
+        {
+            hash.Add(inline.Position);
+            hash.Add(inline.Length);
+            hash.Add(inline.BreaksLine);
+            hash.Add(RuntimeHelpers.GetHashCode(inline.Object));
+        }
+
+        return hash.Hash;
+    }
+
+    private static void AddStyle(ref RapidHashBuilder hash, TextRunStyle style)
+    {
+        hash.Add(style.FontFamily);
+        hash.Add(style.FontSize);
+        hash.Add((int)style.Weight);
+        hash.Add(style.Italic);
+        hash.Add((int)style.Decoration);
+        hash.Add(style.Culture?.Name);
+        hash.Add(style.Language);
+    }
 
     private static void ValidateStyle(TextRunStyle style, string parameterName)
     {
@@ -1159,56 +804,48 @@ internal sealed class TextLayoutRequestSnapshot
     }
 }
 
-internal enum ManagedTextClusterKind { Text, Tab, NewLine, Inline }
-
-internal sealed class ManagedTextCluster(
-    int start,
-    int length,
-    double x,
-    double width,
-    double height,
-    double baseline,
-    TextRunStyle style,
-    IFont font,
-    IInlineTextObject? inline,
-    ManagedTextClusterKind kind,
-    bool breaksLine = false)
-{
-    public int Start { get; } = start;
-    public int Length { get; } = length;
-    public int End => checked(Start + Length);
-    public double X { get; set; } = x;
-    public double Width { get; set; } = width;
-    public double Height { get; set; } = height;
-    public double Baseline { get; } = baseline;
-    public TextRunStyle Style { get; } = style;
-    public IFont Font { get; } = font;
-    public IInlineTextObject? Inline { get; } = inline;
-    public ManagedTextClusterKind Kind { get; } = kind;
-
-    /// <summary>Set by an inline run that stands in for text a line may break after.</summary>
-    public bool BreaksLine { get; } = breaksLine;
-
-    public bool IsBreakOpportunity(string text)
-        => BreaksLine ||
-           (Kind == ManagedTextClusterKind.Text &&
-            Length > 0 &&
-            char.IsWhiteSpace(text, Start));
-}
-
 internal readonly record struct ManagedTextSegment(int Start, int Length, double X, double Width)
 {
     public int End => checked(Start + Length);
 }
 
+internal enum ManagedTextRunKind { Text, Tab, NewLine, Inline }
+
+/// <summary>
+/// One laid-out piece of a line: a stretch of text in a single style, or the single column a tab,
+/// a line break or an inline object occupies. A text run's columns are read from the layout's
+/// advance array between <see cref="AdvanceStart"/> and the run's length.
+/// </summary>
+internal struct ManagedTextRun
+{
+    public int TextStart;
+    public int TextLength;
+    public int StyleIndex;
+    public IFont Font;
+    public double X;
+    public double Width;
+    public int AdvanceStart;
+
+    /// <summary>Advance the run starts at, subtracted from every read so a split fragment still measures from its own left edge.</summary>
+    public float AdvanceBase;
+    public double MeasuredHeight;
+    public double Baseline;
+    public ManagedTextRunKind Kind;
+    public int InlineIndex;
+
+    public readonly int TextEnd => checked(TextStart + TextLength);
+}
+
 internal sealed class ManagedTextLine(
     TextLayoutLineMetrics metrics,
-    List<ManagedTextCluster>? clusters,
     IReadOnlyList<ManagedTextSegment>? fastSegments = null)
 {
     public TextLayoutLineMetrics Metrics { get; set; } = metrics;
-    public List<ManagedTextCluster>? Clusters { get; set; } = clusters;
     public IReadOnlyList<ManagedTextSegment>? FastSegments { get; } = fastSegments;
+
+    // Range in the layout's run array. Count is -1 until the runs for this line are built.
+    public int RunStart { get; set; }
+    public int RunCount { get; set; } = -1;
 
     /// <summary>True when trimming dropped trailing content and an ellipsis follows the clusters.</summary>
     public bool IsTrimmed { get; set; }
@@ -1224,8 +861,8 @@ internal sealed class ManagedTextLayoutCache : ITextLayoutCache, IDisposable
 {
     private const int ContentCapacity = 256;
     private readonly ManagedTextEngine _engine;
-    private readonly Dictionary<string, ManagedTextLayout> _content = [];
-    private readonly Queue<string> _contentOrder = [];
+    private readonly Dictionary<ulong, ManagedTextLayout> _content = [];
+    private readonly Queue<ulong> _contentOrder = [];
     private readonly ConditionalWeakTable<object, OwnerEntry> _owners = new();
     private int _ownerCount;
 
@@ -1238,12 +875,18 @@ internal sealed class ManagedTextLayoutCache : ITextLayoutCache, IDisposable
         TextLayoutCachePolicy policy,
         object? owner)
     {
+        if (policy == TextLayoutCachePolicy.None)
+        {
+            return _engine.CreateLayoutCore(snapshot);
+        }
+
         if (policy == TextLayoutCachePolicy.Owner)
         {
             ArgumentNullException.ThrowIfNull(owner);
             if (_owners.TryGetValue(owner, out var entry) &&
                 entry.Revision == snapshot.Revision &&
-                entry.OwnerKey == snapshot.OwnerKey)
+                entry.OwnerKey == snapshot.OwnerKey &&
+                entry.Layout.Snapshot.OwnerEquals(snapshot))
             {
                 return entry.Layout;
             }
@@ -1267,15 +910,24 @@ internal sealed class ManagedTextLayoutCache : ITextLayoutCache, IDisposable
         {
             throw new ArgumentException("Layouts containing inline objects require owner caching.", nameof(snapshot));
         }
-        if (_content.TryGetValue(snapshot.ContentKey, out var cached))
+        ulong contentKey = snapshot.ContentKey;
+        if (_content.TryGetValue(contentKey, out var cached))
         {
-            return cached;
+            if (cached.Snapshot.ContentEquals(snapshot))
+            {
+                return cached;
+            }
+
+            // Two different requests hashed alike: the newer one takes the slot.
+            var replacement = _engine.CreateLayoutCore(snapshot);
+            _content[contentKey] = replacement;
+            return replacement;
         }
 
         var created = _engine.CreateLayoutCore(snapshot);
-        _content.Add(snapshot.ContentKey, created);
-        _contentOrder.Enqueue(snapshot.ContentKey);
-        while (_content.Count > ContentCapacity && _contentOrder.TryDequeue(out string? oldest))
+        _content.Add(contentKey, created);
+        _contentOrder.Enqueue(contentKey);
+        while (_content.Count > ContentCapacity && _contentOrder.TryDequeue(out ulong oldest))
         {
             _content.Remove(oldest);
         }
@@ -1295,14 +947,16 @@ internal sealed class ManagedTextLayoutCache : ITextLayoutCache, IDisposable
     {
         _content.Clear();
         _contentOrder.Clear();
+        _owners.Clear();
+        _ownerCount = 0;
     }
 
     public void Dispose() => Trim();
 
-    private sealed class OwnerEntry(long revision, string ownerKey, ManagedTextLayout layout)
+    private sealed class OwnerEntry(long revision, ulong ownerKey, ManagedTextLayout layout)
     {
         public long Revision { get; set; } = revision;
-        public string OwnerKey { get; set; } = ownerKey;
+        public ulong OwnerKey { get; set; } = ownerKey;
         public ManagedTextLayout Layout { get; set; } = layout;
     }
 }

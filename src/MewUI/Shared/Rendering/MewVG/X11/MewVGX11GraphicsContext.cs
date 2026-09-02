@@ -48,13 +48,14 @@ internal sealed partial class MewVGX11GraphicsContext
         {
             _frameSession.BeginFrame();
 
+            _frameSession.PixelSurfaceTarget?.SetContentSize(_viewportWidthPx, _viewportHeightPx);
             GL.Viewport(0, 0, _viewportWidthPx, _viewportHeightPx);
 
             // Clear the window framebuffer for real. The public Clear(Color) is a NanoVG fill, which no-ops when
             // clearing to a transparent colour (alpha-blend with alpha=0) - so on a transparent window the GLX
             // back buffer (preserved across swaps on some drivers) accumulates previous frames and the alpha
-            // builds up. glClear zeroes the buffer incl. alpha; ColorMask is forced on first because NanoVG's
-            // stencil-fill pass can leave colormask=(F,F,F,F) (same fix as the offscreen PreparePixelSurface).
+            // builds up. glClear zeroes the buffer incl. alpha; ColorMask is forced on first because a flush
+            // can leave colormask=(F,F,F,F) (same fix as the offscreen PreparePixelSurface).
             OpenGLExt.BindFramebuffer(OpenGLExt.GL_FRAMEBUFFER, 0);
             GL.ColorMask(true, true, true, true);
             GL.ClearColor(0f, 0f, 0f, 0f);
@@ -182,6 +183,24 @@ internal sealed partial class MewVGX11GraphicsContext
         };
     }
 
+    // Set while a transient run is drawn: text that changes every frame goes through the cache's
+    // per-frame scratch textures instead of its keyed entries.
+    private bool _transientText;
+
+    public override void DrawBackendTextLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, BackendTextLayout layout, Color color, object? owner)
+    {
+        _transientText = ReferenceEquals(owner, Aprillz.MewUI.Text.TransientText.Owner);
+        try
+        {
+            DrawBackendTextLayout(text, format, layout, color);
+        }
+        finally
+        {
+            _transientText = false;
+        }
+    }
+
     public override void DrawBackendTextLayout(ReadOnlySpan<char> text,
         BackendTextFormat format, BackendTextLayout layout, Color color)
     {
@@ -208,12 +227,27 @@ internal sealed partial class MewVGX11GraphicsContext
         }
 
         // FreeType bakes alignment into the rasterized bitmap.
-        double drawX = _textPixelSnap
-            ? RenderingUtil.RoundToPixelInt(boundsPx.Left / DpiScale, DpiScale) / DpiScale
-            : boundsPx.Left / DpiScale;
-        double drawY = _textPixelSnap
-            ? RenderingUtil.RoundToPixelInt(boundsPx.Top / DpiScale, DpiScale) / DpiScale
-            : boundsPx.Top / DpiScale;
+        double drawX = boundsPx.Left / DpiScale;
+        double drawY = boundsPx.Top / DpiScale;
+        if (_textPixelSnap && _transform.M12 == 0f && _transform.M21 == 0f)
+        {
+            // Snapped on the DEVICE grid (translation included): a cache pass carries the capture
+            // translate, and snapping local coordinates would put its rows on a different grid
+            // than the window pass.
+            double worldX = bounds.X * _transform.M11 + _transform.M31;
+            double worldY = bounds.Y * _transform.M22 + _transform.M32;
+            double snappedX = RenderingUtil.RoundToPixelInt(worldX, DpiScale) / DpiScale;
+            double snappedY = RenderingUtil.RoundToPixelInt(worldY, DpiScale) / DpiScale;
+            if (_transform.M11 != 0f)
+            {
+                drawX = (snappedX - _transform.M31) / _transform.M11;
+            }
+
+            if (_transform.M22 != 0f)
+            {
+                drawY = (snappedY - _transform.M32) / _transform.M22;
+            }
+        }
         double widthDip = widthPx / DpiScale;
         double heightDip = heightPx / DpiScale;
 
@@ -230,7 +264,22 @@ internal sealed partial class MewVGX11GraphicsContext
             (int)format.Wrapping,
             (int)format.Trimming));
 
-        if (!_textCache.TryGet(key, text, out var entry))
+        MewVGTextEntry entry;
+        if (_transientText)
+        {
+            var bmp = FreeTypeText.Rasterize(
+                text,
+                ftFont,
+                widthPx,
+                heightPx,
+                color,
+                format.HorizontalAlignment,
+                format.VerticalAlignment,
+                format.Wrapping,
+                format.Trimming);
+            entry = _textCache.UseTransient(bmp.Data.AsSpan(0, bmp.WidthPx * bmp.HeightPx * 4), bmp.WidthPx, bmp.HeightPx, linear: false);
+        }
+        else if (!_textCache.TryGet(key, text, out entry))
         {
             var bmp = FreeTypeText.Rasterize(
                 text,
@@ -259,9 +308,10 @@ internal sealed partial class MewVGX11GraphicsContext
     public override void DrawImage(IImage image, Point location)
     {
         ArgumentNullException.ThrowIfNull(image);
-
+        // Size from the logical image: a pooled surface behind it can be larger than the
+        // content, and the backend image reports that whole allocation.
         var dest = new Rect(location.X, location.Y, image.PixelWidth, image.PixelHeight);
-        DrawImageCore(image, dest);
+        DrawImageCore(ImageResource.ResolveBackendImage(image), dest, new Rect(0, 0, dest.Width, dest.Height));
     }
 
     protected override void DrawImageCore(IImage image, Rect destRect)
@@ -294,7 +344,7 @@ internal sealed partial class MewVGX11GraphicsContext
             return;
         }
 
-        DrawImagePattern(imageId, destRect, alpha: 1f, sourceRect: null, vgImage.PixelWidth, vgImage.PixelHeight);
+        DrawImagePattern(imageId, destRect, alpha: 1f, AdjustSourceRectForContent(vgImage, null), vgImage.PixelWidth, vgImage.PixelHeight);
     }
 
     protected override void DrawImageCore(IImage image, Rect destRect, Rect sourceRect)
@@ -327,7 +377,32 @@ internal sealed partial class MewVGX11GraphicsContext
             return;
         }
 
-        DrawImagePattern(imageId, destRect, alpha: 1f, sourceRect: sourceRect, vgImage.PixelWidth, vgImage.PixelHeight);
+        DrawImagePattern(imageId, destRect, alpha: 1f, AdjustSourceRectForContent(vgImage, sourceRect), vgImage.PixelWidth, vgImage.PixelHeight);
+    }
+
+    /// <summary>
+    /// Maps a content-space source rect to the sampled image space of a pooled FBO surface.
+    /// </summary>
+    private static Rect? AdjustSourceRectForContent(MewVGImage vgImage, Rect? sourceRect)
+    {
+        if (vgImage.Source is not OpenGLPixelRenderSurface surface || !surface.IsFboInitialized)
+        {
+            return sourceRect;
+        }
+
+        int contentWidth = surface.ContentWidthPx;
+        int contentHeight = surface.ContentHeightPx;
+        int offsetY = surface.PixelHeight - contentHeight;
+        if (offsetY == 0 && contentWidth == surface.PixelWidth)
+        {
+            return sourceRect;
+        }
+
+        // FlipY sampling anchors the FBO's rendered content at the bottom of the image space,
+        // so on a pooled allocation taller than the content the crop must shift down by the
+        // unrendered band or it samples cleared texels above the content.
+        var src = sourceRect ?? new Rect(0, 0, contentWidth, contentHeight);
+        return new Rect(src.X, src.Y + offsetY, src.Width, src.Height);
     }
 
     private bool IsExternalRasterLeaseCompatible(IExternalRasterLease lease)
@@ -406,6 +481,7 @@ internal sealed partial class MewVGX11GraphicsContext
         NanoVGGL Vg { get; }
         MewVGTextCache TextCache { get; }
         nint OpenGLShareGroup { get; }
+        OpenGLPixelRenderSurface? PixelSurfaceTarget { get; }
         void BeginFrame();
         void BindFrameTarget();
         void EndFrame();
@@ -432,6 +508,8 @@ internal sealed partial class MewVGX11GraphicsContext
         public MewVGTextCache TextCache => _resources.TextCache;
 
         public nint OpenGLShareGroup => _resources.OpenGLShareGroup;
+
+        public OpenGLPixelRenderSurface? PixelSurfaceTarget => null;
 
         public void SetTarget(nint display, nint window, bool preferImmediatePresent)
         {
@@ -500,6 +578,8 @@ internal sealed partial class MewVGX11GraphicsContext
 
         public nint OpenGLShareGroup => _pixelSurface.CreationContext;
 
+        public OpenGLPixelRenderSurface? PixelSurfaceTarget => _pixelSurface;
+
         public void BeginFrame()
         {
             _offscreenProvider.EnterSession();
@@ -549,22 +629,13 @@ internal sealed partial class MewVGX11GraphicsContext
 
         OpenGLExt.BindFramebuffer(OpenGLExt.GL_FRAMEBUFFER, pixelSurface.Fbo);
 
-        // Force colormask + stencil mask to "all writes enabled" before clear. NanoVG's
-        // path-fill flush sets colormask=(F,F,F,F) for the stencil-marking pass; if its
-        // restore at flush end is incomplete, the next glClear leaves alpha untouched
-        // (= undefined / 0xFF on a fresh texture), producing opaque-black filter
-        // results in transparent regions. See Win32 PreparePixelSurface.
+        // Force colormask to "all writes enabled" before clear: if a flush leaves color
+        // writes masked, the next glClear leaves alpha untouched (= undefined / 0xFF on a
+        // fresh texture), producing opaque-black filter results in transparent regions.
+        // See Win32 PreparePixelSurface.
         GL.ColorMask(true, true, true, true);
         GL.ClearColor(0f, 0f, 0f, 0f);
 
-        uint clearMask = GL.GL_COLOR_BUFFER_BIT;
-        if (pixelSurface.HasStencil)
-        {
-            GL.StencilMask(0xFF);
-            GL.ClearStencil(0);
-            clearMask |= GL.GL_STENCIL_BUFFER_BIT;
-        }
-
-        GL.Clear(clearMask);
+        GL.Clear(GL.GL_COLOR_BUFFER_BIT);
     }
 }

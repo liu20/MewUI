@@ -26,16 +26,6 @@ public sealed partial class ItemsControl : ScrollableItemsBase
     // Presenter mode is determined by the IItemsPresenter instance set via SetPresenter().
 
     /// <summary>
-    /// Gets the current vertical scroll offset in DIPs.
-    /// </summary>
-    public double VerticalOffset => _scrollViewer.VerticalOffset;
-
-    /// <summary>
-    /// Gets the current horizontal scroll offset in DIPs.
-    /// </summary>
-    public double HorizontalOffset => _scrollViewer.HorizontalOffset;
-
-    /// <summary>
     /// Gets or sets the items data source.
     /// </summary>
     public IItemsView ItemsSource
@@ -110,10 +100,12 @@ public sealed partial class ItemsControl : ScrollableItemsBase
         {
             ArgumentNullException.ThrowIfNull(value);
             _itemTemplate = value;
-            _presenter.ItemTemplate = value;
+            _presenter.ItemTemplate = WrapItemTemplate(value);
             InvalidateItemBindings();
         }
     }
+
+    private protected override void ReapplyItemTemplate() => _presenter.ItemTemplate = WrapItemTemplate(_itemTemplate);
 
     public ItemsControl()
     {
@@ -429,6 +421,23 @@ public sealed partial class ItemsControl : ScrollableItemsBase
         base.OnDispose();
     }
 
+    /// <summary>
+    /// Returns the current presenter when it is already of the requested kind, installing a new one
+    /// otherwise. Reuse is what lets a presenter option change at runtime without the swap dropping
+    /// measured heights and jumping the scroll position.
+    /// </summary>
+    internal TPresenter EnsurePresenter<TPresenter>() where TPresenter : class, IItemsPresenter, new()
+    {
+        if (_presenter is TPresenter existing)
+        {
+            return existing;
+        }
+
+        var created = new TPresenter();
+        SetPresenter(created);
+        return created;
+    }
+
     internal void SetPresenter(IItemsPresenter presenter)
     {
         double oldX = _scrollViewer.HorizontalOffset;
@@ -466,7 +475,7 @@ public sealed partial class ItemsControl : ScrollableItemsBase
     private void InitializePresenter(IItemsPresenter presenter)
     {
         presenter.ItemsSource = _itemsSource;
-        presenter.ItemTemplate = _itemTemplate;
+        presenter.ItemTemplate = WrapItemTemplate(_itemTemplate);
         presenter.BeforeItemRender = OnBeforeItemRender;
         presenter.ItemPadding = ItemPadding;
         presenter.ItemBindingGeneration = ItemBindingGeneration;

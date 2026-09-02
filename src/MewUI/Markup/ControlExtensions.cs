@@ -166,40 +166,40 @@ public static class ControlExtensions
     /// <summary>
     /// Sets the tooltip text.
     /// </summary>
-    /// <typeparam name="T">Control type.</typeparam>
-    /// <param name="control">Target control.</param>
+    /// <typeparam name="T">Element type.</typeparam>
+    /// <param name="element">Target element.</param>
     /// <param name="text">Tooltip text.</param>
-    /// <returns>The control for chaining.</returns>
-    public static T ToolTip<T>(this T control, string? text) where T : Control
+    /// <returns>The element for chaining.</returns>
+    public static T ToolTip<T>(this T element, string? text) where T : FrameworkElement
     {
-        control.ToolTip = string.IsNullOrEmpty(text) ? null : new TextBlock { Text = text };
-        return control;
+        element.ToolTip = string.IsNullOrEmpty(text) ? null : new TextBlock { Text = text };
+        return element;
     }
 
     /// <summary>
     /// Sets the tooltip content.
     /// </summary>
-    /// <typeparam name="T">Control type.</typeparam>
-    /// <param name="control">Target control.</param>
+    /// <typeparam name="T">Element type.</typeparam>
+    /// <param name="element">Target element.</param>
     /// <param name="content">Tooltip content.</param>
-    /// <returns>The control for chaining.</returns>
-    public static T ToolTip<T>(this T control, Element? content) where T : Control
+    /// <returns>The element for chaining.</returns>
+    public static T ToolTip<T>(this T element, Element? content) where T : FrameworkElement
     {
-        control.ToolTip = content;
-        return control;
+        element.ToolTip = content;
+        return element;
     }
 
     /// <summary>
     /// Sets the context menu.
     /// </summary>
-    /// <typeparam name="T">Control type.</typeparam>
-    /// <param name="control">Target control.</param>
+    /// <typeparam name="T">Element type.</typeparam>
+    /// <param name="element">Target element.</param>
     /// <param name="menu">Context menu.</param>
-    /// <returns>The control for chaining.</returns>
-    public static T ContextMenu<T>(this T control, ContextMenu? menu) where T : Control
+    /// <returns>The element for chaining.</returns>
+    public static T ContextMenu<T>(this T element, ContextMenu? menu) where T : FrameworkElement
     {
-        control.ContextMenu = menu;
-        return control;
+        element.ContextMenu = menu;
+        return element;
     }
 
     #endregion
@@ -1444,6 +1444,20 @@ public static class ControlExtensions
     }
 
     /// <summary>
+    /// Sets what the control builds a tooltip from when it has no tooltip of its own.
+    /// </summary>
+    /// <param name="control">Target command source.</param>
+    /// <param name="mode">Parts of the command to build from.</param>
+    /// <returns>The control for chaining.</returns>
+    public static T CommandToolTipMode<T>(this T control, CommandToolTipMode mode)
+        where T : CommandSourceControl
+    {
+        ArgumentNullException.ThrowIfNull(control);
+        control.CommandToolTipMode = mode;
+        return control;
+    }
+
+    /// <summary>
     /// Binds the button's semantic command to an observable value.
     /// </summary>
     public static T BindCommand<T>(
@@ -1468,6 +1482,19 @@ public static class ControlExtensions
     public static T OnClick<T>(this T button, Action handler) where T : Button
     {
         button.Click += handler;
+        return button;
+    }
+
+    /// <summary>
+    /// Sets the predicate asked whether the button can be clicked.
+    /// </summary>
+    /// <param name="button">Target button.</param>
+    /// <param name="predicate">Predicate, or null to ask nothing.</param>
+    /// <returns>The button for chaining.</returns>
+    public static T OnCanClick<T>(this T button, Func<bool>? predicate) where T : Button
+    {
+        ArgumentNullException.ThrowIfNull(button);
+        button.CanClick = predicate;
         return button;
     }
 
@@ -2535,6 +2562,8 @@ public static class ControlExtensions
     /// <param name="listBox">Target list box.</param>
     /// <param name="itemsSource">Legacy items source.</param>
     /// <returns>The list box for chaining.</returns>
+    [Obsolete("Use the ItemsView.Create overload instead. A legacy ItemsSource reports a snapshot "
+        + "only, so items added or removed after this call are not reflected.")]
     public static ListBox ItemsSource(this ListBox listBox, ItemsSource itemsSource)
     {
         ArgumentNullException.ThrowIfNull(listBox);
@@ -2638,6 +2667,47 @@ public static class ControlExtensions
         Action<FrameworkElement, TItem, int, TemplateContext> bind,
         Action<FrameworkElement, TItem, int, TemplateContext>? unbind = null)
         => ItemTemplate(listBox, new DelegateTemplate<TItem>(build, bind, unbind));
+
+    /// <summary>
+    /// Configures the container of each item once its content is bound, so behavior can be attached
+    /// to the whole item rather than to the template. Registering a hook wraps each item in an
+    /// <see cref="ItemContainer"/>; without one no wrapper is created.
+    /// </summary>
+    /// <remarks>
+    /// The callback runs on every bind, which includes scrolling an item back into view, so keep it
+    /// cheap. Register event subscriptions through the supplied context and they are removed before
+    /// the next item is bound; properties assigned directly are reset by the framework instead.
+    /// </remarks>
+    /// <typeparam name="T">Item type.</typeparam>
+    /// <param name="listBox">Target list box.</param>
+    /// <param name="prepare">Container configuration callback.</param>
+    /// <returns>The list box for chaining.</returns>
+    public static ListBox PrepareContainer<T>(this ListBox listBox, PrepareContainerHandler<ItemContainer, T> prepare)
+    {
+        ArgumentNullException.ThrowIfNull(listBox);
+        ArgumentNullException.ThrowIfNull(prepare);
+
+        listBox.SetPrepareContainer((container, item, index, context) => prepare(container, (T)item!, index, context));
+        return listBox;
+    }
+
+    /// <summary>
+    /// Releases what <see cref="PrepareContainer{T}(ListBox, PrepareContainerHandler{ItemContainer, T})"/>
+    /// attached outside the template context, before the container takes another item. Most hooks
+    /// need no counterpart: context subscriptions and container properties are undone for you.
+    /// </summary>
+    /// <typeparam name="T">Item type.</typeparam>
+    /// <param name="listBox">Target list box.</param>
+    /// <param name="clear">Container release callback.</param>
+    /// <returns>The list box for chaining.</returns>
+    public static ListBox ClearContainer<T>(this ListBox listBox, PrepareContainerHandler<ItemContainer, T> clear)
+    {
+        ArgumentNullException.ThrowIfNull(listBox);
+        ArgumentNullException.ThrowIfNull(clear);
+
+        listBox.SetClearContainer((container, item, index, context) => clear(container, (T)item!, index, context));
+        return listBox;
+    }
 
     /// <summary>
     /// Uses fixed-height row virtualization with theme default item height.
@@ -3255,6 +3325,21 @@ public static class ControlExtensions
     #region ItemsControl
 
     /// <summary>
+    /// Adds a scroll state change handler. The scroll offsets settle during layout, so this is what
+    /// to use instead of reading them right after mutating the items.
+    /// </summary>
+    /// <typeparam name="T">Scrollable items control type.</typeparam>
+    /// <param name="control">Target items control.</param>
+    /// <param name="handler">Event handler.</param>
+    /// <returns>The control for chaining.</returns>
+    public static T OnScrollChanged<T>(this T control, Action handler) where T : ScrollableItemsBase
+    {
+        ArgumentNullException.ThrowIfNull(control);
+        control.ScrollChanged += handler;
+        return control;
+    }
+
+    /// <summary>
     /// Sets the items source.
     /// </summary>
     /// <param name="itemsControl">Target items control.</param>
@@ -3273,6 +3358,8 @@ public static class ControlExtensions
     /// <param name="itemsControl">Target items control.</param>
     /// <param name="itemsSource">Legacy items source.</param>
     /// <returns>The items control for chaining.</returns>
+    [Obsolete("Use the ItemsView.Create overload instead. A legacy ItemsSource reports a snapshot "
+        + "only, so items added or removed after this call are not reflected.")]
     public static ItemsControl ItemsSource(this ItemsControl itemsControl, ItemsSource itemsSource)
     {
         ArgumentNullException.ThrowIfNull(itemsControl);
@@ -3322,6 +3409,40 @@ public static class ControlExtensions
     }
 
     /// <summary>
+    /// Configures the container of each item once its content is bound. Registering a hook wraps
+    /// each item in an <see cref="ItemContainer"/>; without one no wrapper is created.
+    /// </summary>
+    /// <typeparam name="T">Item type.</typeparam>
+    /// <param name="itemsControl">Target items control.</param>
+    /// <param name="prepare">Container configuration callback.</param>
+    /// <returns>The items control for chaining.</returns>
+    public static ItemsControl PrepareContainer<T>(this ItemsControl itemsControl, PrepareContainerHandler<ItemContainer, T> prepare)
+    {
+        ArgumentNullException.ThrowIfNull(itemsControl);
+        ArgumentNullException.ThrowIfNull(prepare);
+
+        itemsControl.SetPrepareContainer((container, item, index, context) => prepare(container, (T)item!, index, context));
+        return itemsControl;
+    }
+
+    /// <summary>
+    /// Releases what <see cref="PrepareContainer{T}(ItemsControl, PrepareContainerHandler{ItemContainer, T})"/>
+    /// attached outside the template context, before the container takes another item.
+    /// </summary>
+    /// <typeparam name="T">Item type.</typeparam>
+    /// <param name="itemsControl">Target items control.</param>
+    /// <param name="clear">Container release callback.</param>
+    /// <returns>The items control for chaining.</returns>
+    public static ItemsControl ClearContainer<T>(this ItemsControl itemsControl, PrepareContainerHandler<ItemContainer, T> clear)
+    {
+        ArgumentNullException.ThrowIfNull(itemsControl);
+        ArgumentNullException.ThrowIfNull(clear);
+
+        itemsControl.SetClearContainer((container, item, index, context) => clear(container, (T)item!, index, context));
+        return itemsControl;
+    }
+
+    /// <summary>
     /// Sets the item height.
     /// </summary>
     /// <param name="itemsControl">Target items control.</param>
@@ -3352,7 +3473,19 @@ public static class ControlExtensions
     /// <returns>The items control for chaining.</returns>
     public static ItemsControl FixedHeightPresenter(this ItemsControl itemsControl)
     {
-        itemsControl.SetPresenter(new FixedHeightItemsPresenter());
+        itemsControl.EnsurePresenter<FixedHeightItemsPresenter>().Anchor = ItemsAnchor.Top;
+        return itemsControl;
+    }
+
+    /// <summary>
+    /// Uses fixed-height row virtualization anchored to the given viewport edge.
+    /// </summary>
+    /// <param name="itemsControl">Target items control.</param>
+    /// <param name="anchor">Viewport edge the item content rests against and follows.</param>
+    /// <returns>The items control for chaining.</returns>
+    public static ItemsControl FixedHeightPresenter(this ItemsControl itemsControl, ItemsAnchor anchor)
+    {
+        itemsControl.EnsurePresenter<FixedHeightItemsPresenter>().Anchor = anchor;
         return itemsControl;
     }
 
@@ -3364,7 +3497,22 @@ public static class ControlExtensions
     /// <returns>The items control for chaining.</returns>
     public static ItemsControl FixedHeightPresenter(this ItemsControl itemsControl, double itemHeight)
     {
-        itemsControl.SetPresenter(new FixedHeightItemsPresenter { ItemHeight = itemHeight });
+        itemsControl.EnsurePresenter<FixedHeightItemsPresenter>().ItemHeight = itemHeight;
+        return itemsControl;
+    }
+
+    /// <summary>
+    /// Uses fixed-height row virtualization with explicit item height, anchored to the given viewport edge.
+    /// </summary>
+    /// <param name="itemsControl">Target items control.</param>
+    /// <param name="itemHeight">Fixed item height.</param>
+    /// <param name="anchor">Viewport edge the item content rests against and follows.</param>
+    /// <returns>The items control for chaining.</returns>
+    public static ItemsControl FixedHeightPresenter(this ItemsControl itemsControl, double itemHeight, ItemsAnchor anchor)
+    {
+        var fixedPresenter = itemsControl.EnsurePresenter<FixedHeightItemsPresenter>();
+        fixedPresenter.ItemHeight = itemHeight;
+        fixedPresenter.Anchor = anchor;
         return itemsControl;
     }
 
@@ -3375,7 +3523,19 @@ public static class ControlExtensions
     /// <returns>The items control for chaining.</returns>
     public static ItemsControl VariableHeightPresenter(this ItemsControl itemsControl)
     {
-        itemsControl.SetPresenter(new VariableHeightItemsPresenter());
+        itemsControl.EnsurePresenter<VariableHeightItemsPresenter>().Anchor = ItemsAnchor.Top;
+        return itemsControl;
+    }
+
+    /// <summary>
+    /// Uses variable-height virtualization anchored to the given viewport edge.
+    /// </summary>
+    /// <param name="itemsControl">Target items control.</param>
+    /// <param name="anchor">Viewport edge the item content rests against and follows.</param>
+    /// <returns>The items control for chaining.</returns>
+    public static ItemsControl VariableHeightPresenter(this ItemsControl itemsControl, ItemsAnchor anchor)
+    {
+        itemsControl.EnsurePresenter<VariableHeightItemsPresenter>().Anchor = anchor;
         return itemsControl;
     }
 
@@ -3386,7 +3546,19 @@ public static class ControlExtensions
     /// <returns>The items control for chaining.</returns>
     public static ItemsControl StackPresenter(this ItemsControl itemsControl)
     {
-        itemsControl.SetPresenter(new StackItemsPresenter());
+        itemsControl.EnsurePresenter<StackItemsPresenter>().Anchor = ItemsAnchor.Top;
+        return itemsControl;
+    }
+
+    /// <summary>
+    /// Uses non-virtualizing stack layout anchored to the given viewport edge.
+    /// </summary>
+    /// <param name="itemsControl">Target items control.</param>
+    /// <param name="anchor">Viewport edge the item content rests against.</param>
+    /// <returns>The items control for chaining.</returns>
+    public static ItemsControl StackPresenter(this ItemsControl itemsControl, ItemsAnchor anchor)
+    {
+        itemsControl.EnsurePresenter<StackItemsPresenter>().Anchor = anchor;
         return itemsControl;
     }
 
@@ -3399,13 +3571,55 @@ public static class ControlExtensions
     /// <returns>The items control for chaining.</returns>
     public static ItemsControl WrapPresenter(this ItemsControl itemsControl, double itemWidth, double itemHeight)
     {
-        itemsControl.SetPresenter(new WrapItemsPresenter { ItemWidth = itemWidth, ItemHeight = itemHeight });
+        var wrapPresenter = itemsControl.EnsurePresenter<WrapItemsPresenter>();
+        wrapPresenter.ItemWidth = itemWidth;
+        wrapPresenter.ItemHeight = itemHeight;
         return itemsControl;
     }
 
     #endregion
 
     #region GridView presenters
+
+    /// <summary>
+    /// Configures each row once its cells are bound, so behavior can be attached to the whole row
+    /// instead of being repeated in every cell template. The row is the container the grid already
+    /// realizes, so no extra element is created.
+    /// </summary>
+    /// <remarks>
+    /// The callback runs on every bind, which includes scrolling a row back into view, so keep it
+    /// cheap. Register event subscriptions through the supplied context and they are removed before
+    /// the next item is bound; properties assigned directly are reset by the framework instead.
+    /// </remarks>
+    /// <typeparam name="T">Item type.</typeparam>
+    /// <param name="grid">Target grid view.</param>
+    /// <param name="prepare">Row configuration callback.</param>
+    /// <returns>The grid view for chaining.</returns>
+    public static GridView PrepareContainer<T>(this GridView grid, PrepareContainerHandler<GridViewRow, T> prepare)
+    {
+        ArgumentNullException.ThrowIfNull(grid);
+        ArgumentNullException.ThrowIfNull(prepare);
+
+        grid.SetPrepareRow((row, item, index, context) => prepare(row, (T)item!, index, context));
+        return grid;
+    }
+
+    /// <summary>
+    /// Releases what <see cref="PrepareContainer{T}(GridView, PrepareContainerHandler{GridViewRow, T})"/>
+    /// attached outside the template context, before the row takes another item.
+    /// </summary>
+    /// <typeparam name="T">Item type.</typeparam>
+    /// <param name="grid">Target grid view.</param>
+    /// <param name="clear">Row release callback.</param>
+    /// <returns>The grid view for chaining.</returns>
+    public static GridView ClearContainer<T>(this GridView grid, PrepareContainerHandler<GridViewRow, T> clear)
+    {
+        ArgumentNullException.ThrowIfNull(grid);
+        ArgumentNullException.ThrowIfNull(clear);
+
+        grid.SetClearRow((row, item, index, context) => clear(row, (T)item!, index, context));
+        return grid;
+    }
 
     /// <summary>
     /// Uses fixed-height row virtualization (default). Rows assume <see cref="GridView.RowHeight"/>
@@ -3887,6 +4101,8 @@ public static class ControlExtensions
     /// <param name="comboBox">Target combo box.</param>
     /// <param name="itemsSource">Legacy items source.</param>
     /// <returns>The combo box for chaining.</returns>
+    [Obsolete("Use the ItemsView.Create overload instead. A legacy ItemsSource reports a snapshot "
+        + "only, so items added or removed after this call are not reflected.")]
     public static ComboBox ItemsSource(this ComboBox comboBox, ItemsSource itemsSource)
     {
         ArgumentNullException.ThrowIfNull(comboBox);

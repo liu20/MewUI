@@ -5,7 +5,7 @@ using BitMiracle.LibJpeg.Classic;
 
 namespace Aprillz.MewUI.Resources;
 
-internal sealed class JpegDecoder : IImageDecoder, IByteArrayImageDecoder
+internal sealed class JpegDecoder : IImageDecoder, IByteArrayImageDecoder, IImageMetadataDecoder, ITargetSizeImageDecoder
 {
     public string Id => "jpeg";
 
@@ -14,6 +14,68 @@ internal sealed class JpegDecoder : IImageDecoder, IByteArrayImageDecoder
 
     public ImageOrientation ReadOrientation(ReadOnlySpan<byte> encoded) =>
         ExifOrientationReader.ReadJpegOrientation(encoded);
+
+    public bool TryReadMetadata(ReadOnlySpan<byte> encoded, out ImageMetadata metadata)
+    {
+        metadata = default;
+        if (!CanDecode(encoded))
+        {
+            return false;
+        }
+
+        int offset = 2;
+        while (offset < encoded.Length)
+        {
+            while (offset < encoded.Length && encoded[offset] == 0xFF)
+            {
+                offset++;
+            }
+            if (offset >= encoded.Length)
+            {
+                return false;
+            }
+
+            byte marker = encoded[offset++];
+            if (marker == 0xD9 || marker == 0xDA)
+            {
+                return false;
+            }
+            if (marker == 0x01 || marker is >= 0xD0 and <= 0xD7)
+            {
+                continue;
+            }
+            if (offset > encoded.Length - 2)
+            {
+                return false;
+            }
+
+            int segmentLength = (encoded[offset] << 8) | encoded[offset + 1];
+            if (segmentLength < 2 || offset > encoded.Length - segmentLength)
+            {
+                return false;
+            }
+
+            if (IsStartOfFrame(marker) && segmentLength >= 7)
+            {
+                int height = (encoded[offset + 3] << 8) | encoded[offset + 4];
+                int width = (encoded[offset + 5] << 8) | encoded[offset + 6];
+                if (!ImageMetadataValidation.IsValidSize(width, height))
+                {
+                    return false;
+                }
+
+                metadata = new ImageMetadata(width, height, ReadOrientation(encoded), HasAlpha: false);
+                return true;
+            }
+
+            offset += segmentLength;
+        }
+
+        return false;
+    }
+
+    private static bool IsStartOfFrame(byte marker)
+        => marker is >= 0xC0 and <= 0xCF && marker is not 0xC4 and not 0xC8 and not 0xCC;
 
     public bool TryDecode(ReadOnlySpan<byte> encoded, out Bgra32PixelBuffer bitmap)
     {
@@ -29,6 +91,12 @@ internal sealed class JpegDecoder : IImageDecoder, IByteArrayImageDecoder
     }
 
     public bool TryDecode(byte[] encoded, out Bgra32PixelBuffer bitmap)
+        => TryDecodeCore(encoded, targetPixelWidth: 0, targetPixelHeight: 0, out bitmap);
+
+    public bool TryDecode(byte[] encoded, int targetPixelWidth, int targetPixelHeight, out Bgra32PixelBuffer bitmap)
+        => TryDecodeCore(encoded, targetPixelWidth, targetPixelHeight, out bitmap);
+
+    private bool TryDecodeCore(byte[] encoded, int targetPixelWidth, int targetPixelHeight, out Bgra32PixelBuffer bitmap)
     {
         bitmap = default;
 
@@ -44,6 +112,14 @@ internal sealed class JpegDecoder : IImageDecoder, IByteArrayImageDecoder
             using var ms = new MemoryStream(encoded, 0, encoded.Length, writable: false, publiclyVisible: true);
             cinfo.jpeg_stdio_src(ms);
             cinfo.jpeg_read_header(true);
+
+            int scaleDenominator = SelectScaleDenominator(
+                cinfo.Image_width,
+                cinfo.Image_height,
+                targetPixelWidth,
+                targetPixelHeight);
+            cinfo.Scale_num = 1;
+            cinfo.Scale_denom = scaleDenominator;
 
             // Always request RGB output. This avoids having to support CMYK/YCbCr/etc here.
             cinfo.Out_color_space = J_COLOR_SPACE.JCS_RGB;
@@ -124,6 +200,29 @@ internal sealed class JpegDecoder : IImageDecoder, IByteArrayImageDecoder
 
             try { cinfo.jpeg_destroy(); } catch { }
         }
+    }
+
+    internal static int SelectScaleDenominator(int width, int height, int targetWidth, int targetHeight)
+    {
+        if (targetWidth <= 0 || targetHeight <= 0)
+        {
+            return 1;
+        }
+
+        int[] denominators = [8, 4, 2];
+        double targetScale = Math.Min((double)targetWidth / width, (double)targetHeight / height);
+        foreach (int denominator in denominators)
+        {
+            int scaledWidth = (width + denominator - 1) / denominator;
+            int scaledHeight = (height + denominator - 1) / denominator;
+            double nativeScale = Math.Min((double)scaledWidth / width, (double)scaledHeight / height);
+            if (nativeScale + 1e-9 >= targetScale)
+            {
+                return denominator;
+            }
+        }
+
+        return 1;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

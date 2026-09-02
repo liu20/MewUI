@@ -475,13 +475,7 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
         // Release cached geometries eagerly rather than waiting on GC to run each entry's
         // finalizer - this context (and the table) may not be collected for a while after
         // Dispose.
-        foreach (var pair in _geometryCache)
-        {
-            var entry = pair.Value;
-            if (entry.NonZeroHandle != 0) { ComHelpers.Release(entry.NonZeroHandle); entry.NonZeroHandle = 0; }
-            if (entry.EvenOddHandle != 0) { ComHelpers.Release(entry.EvenOddHandle); entry.EvenOddHandle = 0; }
-        }
-        _geometryCache.Clear();
+        ClearGeometryCache();
 
         if (_deviceContext != 0)
         {
@@ -524,7 +518,9 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
         try
         {
             nint brush = GetSolidBrush(color);
-            float stroke = QuantizeStrokeDip((float)thickness);
+            // Path strokes keep their exact width (see the MewVG backend note);
+            // quantization stays on the UI primitives only.
+            float stroke = (float)thickness;
             D2D1VTable.DrawGeometry((ID2D1RenderTarget*)_renderTarget, geometry, brush, stroke, _defaultStrokeStyle);
         }
         finally
@@ -761,7 +757,7 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
             return;
         }
 
-        float stroke = QuantizeStrokeDip((float)pen.Thickness);
+        float stroke = (float)pen.Thickness;
         nint ssHandle = _ownerFactory.GetOrCreateStrokeStyle(pen.StrokeStyle);
 
         nint geometry = BuildD2DPathGeometry(path, FillRule.NonZero, out bool ownsGeometry);
@@ -1126,8 +1122,13 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
     public override Size MeasureText(ReadOnlySpan<char> text, IFont font, double maxWidth)
         => MeasureTextDirect(text, font, maxWidth);
 
-    public override void DrawImage(IImage image, Point location) =>
-        DrawImageCore(image, new Rect(location.X, location.Y, image.PixelWidth, image.PixelHeight));
+    public override void DrawImage(IImage image, Point location)
+    {
+        // Size from the logical image: a pooled surface behind it can be larger than the
+        // content, and the backend image reports that whole allocation.
+        var bounds = new Rect(location.X, location.Y, image.PixelWidth, image.PixelHeight);
+        DrawImageCore(ImageResource.ResolveBackendImage(image), bounds, new Rect(0, 0, bounds.Width, bounds.Height));
+    }
 
     protected override void SaveCore()
         => _states.Push((_transform, _globalAlpha, _clipStack.Count, _clipBoundsWorld, _textPixelSnap));
@@ -1548,15 +1549,85 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
     {
         public nint NonZeroHandle;
         public nint EvenOddHandle;
+        public long AccountedBytes;
+        public long LastUse;
 
         ~GeometryCacheEntry()
         {
             if (NonZeroHandle != 0) ComHelpers.Release(NonZeroHandle);
             if (EvenOddHandle != 0) ComHelpers.Release(EvenOddHandle);
+            long bytes = Interlocked.Exchange(ref AccountedBytes, 0);
+            if (bytes != 0)
+            {
+                RenderResourceMetrics.GeometryCacheBytesChanged(-bytes);
+            }
         }
     }
 
     private readonly ConditionalWeakTable<PathGeometry, GeometryCacheEntry> _geometryCache = new();
+
+    // Budget for cached ID2D1PathGeometry objects. Keys live as long as their PathGeometry, so a
+    // document holding thousands of frozen paths (an icon list) would otherwise pin an unbounded
+    // number of native geometry objects. COM object sizes are opaque; the accounting approximates
+    // them from the command count, which tracks the segment data D2D stores.
+    private const long GEOMETRY_CACHE_BUDGET_BYTES = 32L * 1024 * 1024;
+    private const long GEOMETRY_BYTES_PER_COMMAND = 64;
+    private long _geometryCacheBytes;
+    private long _geometryCacheStamp;
+
+    private void ClearGeometryCache()
+    {
+        foreach (var pair in _geometryCache)
+        {
+            var entry = pair.Value;
+            if (entry.NonZeroHandle != 0) { ComHelpers.Release(entry.NonZeroHandle); entry.NonZeroHandle = 0; }
+            if (entry.EvenOddHandle != 0) { ComHelpers.Release(entry.EvenOddHandle); entry.EvenOddHandle = 0; }
+            long bytes = Interlocked.Exchange(ref entry.AccountedBytes, 0);
+            if (bytes != 0)
+            {
+                RenderResourceMetrics.GeometryCacheBytesChanged(-bytes);
+            }
+        }
+        _geometryCache.Clear();
+        _geometryCacheBytes = 0;
+    }
+
+    // Evicts least-recently-used cached geometries until the estimate is back under budget. An
+    // evicted path rebuilds its ID2D1PathGeometry on the next draw. Handles are released here and
+    // zeroed so the entry's finalizer stays a no-op.
+    private void EvictGeometryCacheOverBudget(GeometryCacheEntry keep)
+    {
+        if (_geometryCacheBytes <= GEOMETRY_CACHE_BUDGET_BYTES)
+        {
+            return;
+        }
+
+        var candidates = new List<KeyValuePair<PathGeometry, GeometryCacheEntry>>();
+        foreach (var pair in _geometryCache)
+        {
+            if (!ReferenceEquals(pair.Value, keep))
+            {
+                candidates.Add(pair);
+            }
+        }
+        candidates.Sort(static (a, b) => a.Value.LastUse.CompareTo(b.Value.LastUse));
+
+        foreach (var victim in candidates)
+        {
+            if (_geometryCacheBytes <= GEOMETRY_CACHE_BUDGET_BYTES)
+            {
+                break;
+            }
+
+            var entry = victim.Value;
+            if (entry.NonZeroHandle != 0) { ComHelpers.Release(entry.NonZeroHandle); entry.NonZeroHandle = 0; }
+            if (entry.EvenOddHandle != 0) { ComHelpers.Release(entry.EvenOddHandle); entry.EvenOddHandle = 0; }
+            _geometryCacheBytes -= entry.AccountedBytes;
+            RenderResourceMetrics.GeometryCacheBytesChanged(-entry.AccountedBytes);
+            entry.AccountedBytes = 0;
+            _geometryCache.Remove(victim.Key);
+        }
+    }
 
     /// <summary>Builds (or reuses, for frozen paths) the native geometry for <paramref name="path"/>.
     /// <paramref name="ownsGeometry"/> is <see langword="true"/> when the caller is responsible
@@ -1578,12 +1649,14 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
     private nint GetOrBuildCachedGeometry(PathGeometry path, FillRule fillRule)
     {
         var entry = _geometryCache.GetValue(path, static _ => new GeometryCacheEntry());
+        entry.LastUse = ++_geometryCacheStamp;
 
         if (fillRule == FillRule.EvenOdd)
         {
             if (entry.EvenOddHandle == 0)
             {
                 entry.EvenOddHandle = BuildD2DPathGeometryCore(path, fillRule);
+                AccountBuiltGeometry(entry, path);
             }
             return entry.EvenOddHandle;
         }
@@ -1591,8 +1664,18 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
         if (entry.NonZeroHandle == 0)
         {
             entry.NonZeroHandle = BuildD2DPathGeometryCore(path, fillRule);
+            AccountBuiltGeometry(entry, path);
         }
         return entry.NonZeroHandle;
+    }
+
+    private void AccountBuiltGeometry(GeometryCacheEntry entry, PathGeometry path)
+    {
+        long bytes = Math.Max(1, path.Commands.Length) * GEOMETRY_BYTES_PER_COMMAND;
+        entry.AccountedBytes += bytes;
+        _geometryCacheBytes += bytes;
+        RenderResourceMetrics.GeometryCacheBytesChanged(bytes);
+        EvictGeometryCacheOverBudget(entry);
     }
 
     private nint BuildD2DPathGeometryCore(PathGeometry path, FillRule fillRule = FillRule.NonZero)
@@ -1826,7 +1909,11 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
             return;
         }
 
-        DrawImageBitmapCore(image.GetOrCreateBitmap(_renderTarget, _renderTargetGeneration, _deviceContext), destRect, sourceRect);
+        DrawImageBitmapCore(
+            image.GetOrCreateBitmap(_renderTarget, _renderTargetGeneration, _deviceContext),
+            destRect,
+            sourceRect,
+            image.DpiScale);
     }
 
     // One entry per open scope so End undoes exactly what its Begin did; 0 means the scope pushed
@@ -1992,7 +2079,7 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
     private bool IsUnscaledAxisAligned()
         => _transform.M12 == 0f && _transform.M21 == 0f && _transform.M11 == 1f && _transform.M22 == 1f;
 
-    private void DrawImageBitmapCore(nint bmp, Rect destRect, Rect sourceRect)
+    private void DrawImageBitmapCore(nint bmp, Rect destRect, Rect sourceRect, double sourceScale = 1.0)
     {
         if (_renderTarget == 0)
         {
@@ -2032,11 +2119,15 @@ internal sealed unsafe class Direct2DGraphicsContext : GraphicsContextBase
             snappedWorldDest.Height);
 
         var dst = ToRectF(snappedLocalDest);
+        // DrawBitmap takes the source rectangle in the bitmap's own DIPs. Callers pass pixels, which
+        // only coincide for 96-DPI bitmaps; a DXGI bridge bitmap carries its surface's DPI, and on a
+        // scaled monitor an unconverted rectangle sampled past the content into a pooled surface's
+        // stale band, squashing cached elements vertically after a shrink.
         var src = new D2D1_RECT_F(
-            left: (float)sourceRect.X,
-            top: (float)sourceRect.Y,
-            right: (float)sourceRect.Right,
-            bottom: (float)sourceRect.Bottom);
+            left: (float)(sourceRect.X / sourceScale),
+            top: (float)(sourceRect.Y / sourceScale),
+            right: (float)(sourceRect.Right / sourceScale),
+            bottom: (float)(sourceRect.Bottom / sourceScale));
 
         // When the active target is a DeviceContext, use the DrawBitmap overload
         // that supports the full D2D1_INTERPOLATION_MODE enum.

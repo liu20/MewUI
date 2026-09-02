@@ -15,7 +15,17 @@ public abstract partial class SvgTextBase
     {
         get
         {
-            var path = Path(null) ?? new PathGeometry();
+            // Accumulate into a fresh geometry: Path(null) returns the element's
+            // cached path, which render freezes for the backend fill cache, and
+            // appending children into it would also corrupt the cache on every
+            // Bounds call.
+            var path = new PathGeometry();
+            var ownPath = Path(null);
+            if (ownPath is { IsEmpty: false })
+            {
+                path.AddPath(ownPath);
+            }
+
             foreach (var elem in Children.OfType<SvgVisualElement>())
             {
                 if (elem is SvgTextSpan span && string.IsNullOrWhiteSpace(span.Text))
@@ -75,6 +85,9 @@ public abstract partial class SvgTextBase
             {
                 _pathBuiltWithRenderer = false;
                 var factory = Application.Current?.GraphicsFactory ?? Application.DefaultGraphicsFactory;
+                // Bounds is reached from the layout pass, outside any render pass, and OpenGL
+                // backends cannot create an offscreen surface without a context on this thread.
+                using var renderScope = factory.AcquireBackgroundRenderScope();
                 using var surface = factory.CreateSurface(RenderSurfaceDescriptor.CachedImage(1, 1, 1));
                 using var context = factory.CreateContext(surface);
                 using var tempRenderer = new MewSvgRenderer(factory, context);

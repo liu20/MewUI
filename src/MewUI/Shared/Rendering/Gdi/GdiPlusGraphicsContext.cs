@@ -98,6 +98,9 @@ internal sealed class GdiPlusGraphicsContext : GraphicsContextBase
         WindowRenderResources.ReleaseAll();
     }
 
+    internal static void TrimWindowResourceCaches()
+        => WindowRenderResources.TrimAll();
+
     internal GdiPlusGraphicsContext(
         nint hwnd,
         nint hdc,
@@ -1239,6 +1242,23 @@ internal sealed class GdiPlusGraphicsContext : GraphicsContextBase
         };
     }
 
+    // Set while a transient run is drawn: text that changes every frame bypasses the text cache.
+    private bool _transientText;
+
+    public override void DrawBackendTextLayout(ReadOnlySpan<char> text,
+        BackendTextFormat format, BackendTextLayout layout, Color color, object? owner)
+    {
+        _transientText = ReferenceEquals(owner, Aprillz.MewUI.Text.TransientText.Owner);
+        try
+        {
+            DrawBackendTextLayout(text, format, layout, color);
+        }
+        finally
+        {
+            _transientText = false;
+        }
+    }
+
     public override unsafe void DrawBackendTextLayout(ReadOnlySpan<char> text,
         BackendTextFormat format, BackendTextLayout layout, Color color)
     {
@@ -1289,7 +1309,7 @@ internal sealed class GdiPlusGraphicsContext : GraphicsContextBase
                     out textHeightPx);
             }
 
-            if (_textCache != null)
+            if (_textCache != null && !_transientText)
             {
                 _textCache.DrawCached(
                     Hdc, text, r, gdiFont, color, gdiFormat, yOffsetPx, textHeightPx,
@@ -1643,12 +1663,15 @@ internal sealed class GdiPlusGraphicsContext : GraphicsContextBase
 
     public override void DrawImage(IImage image, Point location)
     {
-        if (image is not GdiImage gdiImage)
+        // Size from the logical image: a pooled surface behind it can be larger than the
+        // content, and the backend image reports that whole allocation.
+        var dest = new Rect(location.X, location.Y, image.PixelWidth, image.PixelHeight);
+        if (ImageResource.ResolveBackendImage(image) is not GdiImage gdiImage)
         {
             throw new ArgumentException("Image must be a GdiImage", nameof(image));
         }
 
-        DrawImage(gdiImage, new Rect(location.X, location.Y, image.PixelWidth, image.PixelHeight));
+        DrawImageCore(gdiImage, dest, new Rect(0, 0, dest.Width, dest.Height));
     }
 
     protected override void DrawImageCore(IImage image, Rect destRect)
@@ -1720,8 +1743,18 @@ internal sealed class GdiPlusGraphicsContext : GraphicsContextBase
             ? (_imageScaleQuality == ImageScaleQuality.Default ? ImageScaleQuality.Normal : _imageScaleQuality)
             : ImageScaleQuality;
 
-        var memDc = Gdi32.CreateCompatibleDC(Hdc);
-        var oldBitmap = Gdi32.SelectObject(memDc, gdiImage.Handle);
+        nint borrowedDc = gdiImage.BorrowedDc;
+        nint memDc;
+        nint oldBitmap = 0;
+        if (borrowedDc != 0)
+        {
+            memDc = borrowedDc;
+        }
+        else
+        {
+            memDc = Gdi32.CreateCompatibleDC(Hdc);
+            oldBitmap = Gdi32.SelectObject(memDc, gdiImage.Handle);
+        }
 
         try
         {
@@ -1868,8 +1901,11 @@ internal sealed class GdiPlusGraphicsContext : GraphicsContextBase
         }
         finally
         {
-            Gdi32.SelectObject(memDc, oldBitmap);
-            Gdi32.DeleteDC(memDc);
+            if (borrowedDc == 0)
+            {
+                Gdi32.SelectObject(memDc, oldBitmap);
+                Gdi32.DeleteDC(memDc);
+            }
         }
     }
 
@@ -2726,6 +2762,14 @@ internal sealed class GdiPlusGraphicsContext : GraphicsContextBase
             Cache.Clear();
         }
 
+        public static void TrimAll()
+        {
+            foreach (var resources in Cache.Values)
+            {
+                resources.Trim();
+            }
+        }
+
         public AaSurfacePool SurfacePool { get; } = new();
 
         public GdiPlusResourceCache PenBrushCache { get; } = new();
@@ -2735,6 +2779,13 @@ internal sealed class GdiPlusGraphicsContext : GraphicsContextBase
         private WindowRenderResources()
         {
             TextCache = new GdiTextCache(SurfacePool);
+        }
+
+        public void Trim()
+        {
+            TextCache.Clear();
+            PenBrushCache.Clear();
+            SurfacePool.Clear();
         }
 
         public void Dispose()

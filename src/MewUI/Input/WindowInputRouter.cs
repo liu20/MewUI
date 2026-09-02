@@ -96,6 +96,21 @@ internal static class WindowInputRouter
         bool middleDown,
         int clickCount,
         ModifierKeys modifiers = ModifierKeys.None)
+        => MouseButton(window, positionInWindow, screenPosition, button, isDown, leftDown, rightDown, middleDown,
+            clickCount, modifiers, PointerType.Mouse);
+
+    internal static void MouseButton(
+        Window window,
+        Point positionInWindow,
+        Point screenPosition,
+        MouseButton button,
+        bool isDown,
+        bool leftDown,
+        bool rightDown,
+        bool middleDown,
+        int clickCount,
+        ModifierKeys modifiers,
+        PointerType pointerType)
     {
         positionInWindow = window.SurfacePointToVisualTree(positionInWindow);
         window.UpdateLastMousePosition(positionInWindow, screenPosition);
@@ -131,6 +146,7 @@ internal static class WindowInputRouter
         {
             OriginalSource = element,
             Source = element,
+            PointerType = pointerType,
         };
         if (isDown)
         {
@@ -219,22 +235,45 @@ internal static class WindowInputRouter
         bool rightDown = false,
         bool middleDown = false,
         ModifierKeys modifiers = ModifierKeys.None)
+        => MouseWheel(window, positionInWindow, screenPosition, delta, leftDown, rightDown, middleDown, modifiers,
+            routeFrom: null);
+
+    /// <summary>
+    /// Routes wheel movement, starting the bubble at <paramref name="routeFrom"/> instead of the element
+    /// under the point, and returns the element that handled it.
+    /// </summary>
+    internal static UIElement? MouseWheel(
+        Window window,
+        Point positionInWindow,
+        Point screenPosition,
+        Vector delta,
+        bool leftDown,
+        bool rightDown,
+        bool middleDown,
+        ModifierKeys modifiers,
+        UIElement? routeFrom)
     {
         positionInWindow = window.SurfacePointToVisualTree(positionInWindow);
         window.UpdateLastMousePosition(positionInWindow, screenPosition);
 
-        var element = window.HitTest(positionInWindow);
+        var element = routeFrom ?? window.HitTest(positionInWindow);
         var args = new MouseWheelEventArgs(positionInWindow, screenPosition, delta, leftDown, rightDown, middleDown, modifiers)
         {
             OriginalSource = element,
             Source = element,
         };
 
-        for (var current = element; current != null && !args.Handled; current = GetInputBubbleParent(window, current))
+        for (var current = element; current != null; current = GetInputBubbleParent(window, current))
         {
             args.Source = current;
             current.RaiseMouseWheel(args);
+            if (args.Handled)
+            {
+                return current;
+            }
         }
+
+        return null;
     }
 
     /// <summary>
@@ -249,6 +288,10 @@ internal static class WindowInputRouter
             args.Handled = true;
             return;
         }
+
+        // A dialog living in this window's surface is not the routed window, so it would never see
+        // the preview it relies on for Escape and default-button handling.
+        window.ActiveInSurfaceDialog?.RaisePreviewKeyDown(args);
 
         for (var current = ResolveKeyRoutingStart(window); current != null && !args.Handled; current = GetInputBubbleParent(window, current))
         {

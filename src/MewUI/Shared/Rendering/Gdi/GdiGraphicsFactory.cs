@@ -13,7 +13,8 @@ namespace Aprillz.MewUI.Rendering.Gdi;
 /// <summary>
 /// GDI+ graphics factory implementation.
 /// </summary>
-public sealed class GdiGraphicsFactory : IGraphicsFactory, ITextBackendFactory, IRenderDevice, IWindowResourceReleaser, IWindowSurfacePresenter, IDisposable
+public sealed class GdiGraphicsFactory : IGraphicsFactory, ITextBackendFactory, IRenderDevice, IWindowResourceReleaser, IWindowSurfacePresenter,
+    IBackendRenderCacheMaintenance, IDisposable
 {
     public const string BackendIdentifier = "Gdi";
 
@@ -24,6 +25,9 @@ public sealed class GdiGraphicsFactory : IGraphicsFactory, ITextBackendFactory, 
     internal GdiGraphicsFactory() { }
 
     private readonly RenderResourceCache _renderResourceCache = new();
+    private readonly ulong _renderDeviceId = RenderDeviceIdentity.AllocateDeviceId();
+
+    public RenderDeviceIdentity RenderIdentity => new(_renderDeviceId, 0);
 
     public bool IsDoubleBuffered { get; set; } = true;
 
@@ -99,6 +103,11 @@ public sealed class GdiGraphicsFactory : IGraphicsFactory, ITextBackendFactory, 
     {
         ArgumentNullException.ThrowIfNull(target);
 
+        if (target is IRenderSurface surface)
+        {
+            target = RenderSurfaceResource.ResolveBackendSurface(surface);
+        }
+
         if (target is WindowRenderTarget windowTarget)
         {
             if (windowTarget.Surface is not IWin32HdcWindowSurface win32Surface ||
@@ -162,16 +171,25 @@ public sealed class GdiGraphicsFactory : IGraphicsFactory, ITextBackendFactory, 
             descriptor.RequiredCapabilities.HasFlag(SurfaceCapabilities.Alpha));
 
     public IGraphicsContext CreateContext(IRenderSurface surface)
-        => surface.Capabilities.HasFlag(SurfaceCapabilities.Renderable)
+    {
+        surface = RenderSurfaceResource.ResolveBackendSurface(surface);
+        return surface.Capabilities.HasFlag(SurfaceCapabilities.Renderable)
             ? CreateContext((IRenderTarget)surface)
             : throw new NotSupportedException(
                 $"{GetType().Name} can only create contexts for renderable surfaces.");
+    }
 
     public IImage CreateImageView(IRenderSurface surface)
-        => surface is IPixelBufferSource pixelSource
+    {
+        int logicalWidth = surface.PixelWidth;
+        int logicalHeight = surface.PixelHeight;
+        surface = RenderSurfaceResource.ResolveBackendSurface(surface);
+        var image = surface is IPixelBufferSource pixelSource
             ? CreateImageView(pixelSource)
             : throw new NotSupportedException(
                 $"{GetType().Name} can only create image views for pixel-backed surfaces.");
+        return ImageResource.WrapLogical(image, logicalWidth, logicalHeight);
+    }
 
     public IImage CreateImageView(IPixelBufferSource source)
         => new GdiImage(source);
@@ -204,8 +222,23 @@ public sealed class GdiGraphicsFactory : IGraphicsFactory, ITextBackendFactory, 
 
     public IRenderOperation FlushAsyncWork() => RenderOperation.Completed;
 
+    void IBackendRenderCacheMaintenance.TrimBackendCaches(RenderCacheTrimReason reason)
+        => GdiPlusGraphicsContext.TrimWindowResourceCaches();
+
+    void IBackendRenderCacheMaintenance.MaintainBackendCaches(RenderCacheMaintenanceMode mode)
+    {
+        if (mode is RenderCacheMaintenanceMode.MemoryPressure
+            or RenderCacheMaintenanceMode.WindowClosed
+            or RenderCacheMaintenanceMode.DeviceLost
+            or RenderCacheMaintenanceMode.Shutdown)
+        {
+            GdiPlusGraphicsContext.TrimWindowResourceCaches();
+        }
+    }
+
     public void Dispose()
     {
+        ImageSource.RetireRealizationsForFactory(this);
         TextServices.ReleaseIfCreated(this);
         _renderResourceCache.Dispose();
 

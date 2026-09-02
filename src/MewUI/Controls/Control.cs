@@ -43,12 +43,6 @@ public abstract partial class Control : TextElement
     public static readonly MewProperty<Thickness> PaddingProperty =
         MewProperty<Thickness>.Register<Control>(nameof(Padding), default, MewPropertyOptions.AffectsLayout);
 
-    public static readonly MewProperty<Element?> ToolTipProperty =
-        MewProperty<Element?>.Register<Control>(nameof(ToolTip), null, MewPropertyOptions.None);
-
-    public static readonly MewProperty<ContextMenu?> ContextMenuProperty =
-        MewProperty<ContextMenu?>.Register<Control>(nameof(ContextMenu), null, MewPropertyOptions.None);
-
     private static readonly MewPropertyKey<bool> IsPressedPropertyKey =
         MewProperty<bool>.RegisterReadOnly<Control>(nameof(IsPressed), false,
             MewPropertyOptions.AffectsRender | MewPropertyOptions.AffectsVisualState);
@@ -85,8 +79,6 @@ public abstract partial class Control : TextElement
 
     #endregion
 
-    private Point _lastMousePositionInWindow;
-
     // VisualState system fields
     private VisualState _visualState;
 
@@ -105,25 +97,6 @@ public abstract partial class Control : TextElement
 
     private PathGeometry? _sharedOuterPath;
     private PathGeometry? _sharedInnerPath;
-
-    /// <summary>
-    /// Gets or sets the tooltip element for this control.
-    /// Use the <c>ToolTip(string)</c> extension method for simple text tooltips.
-    /// </summary>
-    public Element? ToolTip
-    {
-        get => GetValue(ToolTipProperty);
-        set => SetValue(ToolTipProperty, value);
-    }
-
-    /// <summary>
-    /// Gets or sets the context menu for this control.
-    /// </summary>
-    public ContextMenu? ContextMenu
-    {
-        get => GetValue(ContextMenuProperty);
-        set => SetValue(ContextMenuProperty, value);
-    }
 
     /// <summary>
     /// Gets or sets the background color.
@@ -1038,7 +1011,8 @@ public abstract partial class Control : TextElement
     protected Size MeasureEngineText(
         ReadOnlySpan<char> text,
         double maxWidth = double.PositiveInfinity,
-        TextWrapping wrapping = TextWrapping.NoWrap)
+        TextWrapping wrapping = TextWrapping.NoWrap,
+        bool transient = false)
     {
         if (text.IsEmpty)
         {
@@ -1047,7 +1021,7 @@ public abstract partial class Control : TextElement
 
         var style = GetTextRunStyle();
         return TextLayoutOperations.Measure(
-            GetGraphicsFactory(), text.ToString(), GetDpi(), in style, maxWidth, wrapping);
+            GetGraphicsFactory(), text.ToString(), GetDpi(), in style, maxWidth, wrapping, transient);
     }
 
     protected void DrawEngineText(
@@ -1059,7 +1033,8 @@ public abstract partial class Control : TextElement
         TextAlignment verticalAlignment = TextAlignment.Top,
         TextWrapping wrapping = TextWrapping.NoWrap,
         TextTrimming trimming = TextTrimming.None,
-        object? owner = null)
+        object? owner = null,
+        bool transient = false)
     {
         if (text.IsEmpty || bounds.Width <= 0 || bounds.Height <= 0)
         {
@@ -1076,9 +1051,10 @@ public abstract partial class Control : TextElement
             bounds.Height,
             wrapping,
             trimming,
-            horizontalAlignment);
+            horizontalAlignment,
+            transient: transient);
         TextLayoutOperations.DrawInBounds(
-            context, layout, bounds, color, verticalAlignment, owner ?? this);
+            context, layout, bounds, color, verticalAlignment, owner ?? this, transient: transient);
     }
 
     protected override void OnDpiChanged(uint oldDpi, uint newDpi)
@@ -1266,13 +1242,28 @@ public abstract partial class Control : TextElement
 
         if (background.A > 0)
         {
-            if (radius > 0)
+            // The background stops at the stroke's centre line, the way WPF draws its simple
+            // border: filled to the outer contour it would sit under the stroke's outer
+            // antialiased fringe and bleed past the border.
+            var backgroundBounds = bounds;
+            double backgroundRadius = radius;
+            if (borderThickness > 0 && borderBrush.A > 0)
             {
-                context.FillRoundedRectangle(bounds, radius, radius, background);
+                double inset = borderThickness / 2;
+                backgroundBounds = bounds.Inflate(-inset, -inset);
+                backgroundRadius = Math.Max(0, radius - inset);
             }
-            else
+
+            if (backgroundBounds.Width > 0 && backgroundBounds.Height > 0)
             {
-                context.FillRectangle(bounds, background);
+                if (backgroundRadius > 0)
+                {
+                    context.FillRoundedRectangle(backgroundBounds, backgroundRadius, backgroundRadius, background);
+                }
+                else
+                {
+                    context.FillRectangle(backgroundBounds, background);
+                }
             }
         }
 
@@ -1318,128 +1309,6 @@ public abstract partial class Control : TextElement
                 context.FillPath(innerPath, background);
             }
         }
-    }
-
-    protected override void OnMouseEnter()
-    {
-        base.OnMouseEnter();
-        ShowToolTip();
-    }
-
-    protected override void OnMouseLeave()
-    {
-        base.OnMouseLeave();
-        HideToolTip();
-    }
-
-    protected override void OnMouseMove(MouseEventArgs e)
-    {
-        base.OnMouseMove(e);
-        _lastMousePositionInWindow = e.Position;
-    }
-
-    protected override void OnMouseDown(MouseEventArgs e)
-    {
-        base.OnMouseDown(e);
-
-        HideToolTip();
-
-        if (e.Handled)
-        {
-            return;
-        }
-
-        if (e.Button == MouseButton.Right && ContextMenu != null)
-        {
-            ContextMenu.ShowAt(this, e.Position);
-            e.Handled = true;
-        }
-    }
-
-    protected override void OnKeyDown(KeyEventArgs e)
-    {
-        base.OnKeyDown(e);
-
-        if (e.Handled)
-        {
-            return;
-        }
-
-        // Hide tooltips on keyboard interaction.
-        HideToolTip();
-    }
-
-    protected override void OnDispose()
-    {
-        base.OnDispose();
-
-        HideToolTip();
-    }
-
-    private void ShowToolTip()
-    {
-        if (!IsMouseOver)
-        {
-            return;
-        }
-
-        if (ToolTip == null)
-        {
-            return;
-        }
-
-        var root = FindVisualRoot();
-        if (root is not Window window)
-        {
-            return;
-        }
-
-        var anchor = window.LastMousePositionDip;
-        if (anchor.X == 0 && anchor.Y == 0)
-        {
-            anchor = _lastMousePositionInWindow;
-        }
-        if (anchor.X == 0 && anchor.Y == 0 && Bounds.Width > 0 && Bounds.Height > 0)
-        {
-            anchor = new Point(Bounds.X + Bounds.Width / 2, Bounds.Bottom);
-        }
-
-        var region = window.GetPopupPlacementRegion(new Rect(anchor.X, anchor.Y, 0, 0));
-        var measureSize = new Size(Math.Max(0, region.Width), Math.Max(0, region.Height));
-
-        window.ShowToolTip(this, ToolTip!, measureSize, desired =>
-        {
-            const double dx = 12;
-            const double dy = 18;
-            double w = Math.Max(0, desired.Width);
-            double h = Math.Max(0, desired.Height);
-
-            double x = PopupPlacement.ClampHorizontal(anchor.X + dx, w, region, floorToLeftEdge: false);
-            double y = anchor.Y + dy;
-
-            if (y + h > region.Bottom)
-            {
-                y = Math.Max(region.Y, anchor.Y - h - dy);
-            }
-
-            return new Rect(x, y, w, h);
-        });
-    }
-
-    private void HideToolTip()
-    {
-        if (ToolTip == null)
-        {
-            return;
-        }
-
-        var root = FindVisualRoot();
-        if (root is not Window window)
-        {
-            return;
-        }
-
-        window.CloseToolTip(this);
     }
 
     /// <summary>

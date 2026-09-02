@@ -3,19 +3,18 @@ using Aprillz.MewUI.Rendering;
 
 namespace Aprillz.MewUI.Text;
 
-internal interface IManagedTextLayoutData
-{
-    TextLayoutRequestSnapshot Snapshot { get; }
-    IReadOnlyList<ManagedTextLine> ManagedLines { get; }
-}
-
-internal sealed class ManagedTextLayout : ITextLayout, IManagedTextLayoutData
+internal sealed class ManagedTextLayout : ITextLayout
 {
     private const int FastSegmentMapCapacity = 4;
     private readonly ManagedTextEngine _engine;
     private readonly List<ManagedTextLine> _lines;
     private readonly IReadOnlyList<TextLayoutLineMetrics> _lineMetrics;
     private int[]? _fastCaretBoundaries;
+    private ManagedTextFragments? _fragments;
+    private ManagedTextRun[]? _runs;
+    private int _runCount;
+    private float[]? _advances;
+    private readonly Dictionary<int, int[]> _runBoundaries = [];
     private readonly Dictionary<int, FastSegmentMapEntry> _fastSegmentMaps = [];
     private readonly LinkedList<int> _fastSegmentMapOrder = [];
 
@@ -29,15 +28,36 @@ internal sealed class ManagedTextLayout : ITextLayout, IManagedTextLayoutData
         _engine = engine;
         Snapshot = snapshot;
         _lines = lines;
-        _lineMetrics = lines.Select(static line => line.Metrics).ToArray();
+        var metrics = new TextLayoutLineMetrics[lines.Count];
+        for (int index = 0; index < lines.Count; index++)
+        {
+            metrics[index] = lines[index].Metrics;
+        }
+        _lineMetrics = metrics;
         MeasuredSize = measuredSize;
         ContentHeight = lines.Count == 0 ? 0 : lines[^1].Metrics.Bounds.Bottom;
         IsFastPath = isFastPath;
     }
 
+    /// <summary>Layout whose lines were assembled as runs over measured fragments, with no clusters behind them.</summary>
+    public ManagedTextLayout(
+        ManagedTextEngine engine,
+        TextLayoutRequestSnapshot snapshot,
+        List<ManagedTextLine> lines,
+        Size measuredSize,
+        ManagedTextFragments fragments,
+        List<ManagedTextRun> runs)
+        : this(engine, snapshot, lines, measuredSize, isFastPath: false)
+    {
+        _fragments = fragments;
+        _runs = [.. runs];
+        _runCount = runs.Count;
+        _advances = fragments.Advances;
+    }
+
     public TextLayoutRequestSnapshot Snapshot { get; }
 
-    public IReadOnlyList<ManagedTextLine> ManagedLines => _lines;
+    internal List<ManagedTextLine> ManagedLines => _lines;
 
     public Size MeasuredSize { get; }
 
@@ -49,8 +69,21 @@ internal sealed class ManagedTextLayout : ITextLayout, IManagedTextLayoutData
 
     internal IFont GetDefaultFont() => _engine.GetFont(Snapshot.DefaultStyle, Snapshot.Dpi);
 
-    internal bool HasMaterializedClusters
-        => _lines.Any(static line => line.Clusters is not null);
+    /// <summary>True once any line has built the runs its columns are read from.</summary>
+    internal bool HasMaterializedColumns
+    {
+        get
+        {
+            foreach (var line in _lines)
+            {
+                if (line.RunCount > 0)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
 
     public CharacterHit HitTestPoint(Point point)
     {
@@ -59,68 +92,15 @@ internal sealed class ManagedTextLayout : ITextLayout, IManagedTextLayoutData
             return default;
         }
 
-        int lineIndex = FindLineByY(point.Y);
-        var line = _lines[lineIndex];
-        if (IsFastPath && line.Clusters is null)
-        {
-            return HitTestFastPath(line, point.X);
-        }
-        var clusters = EnsureClusters(line);
-        if (clusters.Count == 0)
-        {
-            return new CharacterHit(line.Metrics.TextStart, 0);
-        }
-
-        if (point.X <= clusters[0].X)
-        {
-            return new CharacterHit(clusters[0].Start, 0);
-        }
-
-        foreach (var cluster in clusters)
-        {
-            if (point.X <= cluster.X + cluster.Width)
-            {
-                return point.X < cluster.X + cluster.Width * 0.5
-                    ? new CharacterHit(cluster.Start, 0)
-                    : new CharacterHit(cluster.Start, cluster.Length);
-            }
-        }
-
-        var last = clusters[^1];
-        return new CharacterHit(last.Start, last.Length);
+        return HitTestLine(_lines[FindLineByY(point.Y)], point.X);
     }
 
     public Rect GetCaretBounds(CharacterHit hit)
     {
         int insertion = Math.Clamp(hit.InsertionIndex, 0, Snapshot.Text.Length);
         var line = FindLineByInsertion(insertion);
-        if (IsFastPath && line.Clusters is null)
-        {
-            return new Rect(
-                GetFastPathX(line, insertion),
-                line.Metrics.Bounds.Y,
-                1,
-                line.Metrics.Bounds.Height);
-        }
-        var clusters = EnsureClusters(line);
-        double x = line.Metrics.Bounds.X;
-
-        foreach (var cluster in clusters)
-        {
-            if (insertion <= cluster.Start)
-            {
-                x = cluster.X;
-                break;
-            }
-            if (insertion <= cluster.End)
-            {
-                x = insertion == cluster.Start ? cluster.X : cluster.X + cluster.Width;
-                break;
-            }
-            x = cluster.X + cluster.Width;
-        }
-
-        return new Rect(x, line.Metrics.Bounds.Y, 1, line.Metrics.Bounds.Height);
+        var bounds = line.Metrics.Bounds;
+        return new Rect(GetXForInsertion(line, insertion), bounds.Y, 1, bounds.Height);
     }
 
     public CharacterHit GetNextLogicalCaret(CharacterHit from, LogicalDirection direction, CaretMode mode)
@@ -134,7 +114,7 @@ internal sealed class ManagedTextLayout : ITextLayout, IManagedTextLayoutData
             return new CharacterHit(next, 0);
         }
 
-        IReadOnlyList<int> boundaries = IsFastPath && !_lines.Any(static line => line.Clusters is not null)
+        IReadOnlyList<int> boundaries = IsFastPath
             ? GetFastCaretBoundaries()
             : GetCaretBoundaries();
         if (direction == LogicalDirection.Forward)
@@ -194,68 +174,318 @@ internal sealed class ManagedTextLayout : ITextLayout, IManagedTextLayoutData
             return;
         }
 
-        if (IsFastPath && !_lines.Any(static line => line.Clusters is not null))
-        {
-            var line = _lines[0];
-            double left = GetFastPathX(line, start);
-            double right = GetFastPathX(line, start + length);
-            output.Add(new Rect(
-                Math.Min(left, right),
-                line.Metrics.Bounds.Y,
-                Math.Abs(right - left),
-                line.Metrics.Bounds.Height));
-            return;
-        }
-
         int end = start + length;
         foreach (var line in _lines)
         {
-            double left = double.PositiveInfinity;
-            double right = double.NegativeInfinity;
-            foreach (var cluster in EnsureClusters(line))
+            if (!TryGetLineRangeExtent(line, start, end, out double left, out double right))
             {
-                if (cluster.End <= start || cluster.Start >= end)
-                {
-                    continue;
-                }
-                left = Math.Min(left, cluster.X);
-                right = Math.Max(right, cluster.X + cluster.Width);
+                continue;
             }
 
-            if (!double.IsPositiveInfinity(left))
-            {
-                output.Add(new Rect(left, line.Metrics.Bounds.Y, Math.Max(0, right - left), line.Metrics.Bounds.Height));
-            }
+            var bounds = line.Metrics.Bounds;
+            output.Add(new Rect(
+                Math.Min(left, right),
+                bounds.Y,
+                Math.Abs(right - left),
+                bounds.Height));
         }
     }
 
-    internal List<ManagedTextCluster> EnsureClusters(ManagedTextLine line)
+    internal ReadOnlySpan<ManagedTextRun> GetRuns(ManagedTextLine line)
     {
-        if (line.Clusters is not null)
+        if (line.RunCount < 0)
         {
-            return line.Clusters;
+            BuildFastPathRuns(line);
         }
 
-        lock (line)
+        return line.RunCount <= 0 ? default : _runs.AsSpan(line.RunStart, line.RunCount);
+    }
+
+    /// <summary>
+    /// Measures a fast-path line into runs. A fast-path line is laid out from whole-segment widths
+    /// and answers its queries from them, but a draw that carries paint spans needs the columns
+    /// inside it, and this is where they come from.
+    /// </summary>
+    private void BuildFastPathRuns(ManagedTextLine line)
+    {
+        var fragments = _engine.MeasureFragments(Snapshot);
+        _fragments = fragments;
+        _advances = fragments.Advances;
+        _runs = new ManagedTextRun[Math.Max(1, fragments.Count)];
+        _runCount = 0;
+
+        // The line's width came from measuring whole segments, so the columns are scaled onto it and
+        // the run ends where the line does.
+        double measured = 0;
+        for (int index = 0; index < fragments.Count; index++)
         {
-            if (line.Clusters is not null)
+            measured += fragments.Items[index].Width;
+        }
+        double scale = measured > 0 ? line.Metrics.Bounds.Width / measured : 1;
+        if (scale != 1)
+        {
+            for (int index = 0; index < fragments.AdvanceCount; index++)
             {
-                return line.Clusters;
+                fragments.Advances[index] = (float)(fragments.Advances[index] * scale);
+            }
+        }
+
+        double cursor = line.Metrics.Bounds.X;
+        line.RunStart = 0;
+        for (int index = 0; index < fragments.Count; index++)
+        {
+            ref readonly var fragment = ref fragments.Items[index];
+            double width = fragment.Width * scale;
+            _runs[_runCount++] = new ManagedTextRun
+            {
+                TextStart = fragment.TextStart,
+                TextLength = fragment.TextLength,
+                StyleIndex = fragment.StyleIndex,
+                Font = fragment.Font,
+                X = cursor,
+                Width = width,
+                AdvanceStart = fragment.AdvanceStart,
+                AdvanceBase = 0,
+                MeasuredHeight = fragment.MeasuredHeight,
+                Baseline = fragment.Baseline,
+                Kind = fragment.Kind,
+                InlineIndex = fragment.InlineIndex
+            };
+            cursor += width;
+        }
+
+        line.RunCount = _runCount;
+    }
+
+    internal ReadOnlySpan<ManagedTextRun> GetRuns(int lineIndex) => GetRuns(_lines[lineIndex]);
+
+    internal ref readonly ManagedTextRun GetRun(int runIndex) => ref _runs![runIndex];
+
+    /// <summary>The object an inline run stands for.</summary>
+    internal IInlineTextObject? GetInline(in ManagedTextRun run)
+        => run.InlineIndex >= 0 && run.InlineIndex < Snapshot.Inlines.Length
+            ? Snapshot.Inlines[run.InlineIndex].Object
+            : null;
+
+    /// <summary>Column of an insertion inside a text run, measured from the layout's advances.</summary>
+    internal double GetColumnX(in ManagedTextRun run, int insertion) => GetRunX(in run, insertion);
+
+    private double GetRunX(in ManagedTextRun run, int insertion)
+    {
+        if (insertion <= run.TextStart)
+        {
+            return run.X;
+        }
+        // A tab or an inline object has no columns inside it, so any insertion within one reads as
+        // its far side, which is what an insertion inside a cluster reads as too.
+        if (insertion >= run.TextEnd || run.Kind != ManagedTextRunKind.Text)
+        {
+            return run.X + run.Width;
+        }
+
+        return run.X + (_advances![run.AdvanceStart + (insertion - run.TextStart) - 1] - run.AdvanceBase);
+    }
+
+    /// <summary>Text element starts inside a run, kept for as long as the run's line is alive.</summary>
+    internal int[] GetRunBoundaries(int runIndex)
+    {
+        if (_runBoundaries.TryGetValue(runIndex, out var cached))
+        {
+            return cached;
+        }
+
+        ref var run = ref _runs![runIndex];
+        if (run.Kind != ManagedTextRunKind.Text)
+        {
+            int[] single = [run.TextStart];
+            _runBoundaries[runIndex] = single;
+            return single;
+        }
+
+        int[] starts = StringInfo.ParseCombiningCharacters(Snapshot.Text.Substring(run.TextStart, run.TextLength));
+        for (int index = 0; index < starts.Length; index++)
+        {
+            starts[index] += run.TextStart;
+        }
+
+        _runBoundaries[runIndex] = starts;
+        return starts;
+    }
+
+    // The cluster walk stays reachable by index while both representations exist, so the two can be
+    // compared for the same line.
+    internal double GetXForInsertionForTest(int lineIndex, int insertion)
+        => GetXForInsertion(_lines[lineIndex], insertion);
+
+    internal CharacterHit HitTestLineForTest(int lineIndex, double x)
+        => HitTestLine(_lines[lineIndex], x);
+
+    internal bool TryGetLineRangeExtentForTest(int lineIndex, int start, int end, out double left, out double right)
+        => TryGetLineRangeExtent(_lines[lineIndex], start, end, out left, out right);
+
+    internal ReadOnlySpan<ManagedTextRun> GetRunsForTest(int lineIndex) => GetRuns(_lines[lineIndex]);
+
+    internal double GetXForInsertionViaRuns(int lineIndex, int insertion)
+        => GetXForInsertionViaRuns(_lines[lineIndex], insertion);
+
+    private double GetXForInsertionViaRuns(ManagedTextLine line, int insertion)
+    {
+        var runs = GetRuns(line);
+        if (runs.Length == 0)
+        {
+            return line.Metrics.Bounds.X;
+        }
+
+        for (int index = 0; index < runs.Length; index++)
+        {
+            if (insertion <= runs[index].TextStart)
+            {
+                return runs[index].X;
+            }
+            if (insertion <= runs[index].TextEnd)
+            {
+                return GetRunX(in runs[index], insertion);
+            }
+        }
+
+        return runs[^1].X + runs[^1].Width;
+    }
+
+    internal CharacterHit HitTestLineViaRuns(int lineIndex, double x)
+        => HitTestLineViaRuns(_lines[lineIndex], x);
+
+    private CharacterHit HitTestLineViaRuns(ManagedTextLine line, double x)
+    {
+        var runs = GetRuns(line);
+        if (runs.Length == 0)
+        {
+            return new CharacterHit(line.Metrics.TextStart, 0);
+        }
+
+        if (x <= runs[0].X)
+        {
+            return new CharacterHit(runs[0].TextStart, 0);
+        }
+
+        for (int index = 0; index < runs.Length; index++)
+        {
+            ref readonly var run = ref runs[index];
+            if (x > run.X + run.Width && index != runs.Length - 1)
+            {
+                continue;
             }
 
-            var clusters = _engine.MeasureClusters(Snapshot, line.Metrics.TextStart, line.Metrics.TextLength);
-            double naturalWidth = clusters.Sum(static cluster => cluster.Width);
-            double scale = naturalWidth > 0 ? line.Metrics.Bounds.Width / naturalWidth : 1;
-            double x = line.Metrics.Bounds.X;
-            foreach (var cluster in clusters)
-            {
-                cluster.X = x;
-                cluster.Width *= scale;
-                x += cluster.Width;
-            }
-            line.Clusters = clusters;
-            return clusters;
+            return HitTestRun(line.RunStart + index, in run, x);
         }
+
+        ref readonly var lastRun = ref runs[^1];
+        return new CharacterHit(lastRun.TextStart, lastRun.TextLength);
+    }
+
+    private CharacterHit HitTestRun(int runIndex, in ManagedTextRun run, double x)
+    {
+        if (run.Kind != ManagedTextRunKind.Text)
+        {
+            return x < run.X + run.Width * 0.5
+                ? new CharacterHit(run.TextStart, 0)
+                : new CharacterHit(run.TextStart, run.TextLength);
+        }
+
+        int[] boundaries = GetRunBoundaries(runIndex);
+        for (int index = 0; index < boundaries.Length; index++)
+        {
+            int start = boundaries[index];
+            int end = index + 1 < boundaries.Length ? boundaries[index + 1] : run.TextEnd;
+            double right = GetRunX(in run, end);
+            if (x <= right || index == boundaries.Length - 1)
+            {
+                double left = GetRunX(in run, start);
+                return x < left + (right - left) * 0.5
+                    ? new CharacterHit(start, 0)
+                    : new CharacterHit(start, end - start);
+            }
+        }
+
+        return new CharacterHit(run.TextStart, run.TextLength);
+    }
+
+    internal bool TryGetLineRangeExtentViaRuns(int lineIndex, int start, int end, out double left, out double right)
+        => TryGetLineRangeExtentViaRuns(_lines[lineIndex], start, end, out left, out right);
+
+    private bool TryGetLineRangeExtentViaRuns(ManagedTextLine line, int start, int end, out double left, out double right)
+    {
+        var runs = GetRuns(line);
+        left = double.PositiveInfinity;
+        right = double.NegativeInfinity;
+        foreach (ref readonly var run in runs)
+        {
+            if (run.TextEnd <= start || run.TextStart >= end)
+            {
+                continue;
+            }
+
+            left = Math.Min(left, GetRunX(in run, Math.Max(start, run.TextStart)));
+            right = Math.Max(right, GetRunX(in run, Math.Min(end, run.TextEnd)));
+        }
+
+        return !double.IsPositiveInfinity(left);
+    }
+
+    // The queries above ask a line where a column sits; a fast-path line answers from the segments
+    // it measured, and every other line from the runs it was assembled into.
+
+    private CharacterHit HitTestLine(ManagedTextLine line, double x)
+        => IsFastPath ? HitTestFastPath(line, x) : HitTestLineViaRuns(line, x);
+
+    private double GetXForInsertion(ManagedTextLine line, int insertion)
+        => IsFastPath ? GetFastPathX(line, insertion) : GetXForInsertionViaRuns(line, insertion);
+
+    private bool TryGetLineRangeExtent(ManagedTextLine line, int start, int end, out double left, out double right)
+    {
+        if (IsFastPath)
+        {
+            left = GetFastPathX(line, start);
+            right = GetFastPathX(line, end);
+            return true;
+        }
+
+        return TryGetLineRangeExtentViaRuns(line, start, end, out left, out right);
+    }
+
+    private List<int> GetCaretBoundaries()
+    {
+        var boundaries = new List<int> { 0 };
+        foreach (var line in _lines)
+        {
+            var runs = GetRuns(line);
+            for (int index = 0; index < runs.Length; index++)
+            {
+                foreach (int boundary in GetRunBoundaries(line.RunStart + index))
+                {
+                    if (boundaries[^1] != boundary)
+                    {
+                        boundaries.Add(boundary);
+                    }
+                }
+
+                if (boundaries[^1] != runs[index].TextEnd)
+                {
+                    boundaries.Add(runs[index].TextEnd);
+                }
+            }
+
+            int lineEnd = line.Metrics.TextEnd + line.Metrics.NewLineLength;
+            if (boundaries[^1] != lineEnd)
+            {
+                boundaries.Add(lineEnd);
+            }
+        }
+
+        if (boundaries[^1] != Snapshot.Text.Length)
+        {
+            boundaries.Add(Snapshot.Text.Length);
+        }
+        return boundaries;
     }
 
     private int FindLineByY(double y)
@@ -287,35 +517,6 @@ internal sealed class ManagedTextLayout : ITextLayout, IManagedTextLayoutData
             }
         }
         return _lines.Count - 1;
-    }
-
-    private List<int> GetCaretBoundaries()
-    {
-        var boundaries = new List<int> { 0 };
-        foreach (var line in _lines)
-        {
-            foreach (var cluster in EnsureClusters(line))
-            {
-                if (boundaries[^1] != cluster.Start)
-                {
-                    boundaries.Add(cluster.Start);
-                }
-                if (boundaries[^1] != cluster.End)
-                {
-                    boundaries.Add(cluster.End);
-                }
-            }
-            int lineEnd = line.Metrics.TextEnd + line.Metrics.NewLineLength;
-            if (boundaries[^1] != lineEnd)
-            {
-                boundaries.Add(lineEnd);
-            }
-        }
-        if (boundaries[^1] != Snapshot.Text.Length)
-        {
-            boundaries.Add(Snapshot.Text.Length);
-        }
-        return boundaries;
     }
 
     private CharacterHit HitTestFastPath(ManagedTextLine line, double x)

@@ -4,7 +4,7 @@ using Aprillz.MewVG;
 
 namespace Aprillz.MewUI.Rendering.MewVG;
 
-internal sealed class MewVGX11WindowResources : IDisposable
+internal sealed class MewVGX11WindowResources : IDisposable, IMewVGWindowCacheMaintenance
 {
     private readonly nint _display;
     private readonly IOpenGLWindowResources _gl;
@@ -46,7 +46,7 @@ internal sealed class MewVGX11WindowResources : IDisposable
     {
         DiagLog.Write($"MewVG X11 create: display=0x{display.ToInt64():X} window=0x{window.ToInt64():X} share=0x{shareContext.ToInt64():X} backend={X11GLBackendRegistry.Current?.GetType().Name}");
 
-        // NanoVG uses stencil for AA and clipping; request a stencil buffer via the visual info.
+        // MewVG renders without depth or stencil; the visual is color-only.
         // shareContext = factory's worker context, so worker-rendered FBO textures are sample-able
         // from this window context (background offscreen handoff). The active backend (GLX by
         // default, EGL when selected for dma_buf/EGLImage zero-copy) creates the window context.
@@ -55,7 +55,7 @@ internal sealed class MewVGX11WindowResources : IDisposable
         try
         {
             MewVGGLBootstrapX11.EnsureInitialized();
-            var vg = new NanoVGGL(NVGcreateFlags.Antialias);
+            var vg = new NanoVGGL();
             return new MewVGX11WindowResources(display, gl, vg, shareContext);
         }
         finally
@@ -71,6 +71,25 @@ internal sealed class MewVGX11WindowResources : IDisposable
     public void SwapBuffers(nint display, nint window) => _gl.SwapBuffers(display, window);
 
     public void SetSwapInterval(int interval) => _gl.SetSwapInterval(interval);
+
+    public void TrimCaches()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _gl.MakeCurrent(_display);
+        try
+        {
+            TextCache.Clear();
+            TextCache.ReleasePendingDeletes();
+        }
+        finally
+        {
+            _gl.ReleaseCurrent();
+        }
+    }
 
     public void Dispose()
     {

@@ -1,5 +1,7 @@
 using Aprillz.MewUI.Platform;
 using Aprillz.MewUI.Rendering;
+using Aprillz.MewUI.Resources;
+using Aprillz.MewUI.Text;
 
 namespace Aprillz.MewUI;
 
@@ -321,6 +323,60 @@ public sealed class Application
     public IGraphicsFactory GraphicsFactory => _graphicsFactory ??= DefaultGraphicsFactory;
 
     /// <summary>
+    /// Releases purgeable render-cache entries while keeping the active graphics factory and
+    /// windows alive. Active/in-flight leases are retired and released only after their owners
+    /// reach a backend-safe boundary.
+    /// </summary>
+    internal void TrimRenderCaches(RenderCacheTrimReason reason = RenderCacheTrimReason.Manual)
+    {
+        var dispatcher = Dispatcher;
+        if (dispatcher != null && !dispatcher.IsOnUIThread)
+        {
+            dispatcher.Invoke(() => TrimRenderCaches(reason));
+            return;
+        }
+
+        var factory = _graphicsFactory ?? Volatile.Read(ref _defaultGraphicsFactory);
+        if (factory == null)
+        {
+            return;
+        }
+
+        factory.ResourceCache?.Trim(reason);
+        if (factory is IBackendRenderCacheMaintenance backend)
+        {
+            backend.TrimBackendCaches(reason);
+        }
+        TextServices.TrimIfCreated(factory);
+        DecodedPixelCache.Shared.Trim();
+    }
+
+    private void MaintainRenderCaches(RenderCacheMaintenanceMode mode)
+    {
+        var factory = _graphicsFactory ?? Volatile.Read(ref _defaultGraphicsFactory);
+        if (factory == null)
+        {
+            return;
+        }
+
+        factory.ResourceCache?.Maintain(mode);
+        if (factory is IBackendRenderCacheMaintenance backend)
+        {
+            backend.MaintainBackendCaches(mode);
+        }
+
+        if (mode is RenderCacheMaintenanceMode.MemoryPressure or RenderCacheMaintenanceMode.Shutdown)
+        {
+            TextServices.TrimIfCreated(factory);
+            DecodedPixelCache.Shared.Trim();
+        }
+        else if (mode == RenderCacheMaintenanceMode.Idle)
+        {
+            DecodedPixelCache.Shared.Maintain();
+        }
+    }
+
+    /// <summary>
     /// Runs the application with the specified main window. One UI runtime per process: a second
     /// concurrent call is rejected. Running again after a previous run returns (normally or by
     /// exception) is supported - the finally block below restores process state for it.
@@ -329,6 +385,16 @@ public sealed class Application
     {
         ArgumentNullException.ThrowIfNull(mainWindow);
         RunInternal(mainWindow, startup: null, shutdownMode: null);
+    }
+
+    /// <summary>
+    /// Runs the application asynchronously. Browser platforms use this overload so the JavaScript
+    /// event loop remains active while the application is running.
+    /// </summary>
+    public static Task RunAsync(Window mainWindow, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(mainWindow);
+        return RunInternalAsync(mainWindow, startup: null, shutdownMode: null, cancellationToken);
     }
 
     /// <summary>
@@ -397,7 +463,7 @@ public sealed class Application
                 var host = DefaultPlatformHost;
                 app = new Application(host);
                 _current = app;
-                app._runtime = new ApplicationRuntime();
+                app._runtime = new ApplicationRuntime(app.MaintainRenderCaches);
                 app._startup = startup;
                 if (shutdownMode != null)
                 {
@@ -449,6 +515,67 @@ public sealed class Application
                     var host = Interlocked.Exchange(ref _defaultPlatformHost, null);
                     host?.Dispose();
                 }
+            }
+        }
+    }
+
+    internal static async Task RunInternalAsync(
+        Window? mainWindow,
+        Action<string[]>? startup,
+        ShutdownMode? shutdownMode,
+        CancellationToken cancellationToken = default)
+    {
+        Application app;
+        lock (_syncLock)
+        {
+            if (_current != null)
+            {
+                throw new InvalidOperationException("Application is already running.");
+            }
+
+            Environment.ExitCode = 0;
+            var host = DefaultPlatformHost;
+            app = new Application(host);
+            _current = app;
+            app._runtime = new ApplicationRuntime(app.MaintainRenderCaches);
+            app._startup = startup;
+            if (shutdownMode != null)
+            {
+                app.ShutdownMode = shutdownMode.Value;
+            }
+            _ = app.Theme;
+            if (mainWindow != null)
+            {
+                app._runtime.MainWindow = mainWindow;
+                app.RegisterWindow(mainWindow);
+            }
+        }
+
+        try
+        {
+            await app.RunCoreAsync(mainWindow, cancellationToken);
+        }
+        finally
+        {
+            try
+            {
+                app._startup = null;
+                app._runtime?.Dispose();
+                app._runtime = null;
+                if (app.Dispatcher != null)
+                {
+                    app.Dispatcher = null;
+                }
+                else
+                {
+                    DispatcherChanged?.Invoke(null);
+                }
+            }
+            finally
+            {
+                _current = null;
+                var host = Interlocked.Exchange(ref _defaultPlatformHost, null);
+                host?.Dispose();
             }
         }
     }
@@ -518,6 +645,7 @@ public sealed class Application
 
     internal void OnHostLoopStarting(Window? mainWindow)
     {
+        _runtime?.StartRenderCacheMaintenance(Dispatcher);
         var startup = Interlocked.Exchange(ref _startup, null);
         startup?.Invoke(GetCommandLineArguments());
         mainWindow?.Show();
@@ -534,6 +662,17 @@ public sealed class Application
     private void RunCore(Window? mainWindow)
     {
         PlatformHost.Run(this, mainWindow);
+
+        var fatal = Interlocked.Exchange(ref _pendingFatalException, null);
+        if (fatal != null)
+        {
+            throw new InvalidOperationException("Unhandled exception in UI loop.", fatal);
+        }
+    }
+
+    private async Task RunCoreAsync(Window? mainWindow, CancellationToken cancellationToken)
+    {
+        await PlatformHost.RunAsync(this, mainWindow, cancellationToken);
 
         var fatal = Interlocked.Exchange(ref _pendingFatalException, null);
         if (fatal != null)

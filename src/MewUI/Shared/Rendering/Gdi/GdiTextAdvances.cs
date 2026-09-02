@@ -20,12 +20,38 @@ internal static class GdiTextAdvances
             return [];
         }
 
-        var cumulativePixels = new int[text.Length];
-        var oldFont = Gdi32.SelectObject(hdc, font.Handle);
-        try
+        var advances = GC.AllocateUninitializedArray<double>(text.Length);
+        Fill(hdc, font, text, dpiScale, advances);
+        return advances;
+    }
+
+    /// <summary>Writes the prefix advances into a caller-owned span of at least one entry per code unit.</summary>
+    public static unsafe void GetUtf16PrefixAdvances(
+        nint hdc,
+        GdiFont font,
+        ReadOnlySpan<char> text,
+        double dpiScale,
+        Span<double> destination)
+    {
+        if (!text.IsEmpty)
         {
-            fixed (char* textPointer = text)
-            fixed (int* widthsPointer = cumulativePixels)
+            Fill(hdc, font, text, dpiScale, destination);
+        }
+    }
+
+    private static unsafe void Fill(
+        nint hdc,
+        GdiFont font,
+        ReadOnlySpan<char> text,
+        double dpiScale,
+        Span<double> advances)
+    {
+        fixed (char* textPointer = text)
+        fixed (double* advancesPointer = advances)
+        {
+            int* cumulativePixels = (int*)advancesPointer;
+            var oldFont = Gdi32.SelectObject(hdc, font.Handle);
+            try
             {
                 SIZE size;
                 if (!Gdi32.GetTextExtentExPoint(
@@ -34,25 +60,24 @@ internal static class GdiTextAdvances
                     text.Length,
                     int.MaxValue,
                     null,
-                    widthsPointer,
+                    cumulativePixels,
                     &size))
                 {
                     throw new InvalidOperationException("GetTextExtentExPointW failed.");
                 }
             }
-        }
-        finally
-        {
-            Gdi32.SelectObject(hdc, oldFont);
-        }
+            finally
+            {
+                Gdi32.SelectObject(hdc, oldFont);
+            }
 
-        double scale = dpiScale > 0 ? dpiScale : 1;
-        var advances = new double[cumulativePixels.Length];
-        for (int i = 0; i < cumulativePixels.Length; i++)
-        {
-            advances[i] = cumulativePixels[i] / scale;
+            double scale = dpiScale > 0 ? dpiScale : 1;
+            // The native int output occupies the first half of the double buffer. Convert from
+            // the end so writing a double never overwrites an int that has not been read yet.
+            for (int i = text.Length - 1; i >= 0; i--)
+            {
+                advancesPointer[i] = cumulativePixels[i] / scale;
+            }
         }
-
-        return advances;
     }
 }

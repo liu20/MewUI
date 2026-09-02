@@ -969,7 +969,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         if (!_windowStateFromBackend)
             _backend?.SetWindowState(newState);
 
-        // Force WM_NCCALCSIZE recalculation when using extended client area,
+        // Force the platform to recompute the non-client area when the client area is extended,
         // so the maximized frame compensation is applied/removed.
         if (ExtendClientAreaTitleBarHeight > 0)
             _backend?.SetExtendClientAreaToTitleBar(ExtendClientAreaTitleBarHeight);
@@ -1215,7 +1215,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     public event Action<TextCompositionEventArgs>? PreviewTextCompositionEnd;
 
     /// <summary>
-    /// Raised before the framework processes a native platform message (Win32 WM_, X11 XEvent, macOS NSEvent).
+    /// Raised before the framework processes a native platform message.
     /// Set <see cref="NativeMessageEventArgs.Handled"/> to suppress default processing.
     /// Cast the argument to the platform-specific subclass to access raw message data.
     /// </summary>
@@ -1304,6 +1304,9 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
         EnsureBackend();
         Application.Current.RegisterWindow(this);
+
+        // Elements built before Run resolved a provisional startup theme; the running application's theme is the decided one.
+        ReconcileTreeTheme(Application.Current.Theme);
 
         if (_lifetimeState == WindowLifetimeState.Shown)
         {
@@ -1613,9 +1616,29 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     /// Applies modal state and shows the window: marks it as a dialog, disables and parents to the owner,
     /// inherits the owner icon, then shows and activates. Shared by <see cref="ShowDialog"/> and <see cref="ShowDialogAsync"/>.
     /// </summary>
+    /// <summary>
+    /// Host a modal dialog in its own OS window instead of the owner surface; a platform with a
+    /// single surface sets it false and the dialog renders inside its owner.
+    /// </summary>
+    internal static bool PreferNativeDialogWindows = true;
+
+    private InSurfaceDialogHost? _inSurfaceHost;
+
+    /// <summary>The modal dialog living in this window's surface, if one is open.</summary>
+    internal Window? ActiveInSurfaceDialog { get; private set; }
+
     private void BeginModal(Window? owner)
     {
         _isDialogWindow = true;
+
+        // A single-surface host has one window to live in, so a dialog opened without an owner
+        // still has somewhere to go; the active-window search finds nothing while the page is
+        // unfocused, and failing over to a native window is not an option there.
+        if (!PreferNativeDialogWindows)
+        {
+            owner ??= ResolveSingleSurfaceOwner();
+        }
+
         if (owner != null)
         {
             owner.AcquireModalDisable();
@@ -1624,9 +1647,95 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
         if (owner != null && Icon == null && owner.Icon != null)
             Icon = owner.Icon;
+        if (!PreferNativeDialogWindows && owner != null)
+        {
+            ShowInSurface(owner);
+            return;
+        }
 
         Show(owner);
         Activate();
+    }
+
+    // The dialog never gets a backend here, which is also what lets Close take the backend-less
+    // path and raise Closed so an awaiting caller resumes.
+    private void ShowInSurface(Window owner)
+    {
+        Owner = owner;
+        owner.RegisterOwnedChild(this);
+        RunBuildHookBeforeShow();
+        Application.Current.RegisterWindow(this);
+        ReconcileTreeTheme(Application.Current.Theme);
+        if (Content is not UIElement content)
+        {
+            return;
+        }
+
+        _inSurfaceHost = new InSurfaceDialogHost(this, content, owner);
+        owner.OverlayLayer.Add(_inSurfaceHost);
+        // Started after the host is attached so the chrome plays its entrance instead of landing.
+        _inSurfaceHost.PlayEntrance();
+        _inSurfaceHost.RefreshActiveBorder();
+        _lifetimeState = WindowLifetimeState.Shown;
+        owner.ActiveInSurfaceDialog = this;
+        owner._inSurfaceHost?.RefreshActiveBorder();
+        Closed += RemoveInSurfaceHost;
+
+        // The dialog shares its owner's focus manager, so keys would keep going to whatever the
+        // owner had focused; moving focus inside is what makes the dialog answer them.
+        if (Input.FocusManager.FindFirstFocusable(content) is UIElement first)
+        {
+            owner.FocusManager.SetFocus(first);
+        }
+
+        owner.Invalidate();
+    }
+
+    private Window? ResolveSingleSurfaceOwner()
+    {
+        if (!Application.IsRunning)
+        {
+            return null;
+        }
+
+        var windows = Application.Current.AllWindows;
+        for (int i = 0; i < windows.Count; i++)
+        {
+            if (!ReferenceEquals(windows[i], this))
+            {
+                return windows[i];
+            }
+        }
+
+        return null;
+    }
+
+    private void RemoveInSurfaceHost()
+    {
+        Closed -= RemoveInSurfaceHost;
+        if (_inSurfaceHost == null)
+        {
+            return;
+        }
+
+        if (Owner != null && ReferenceEquals(Owner.ActiveInSurfaceDialog, this))
+        {
+            Owner.ActiveInSurfaceDialog = null;
+            Owner._inSurfaceHost?.RefreshActiveBorder();
+        }
+
+        // The dialog is closed as far as its caller is concerned; the host only stays on screen long
+        // enough to fade, and takes no input while it does.
+        var host = _inSurfaceHost;
+        var owner = Owner;
+        _inSurfaceHost = null;
+        host.FadeOutAndRemove(() =>
+        {
+            host.Detach();
+            owner?.OverlayLayer.Remove(host);
+            owner?.Invalidate();
+        });
+        owner?.Invalidate();
     }
 
     /// <summary>
@@ -1776,8 +1885,8 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         child?.Activate();
     }
 
-    // Internal so platform services (e.g. the X11 portal file dialog) can make a native dialog modal by
-    // disabling the owner window for the dialog's duration, mirroring what Win32 does via the owner HWND.
+    // Internal so platform services showing a native dialog can make it modal by disabling the owner
+    // window for the dialog's duration, which is what an owned native dialog does.
     internal void AcquireModalDisable()
     {
         if (_lifetimeState == WindowLifetimeState.Closed)
@@ -1888,8 +1997,8 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
         if (_updatePassDepth > 0)
         {
-            // Synchronous re-entry: Win32 delivers WM_SIZE inside SetWindowPos while a pass is
-            // running, and its handler calls back into PerformLayout. The applied client size is
+            // Synchronous re-entry: a platform can report the applied size from inside the resize call
+            // while a pass is running, and its handler calls back into PerformLayout. The size is
             // already recorded; signal the outer pass to re-converge instead of nesting a layout.
             _updateGeneration++;
             return;
@@ -1988,7 +2097,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
             // Submit only when the target changes, and accept whatever client size the platform
             // applies - possibly clamped to an OS minimum. The fit contract is
-            // max(content, OS minimum); a clamped result is never re-fought (issue #199).
+            // max(content, OS minimum); a clamped result is never re-fought.
             var target = new Size(fitWidth, fitHeight);
             if (!_hasRequestedClientSize || target != _requestedClientSize || Dpi != _requestedClientSizeDpi)
             {
@@ -2032,7 +2141,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
         for (int pass = 0; pass < maxPasses; pass++)
         {
-            // Re-read per round: a synchronous WM_SIZE in the previous round may have recorded a
+            // Re-read per round: a synchronous size report in the previous round may have recorded a
             // new applied client size, and a mid-round style change may have altered Padding.
             clientSize = _clientSizeDip;
             padding = Padding;
@@ -2106,7 +2215,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         else
         {
             // Unsettled: the pass budget ran out, or overlay layout invalidated again. Hand the
-            // dispatcher exactly one continuation; chaining passes from inside is what spun (#199).
+            // dispatcher exactly one continuation; chaining passes from inside is what spun.
             if (!converged)
             {
                 LogNonConvergedLayout(visualRoot, passDiagnostics);
@@ -2273,7 +2382,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             // The running pass owns pass-internal invalidation: the generation bump above is the
             // arrival signal its convergence loop (or end-of-pass continuation) consumes. Posting
             // here would spin - the dispatcher releases the merge key before execution, so a
-            // mid-pass post becomes a fresh work item instead of merging (issue #199).
+            // mid-pass post becomes a fresh work item instead of merging.
             return;
         }
 
@@ -2442,10 +2551,6 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             return;
         }
 
-        // Release parked vector-cache surfaces (tied to this device) before the context goes away so
-        // their deferred GPU disposal drains under a still-valid context.
-        DisposeVectorSurfaceReclaimer();
-
         // Dispose the cached render context BEFORE the factory tears down its window
         // resources - backends may still hold references that the factory is about to free.
         _renderContext?.Dispose();
@@ -2456,9 +2561,21 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         {
             releaser.ReleaseWindowResources(windowHandle);
         }
+        GraphicsFactory.ResourceCache?.Maintain(RenderCacheMaintenanceMode.WindowClosed);
     }
 
-    internal void SetDpi(uint dpi) => Dpi = dpi;
+    /// <summary>Sets the window DPI and, when the value changes, runs the DpiChanged pass over attached content.</summary>
+    internal void SetDpi(uint dpi)
+    {
+        uint oldDpi = Dpi;
+        if (oldDpi == dpi)
+        {
+            return;
+        }
+
+        Dpi = dpi;
+        RaiseDpiChanged(oldDpi, dpi);
+    }
 
     /// <summary>
     /// Client size this window last asked the platform for, or null while no fit target stands.
@@ -2489,6 +2606,12 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
         IsActive = isActive;
         FocusManager.InvalidateFocusVisualStates();
+
+        // Dialogs living in this surface have no backend of their own to hear about the change.
+        for (var dialog = ActiveInSurfaceDialog; dialog != null; dialog = dialog.ActiveInSurfaceDialog)
+        {
+            dialog._inSurfaceHost?.RefreshActiveBorder();
+        }
     }
 
     internal void RaiseLoaded()
@@ -2607,6 +2730,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     {
         // A new device generation invalidates every render cache built on the old device.
         DeviceGeneration++;
+        GraphicsFactory.ResourceCache?.Maintain(RenderCacheMaintenanceMode.DeviceLost);
         InvalidateVisual();
     }
 
@@ -2614,7 +2738,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
     internal void RenderFrame(IWindowSurface surface)
     {
-        // Reentrant paint (e.g. a cross-thread sent WM_PAINT dispatched while this frame is
+        // Reentrant paint (e.g. a cross-thread paint request dispatched while this frame is
         // still open, as with a window hosted in another process's tree) would nest
         // BeginFrame on the cached context and corrupt the backend's begin/end pairing.
         // Skip and repaint on the next dispatcher cycle instead.
@@ -2838,6 +2962,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
                 }
             }
             finally { if (oneShot) context.Dispose(); }
+            GraphicsFactory.ResourceCache?.Maintain(RenderCacheMaintenanceMode.Frame);
             if (profiling)
             {
                 frameTiming.EndFrameTicks += Stopwatch.GetTimestamp() - phaseStart;
@@ -3033,6 +3158,23 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         _adorners.Clear();
     }
 
+    /// <summary>Re-runs the theme pass on elements whose stored theme differs from the decided application theme.</summary>
+    internal void ReconcileTreeTheme(Theme currentTheme)
+    {
+        ReconcileTheme(currentTheme);
+
+        if (EffectiveVisualRoot != null)
+        {
+            VisitVisualTree(EffectiveVisualRoot, element =>
+            {
+                if (element is FrameworkElement frameworkElement)
+                {
+                    frameworkElement.ReconcileTheme(currentTheme);
+                }
+            });
+        }
+    }
+
     internal void BroadcastThemeChanged(Theme oldTheme, Theme newTheme)
     {
         OnThemeChanged(oldTheme, newTheme);
@@ -3153,7 +3295,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         return false;
     }
 
-    internal void RaiseDpiChanged(uint oldDpi, uint newDpi)
+    private void RaiseDpiChanged(uint oldDpi, uint newDpi)
     {
         OnDpiChanged(oldDpi, newDpi);
         DpiChanged?.Invoke(oldDpi, newDpi);
@@ -3192,6 +3334,13 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
     internal void CloseAllPopups()
         => _popupManager.CloseAllPopups();
+
+    /// <summary>
+    /// Closes every popup this window holds on behalf of <paramref name="owner"/>. Called when the owner
+    /// leaves the visual tree, so a popup cannot outlive the element it is anchored to.
+    /// </summary>
+    internal void ClosePopupsOwnedBy(UIElement owner)
+        => _popupManager.ClosePopupsOwnedBy(owner);
 
     /// <summary>
     /// Opens a popup whose placement is measured only after it is rooted and style-resolved in this

@@ -1029,9 +1029,7 @@ internal sealed class Win32WindowBackend : IWindowBackend
         uint actualDpi = GetDpiForWindow(Handle);
         if (actualDpi != initialDpi)
         {
-            var oldDpi = initialDpi;
             Window.SetDpi(actualDpi);
-            Window.RaiseDpiChanged(oldDpi, actualDpi);
             SetClientSize(Window.Width, Window.Height);
             var updatedRect = new RECT(0, 0, (int)Math.Round(Window.Width * Window.DpiScale), (int)Math.Round(Window.Height * Window.DpiScale));
             if (!Window.AllowsTransparency)
@@ -1774,9 +1772,16 @@ internal sealed class Win32WindowBackend : IWindowBackend
         }
 
         var monitor = User32.MonitorFromWindow(Handle, MonitorDefaultToNearest);
-        var surface = new Win32LayeredPresentSurface(Handle, monitor, pixelWidth, pixelHeight, Window.DpiScale);
+        var surface = _cachedLayeredSurface;
+        if (surface == null || !surface.Matches(Handle, monitor, pixelWidth, pixelHeight, Window.DpiScale))
+        {
+            surface = new Win32LayeredPresentSurface(Handle, monitor, pixelWidth, pixelHeight, Window.DpiScale);
+            _cachedLayeredSurface = surface;
+        }
         _ = presenter.Present(Window, surface, _opacity);
     }
+
+    private Win32LayeredPresentSurface? _cachedLayeredSurface;
 
     private Win32HdcSurface? _cachedHdcSurface;
 
@@ -1920,6 +1925,9 @@ internal sealed class Win32WindowBackend : IWindowBackend
             PixelHeight = pixelHeight;
             DpiScale = dpiScale;
         }
+
+        public bool Matches(nint hwnd, nint monitor, int pixelWidth, int pixelHeight, double dpiScale) =>
+            Hwnd == hwnd && Monitor == monitor && PixelWidth == pixelWidth && PixelHeight == pixelHeight && DpiScale == dpiScale;
     }
 
     // All-zero monochrome caret bitmap: the system renders a bitmap caret by XOR-ing it,
@@ -2085,7 +2093,6 @@ internal sealed class Win32WindowBackend : IWindowBackend
     private nint HandleDpiChanged(nint wParam, nint lParam)
     {
         uint newDpi = (uint)(wParam.ToInt64() & 0xFFFF);
-        uint oldDpi = Window.Dpi;
         Window.SetDpi(newDpi);
 
         // A transition during a drag leaves the move loop holding the old scale's rectangle, which
@@ -2102,8 +2109,6 @@ internal sealed class Win32WindowBackend : IWindowBackend
         // layout pass we run below (otherwise a stale _clientSizeDip can cause a 1-frame "broken" layout).
         User32.GetClientRect(Handle, out var clientRect);
         Window.SetClientSizeDip(clientRect.Width / Window.DpiScale, clientRect.Height / Window.DpiScale);
-
-        Window.RaiseDpiChanged(oldDpi, newDpi);
 
         // Re-apply DWM extended frame with updated DPI scale.
         if (_extendTitleBarHeight > 0)
@@ -2136,8 +2141,6 @@ internal sealed class Win32WindowBackend : IWindowBackend
 
         User32.GetClientRect(Handle, out var clientRect);
         Window.SetClientSizeDip(clientRect.Width / Window.DpiScale, clientRect.Height / Window.DpiScale);
-
-        Window.RaiseDpiChanged(oldDpi, newDpi);
 
         if (_extendTitleBarHeight > 0)
             SetExtendClientAreaToTitleBar(_extendTitleBarHeight);

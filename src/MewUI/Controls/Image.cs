@@ -32,6 +32,11 @@ public sealed partial class Image : FrameworkElement
             MewPropertyOptions.AffectsLayout | MewPropertyOptions.AffectsRender,
             static (self, oldValue, newValue) => self.OnSourcePropertyChanged(oldValue, newValue));
 
+    public static readonly MewProperty<ImageVectorCacheMode> VectorCacheModeProperty =
+        MewProperty<ImageVectorCacheMode>.Register<Image>(nameof(VectorCacheMode), ImageVectorCacheMode.Cached,
+            MewPropertyOptions.AffectsRender,
+            static (self, _, _) => self.ClearVectorCache());
+
     public static readonly MewProperty<ImageOrientationMode> OrientationModeProperty =
         MewProperty<ImageOrientationMode>.Register<Image>(nameof(OrientationMode), ImageOrientationMode.FromImage,
             MewPropertyOptions.AffectsLayout | MewPropertyOptions.AffectsRender);
@@ -40,6 +45,7 @@ public sealed partial class Image : FrameworkElement
     // backend image suffices. The factory is tracked only to defensively rebuild if it ever changes.
     private IImage? _cachedImage;
     private IGraphicsFactory? _cachedFactory;
+    private double _cachedRasterScale;
 
     private INotifyImageChanged? _notifySource;
 
@@ -117,6 +123,16 @@ public sealed partial class Image : FrameworkElement
         set => SetValue(OrientationModeProperty, value);
     }
 
+    /// <summary>
+    /// Gets or sets how a vector source is rendered. Defaults to
+    /// <see cref="ImageVectorCacheMode.Cached"/>.
+    /// </summary>
+    public ImageVectorCacheMode VectorCacheMode
+    {
+        get => GetValue(VectorCacheModeProperty);
+        set => SetValue(VectorCacheModeProperty, value);
+    }
+
     // Effective orientation to apply: Normal unless the mode is FromImage and the source carries one.
     // Read after GetImage() so the source has been decoded and its orientation resolved.
     private ImageOrientation GetEffectiveOrientation() =>
@@ -175,7 +191,19 @@ public sealed partial class Image : FrameworkElement
             return false;
         }
 
-        var srcRect = GetViewBoxPixels(decoded.WidthPx, decoded.HeightPx);
+        if (!imageSource.TryGetMetadata(out var metadata))
+        {
+            return false;
+        }
+
+        var orientation = OrientationMode == ImageOrientationMode.Ignore
+            ? ImageOrientation.Normal
+            : OrientationTransform.Normalize(metadata.Orientation);
+        var intrinsicOrientedSize = OrientationTransform.GetOrientedSize(
+            orientation,
+            metadata.PixelWidth,
+            metadata.PixelHeight);
+        var srcRect = GetViewBoxPixels((int)intrinsicOrientedSize.Width, (int)intrinsicOrientedSize.Height);
         if (srcRect.Width <= 0 || srcRect.Height <= 0)
         {
             return false;
@@ -196,11 +224,14 @@ public sealed partial class Image : FrameworkElement
         double u = (positionDip.X - dest.X) / dest.Width;
         double v = (positionDip.Y - dest.Y) / dest.Height;
 
-        double sx = src.X + u * src.Width;
-        double sy = src.Y + v * src.Height;
-
-        int px = (int)Math.Floor(sx);
-        int py = (int)Math.Floor(sy);
+        var intrinsicOrientedPoint = new Point(src.X + u * src.Width, src.Y + v * src.Height);
+        var intrinsicRawPoint = OrientationTransform.OrientedToRaw(
+            orientation,
+            metadata.PixelWidth,
+            metadata.PixelHeight,
+            intrinsicOrientedPoint);
+        int px = (int)Math.Floor(intrinsicRawPoint.X * decoded.WidthPx / metadata.PixelWidth);
+        int py = (int)Math.Floor(intrinsicRawPoint.Y * decoded.HeightPx / metadata.PixelHeight);
 
         if ((uint)px >= (uint)decoded.WidthPx || (uint)py >= (uint)decoded.HeightPx)
         {
@@ -231,6 +262,20 @@ public sealed partial class Image : FrameworkElement
             return MeasureStretchedSize(intrinsic, availableSize, StretchMode);
         }
 
+        if (Source is IImageMetadataSource metadataSource
+            && metadataSource.TryGetMetadata(out var metadata))
+        {
+            var metadataOrientation = OrientationMode == ImageOrientationMode.Ignore
+                ? ImageOrientation.Identity
+                : metadata.Orientation;
+            var metadataOrientedSize = OrientationTransform.GetOrientedSize(
+                metadataOrientation,
+                metadata.PixelWidth,
+                metadata.PixelHeight);
+            var sourceRect = GetViewBoxPixels((int)metadataOrientedSize.Width, (int)metadataOrientedSize.Height);
+            return MeasureStretchedSize(sourceRect.Size, availableSize, StretchMode);
+        }
+
         var img = GetImage();
         if (img == null)
         {
@@ -257,12 +302,6 @@ public sealed partial class Image : FrameworkElement
             return;
         }
 
-        var img = GetImage();
-        if (img == null)
-        {
-            return;
-        }
-
         var prevScaleQuality = context.ImageScaleQuality;
         context.ImageScaleQuality = ImageScaleQuality;
 
@@ -274,10 +313,33 @@ public sealed partial class Image : FrameworkElement
 
         try
         {
-            int rawWidth = img.PixelWidth;
-            int rawHeight = img.PixelHeight;
-            var orientation = GetEffectiveOrientation();
-            var orientedSize = OrientationTransform.GetOrientedSize(orientation, rawWidth, rawHeight);
+            ImageOrientation orientation;
+            int intrinsicRawWidth;
+            int intrinsicRawHeight;
+            if (Source is ImageSource imageSource && imageSource.TryGetMetadata(out var metadata))
+            {
+                orientation = OrientationMode == ImageOrientationMode.Ignore
+                    ? ImageOrientation.Normal
+                    : OrientationTransform.Normalize(metadata.Orientation);
+                intrinsicRawWidth = metadata.PixelWidth;
+                intrinsicRawHeight = metadata.PixelHeight;
+            }
+            else
+            {
+                var unscaledImage = GetImage();
+                if (unscaledImage == null)
+                {
+                    return;
+                }
+                orientation = GetEffectiveOrientation();
+                intrinsicRawWidth = unscaledImage.PixelWidth;
+                intrinsicRawHeight = unscaledImage.PixelHeight;
+            }
+
+            var orientedSize = OrientationTransform.GetOrientedSize(
+                orientation,
+                intrinsicRawWidth,
+                intrinsicRawHeight);
 
             // ViewBox, Stretch and alignment are computed in oriented space (what the viewer sees).
             var srcRect = GetViewBoxPixels((int)orientedSize.Width, (int)orientedSize.Height);
@@ -292,8 +354,30 @@ public sealed partial class Image : FrameworkElement
                 return;
             }
 
-            // src is in oriented space; the shared helper applies the orientation (no-op for Normal).
-            context.DrawImageOriented(img, orientation, rawWidth, rawHeight, src, dest);
+            var (targetRawWidth, targetRawHeight, targetScale) = ComputeDecodeTarget(
+                intrinsicRawWidth,
+                intrinsicRawHeight,
+                orientation,
+                src,
+                dest,
+                dpiScale);
+            var img = GetImage(targetRawWidth, targetRawHeight, targetScale);
+            if (img == null)
+            {
+                return;
+            }
+
+            // Source and ViewBox stay in intrinsic coordinates. The actual resident texel dimensions
+            // are consumed only by this internal draw adapter and never become layout/API dimensions.
+            context.DrawImageOrientedScaled(
+                img,
+                orientation,
+                intrinsicRawWidth,
+                intrinsicRawHeight,
+                img.PixelWidth,
+                img.PixelHeight,
+                src,
+                dest);
         }
         finally
         {
@@ -410,6 +494,39 @@ public sealed partial class Image : FrameworkElement
     private static bool IsFiniteNonNegative(double value) =>
         !double.IsNaN(value) && !double.IsInfinity(value) && value >= 0;
 
+    internal static (int RawWidth, int RawHeight, double Scale) ComputeDecodeTarget(
+        int intrinsicRawWidth,
+        int intrinsicRawHeight,
+        ImageOrientation orientation,
+        Rect intrinsicOrientedSource,
+        Rect destinationDip,
+        double dpiScale)
+    {
+        if (intrinsicRawWidth <= 0 || intrinsicRawHeight <= 0
+            || intrinsicOrientedSource.Width <= 0 || intrinsicOrientedSource.Height <= 0
+            || destinationDip.Width <= 0 || destinationDip.Height <= 0)
+        {
+            return (Math.Max(1, intrinsicRawWidth), Math.Max(1, intrinsicRawHeight), 1);
+        }
+
+        double scaleX = destinationDip.Width * Math.Max(dpiScale, 0) / intrinsicOrientedSource.Width;
+        double scaleY = destinationDip.Height * Math.Max(dpiScale, 0) / intrinsicOrientedSource.Height;
+        double requestedScale = Math.Clamp(Math.Max(scaleX, scaleY), 1.0 / Math.Max(intrinsicRawWidth, intrinsicRawHeight), 1);
+        int targetRawWidth = Math.Clamp((int)Math.Ceiling(intrinsicRawWidth * requestedScale), 1, intrinsicRawWidth);
+        int targetRawHeight = Math.Clamp((int)Math.Ceiling(intrinsicRawHeight * requestedScale), 1, intrinsicRawHeight);
+
+        if (targetRawWidth > 64 || targetRawHeight > 64)
+        {
+            targetRawWidth = Math.Min(intrinsicRawWidth, checked((targetRawWidth + 127) / 128 * 128));
+            targetRawHeight = Math.Min(intrinsicRawHeight, checked((targetRawHeight + 127) / 128 * 128));
+        }
+
+        double targetScale = Math.Min(
+            (double)targetRawWidth / intrinsicRawWidth,
+            (double)targetRawHeight / intrinsicRawHeight);
+        return (targetRawWidth, targetRawHeight, targetScale);
+    }
+
     private static void ComputeRects(
         Rect sourceRect,
         Rect bounds,
@@ -485,7 +602,9 @@ public sealed partial class Image : FrameworkElement
         }
     }
 
-    private IImage? GetImage()
+    private IImage? GetImage() => GetImage(0, 0, 1);
+
+    private IImage? GetImage(int targetRawWidth, int targetRawHeight, double targetScale)
     {
         if (Source == null)
         {
@@ -493,14 +612,28 @@ public sealed partial class Image : FrameworkElement
         }
 
         var factory = Application.IsRunning ? Application.Current.GraphicsFactory : Application.DefaultGraphicsFactory;
-        if (_cachedImage != null && ReferenceEquals(_cachedFactory, factory))
+        if (_cachedImage != null
+            && ReferenceEquals(_cachedFactory, factory)
+            && _cachedRasterScale + 1e-9 >= targetScale)
         {
             return _cachedImage;
         }
 
         // First use, or the graphics factory changed (rare - a runtime backend swap).
         _cachedImage?.Dispose();
-        _cachedImage = Source.CreateImage(factory);
+        if (targetRawWidth > 0 && targetRawHeight > 0)
+        {
+            _cachedImage = Source.CreateImage(factory, targetRawWidth, targetRawHeight);
+            // The scale that was asked for, not one derived from the produced pixel size: a variant
+            // whose width rounds down reports a smaller scale than the request, so deriving it here
+            // missed this cache on every frame and rebuilt the backend texture each time.
+            _cachedRasterScale = targetScale;
+        }
+        else
+        {
+            _cachedImage = Source.CreateImage(factory);
+            _cachedRasterScale = 1;
+        }
         _cachedFactory = factory;
         return _cachedImage;
     }
@@ -510,6 +643,7 @@ public sealed partial class Image : FrameworkElement
         _cachedImage?.Dispose();
         _cachedImage = null;
         _cachedFactory = null;
+        _cachedRasterScale = 0;
     }
 
     protected override void OnVisualRootChanged(Element? oldRoot, Element? newRoot)

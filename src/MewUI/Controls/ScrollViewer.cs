@@ -30,6 +30,14 @@ public sealed class ScrollViewer : ContentControl
     public static readonly MewProperty<ScrollMode> HorizontalScrollProperty =
         MewProperty<ScrollMode>.Register<ScrollViewer>(nameof(HorizontalScroll), ScrollMode.Disabled, MewPropertyOptions.AffectsLayout);
 
+    private static readonly MewPropertyKey<double> VerticalOffsetPropertyKey =
+        MewProperty<double>.RegisterReadOnly<ScrollViewer>(nameof(VerticalOffset), 0);
+    public static readonly MewProperty<double> VerticalOffsetProperty = VerticalOffsetPropertyKey.Property;
+
+    private static readonly MewPropertyKey<double> HorizontalOffsetPropertyKey =
+        MewProperty<double>.RegisterReadOnly<ScrollViewer>(nameof(HorizontalOffset), 0);
+    public static readonly MewProperty<double> HorizontalOffsetProperty = HorizontalOffsetPropertyKey.Property;
+
     private readonly ScrollBar _vBar;
     private readonly ScrollBar _hBar;
     private readonly ScrollController _scroll = new();
@@ -91,11 +99,12 @@ public sealed class ScrollViewer : ContentControl
     }
 
     /// <summary>
-    /// Gets the vertical scroll offset.
+    /// Gets the vertical scroll offset. Observable: the value is published whenever the scroll
+    /// state settles, which is also when <see cref="ScrollChanged"/> is raised.
     /// </summary>
     public double VerticalOffset
     {
-        get => _scroll.GetOffsetDip(1);
+        get => GetValue(VerticalOffsetProperty);
         private set
         {
             _scroll.DpiScale = DpiScale;
@@ -117,11 +126,12 @@ public sealed class ScrollViewer : ContentControl
     public double ViewportHeight => _viewport.Height;
 
     /// <summary>
-    /// Gets the horizontal scroll offset.
+    /// Gets the horizontal scroll offset. Observable: the value is published whenever the scroll
+    /// state settles, which is also when <see cref="ScrollChanged"/> is raised.
     /// </summary>
     public double HorizontalOffset
     {
-        get => _scroll.GetOffsetDip(0);
+        get => GetValue(HorizontalOffsetProperty);
         private set
         {
             _scroll.DpiScale = DpiScale;
@@ -588,7 +598,12 @@ public sealed class ScrollViewer : ContentControl
     private void ScrollAxisByNotches(int axis, double notches)
     {
         double dip = notches * Theme.Metrics.ScrollWheelStep;
-        if (Math.Abs(dip) < 0.5)
+
+        // A movement smaller than one device pixel cannot change what is on screen. Measuring that
+        // in DIPs instead would be right only at 200% scale: at 300% it discards movement worth one
+        // and a half pixels, which a slow drag or a coasting scroll does show.
+        double dpiScale = DpiScale > 0 ? DpiScale : 1;
+        if (Math.Abs(dip) * dpiScale < 1)
         {
             return;
         }
@@ -719,29 +734,35 @@ public sealed class ScrollViewer : ContentControl
 
     private void NotifyScrollChanged()
     {
-        var offset = new Point(HorizontalOffset, VerticalOffset);
+        // The controller holds the live offset; publishing it here keeps the observable properties
+        // in step with the ScrollChanged notification.
+        var offset = new Point(_scroll.GetOffsetDip(0), _scroll.GetOffsetDip(1));
+        SetValue(HorizontalOffsetPropertyKey, offset.X);
+        SetValue(VerticalOffsetPropertyKey, offset.Y);
+
         if (_lastNotifiedExtent == _extent && _lastNotifiedViewport == _viewport && _lastNotifiedOffset == offset)
         {
             return;
         }
 
-        // Reveal auto-hidden bars only on actual scrolling (offset moved between two real values), not on
+        // Both of these react to actual scrolling (offset moved between two real values), not to
         // layout/extent changes or the initial offset being established from its NaN sentinel.
         if (!double.IsNaN(_lastNotifiedOffset.X) && _lastNotifiedOffset != offset)
         {
             OnScrolled();
+
+            // Popups anchored to content inside this viewer would be left pointing at the wrong place
+            // (standard desktop UX closes them).
+            if (FindVisualRoot() is Window window)
+            {
+                window.RequestClosePopups(PopupCloseRequest.Scroll(source: this));
+            }
         }
 
         _lastNotifiedExtent = _extent;
         _lastNotifiedViewport = _viewport;
         _lastNotifiedOffset = offset;
         ScrollChanged?.Invoke();
-
-        // Close context menus when content scrolls (standard desktop UX).
-        if (FindVisualRoot() is Window window)
-        {
-            window.RequestClosePopups(PopupCloseRequest.Scroll(source: this));
-        }
     }
 
     // Called when the offset actually moves; reveals the auto-hidden bars for the idle window.
