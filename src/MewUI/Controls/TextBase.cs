@@ -62,8 +62,6 @@ public abstract partial class TextBase : Control, ITextCompositionClient, ITextC
     // the field names they used before the extraction. Reassigned only by ReplaceDocumentCore.
     private protected EditableTextDocument _document;
     private protected TextEditorSession _editor;
-    private protected bool _suppressNewLineInput;
-    private protected bool _suppressTabInput;
     private protected int _compositionStart;
     private protected int _compositionLength;
     private protected CompositionAttr[]? _compositionAttributes;
@@ -217,10 +215,10 @@ public abstract partial class TextBase : Control, ITextCompositionClient, ITextC
         // are resolved by InputMap; direct key handling is limited to caret/navigation mechanics.
         Commands.Register(StandardCommands.Copy, this,
             static textBase => textBase.Copy(),
-            static textBase => textBase._editor.Selection.Length > 0);
+            static textBase => textBase.SupportsClipboardCopy && textBase._editor.Selection.Length > 0);
         Commands.Register(StandardCommands.Cut, this,
             static textBase => textBase.Cut(),
-            static textBase => !textBase.IsReadOnly && textBase._editor.Selection.Length > 0);
+            static textBase => !textBase.IsReadOnly && textBase.SupportsClipboardCopy && textBase._editor.Selection.Length > 0);
         Commands.Register(StandardCommands.Paste, this,
             static textBase => textBase.Paste(),
             static textBase => !textBase.IsReadOnly && textBase.ClipboardHasText());
@@ -300,7 +298,7 @@ public abstract partial class TextBase : Control, ITextCompositionClient, ITextC
 
     public void Copy()
     {
-        if (_editor.Selection.Length > 0)
+        if (SupportsClipboardCopy && _editor.Selection.Length > 0)
         {
             CopyToClipboardCore();
         }
@@ -308,7 +306,7 @@ public abstract partial class TextBase : Control, ITextCompositionClient, ITextC
 
     public void Cut()
     {
-        if (IsReadOnly || _editor.Selection.Length == 0)
+        if (IsReadOnly || !SupportsClipboardCopy || _editor.Selection.Length == 0)
         {
             return;
         }
@@ -322,6 +320,10 @@ public abstract partial class TextBase : Control, ITextCompositionClient, ITextC
             PasteFromClipboardCore(text);
         }
     }
+
+    /// <summary>Whether the control offers its selection to the clipboard at all.</summary>
+    // Off by default so a masking control never advertises a cut that would only delete.
+    private protected virtual bool SupportsClipboardCopy => false;
 
     /// <summary>
     /// The text a clipboard copy exposes. Null by default: only controls that surface their
@@ -455,11 +457,39 @@ public abstract partial class TextBase : Control, ITextCompositionClient, ITextC
         {
             _editor.CommitComposition();
             string normalized = NormalizeExternalText(_document.Normalize(value));
+            long versionBefore = _document.Version;
             _document.SetText(normalized);
             _textSnapshot = normalized;
             _textSnapshotVersion = _document.Version;
-            _editor.ClearHistory();
-            _editor.SetCaret(Math.Min(_editor.CaretPosition, _document.TextLength));
+
+            // SetText is a no-op for equal content; assigning the text the document already holds must
+            // not throw the undo history away or move the caret.
+            if (_document.Version != versionBefore)
+            {
+                _editor.ClearHistory();
+                _editor.SetCaret(Math.Min(_editor.CaretPosition, _document.TextLength));
+            }
+        }
+        finally
+        {
+            _syncingText = false;
+        }
+    }
+
+    /// <summary>
+    /// Assigns <paramref name="value"/> through a control's text setter: the document is updated first
+    /// and the mirror property follows, so the assignment lands even when the stored mirror value is
+    /// stale and equal to <paramref name="value"/>.
+    /// </summary>
+    private protected void SetExternalText(MewProperty<string> mirror, string value)
+    {
+        // The mirror is only committed back on document changes when something observes it, so its
+        // stored value can lag the document; SetValue's change check would then drop a real assignment.
+        ApplyExternalTextCore(value);
+        _syncingText = true;
+        try
+        {
+            SetValue(mirror, value);
         }
         finally
         {
@@ -718,20 +748,7 @@ public abstract partial class TextBase : Control, ITextCompositionClient, ITextC
         }
         TextInput?.Invoke(e);
         if (e.Handled || IsReadOnly) return;
-        string text = e.Text ?? string.Empty;
-        if (_suppressNewLineInput && (text.Contains('\r') || text.Contains('\n')))
-        {
-            _suppressNewLineInput = false;
-            e.Handled = true;
-            return;
-        }
-        if (_suppressTabInput && text.Contains('\t'))
-        {
-            _suppressTabInput = false;
-            e.Handled = true;
-            return;
-        }
-        text = NormalizeTypedText(text);
+        string text = NormalizeTypedText(e.Text ?? string.Empty);
         if (text.Length == 0)
         {
             e.Handled = true;

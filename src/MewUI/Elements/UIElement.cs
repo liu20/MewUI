@@ -59,7 +59,7 @@ public abstract partial class UIElement : Element
             MewPropertyOptions.AffectsVisualState).Property;
 
     /// <summary>
-    /// Whether this element has mouse capture. Read-only; set via <see cref="Window.CaptureMouse"/>.
+    /// Whether this element has mouse capture. Read-only; set via <see cref="Window.CaptureMouse(UIElement)"/>.
     /// </summary>
     public static readonly MewProperty<bool> IsMouseCapturedProperty =
         MewProperty<bool>.RegisterReadOnly<UIElement>(nameof(IsMouseCaptured), false,
@@ -417,7 +417,8 @@ public abstract partial class UIElement : Element
     public event Action<MouseWheelEventArgs>? MouseWheel;
 
     /// <summary>
-    /// Occurs when a key is pressed while the element has focus.
+    /// Occurs when a key is pressed while the element has focus. Marking it handled also drops the
+    /// text input that keystroke would produce.
     /// </summary>
     public event Action<KeyEventArgs>? KeyDown;
 
@@ -705,7 +706,8 @@ public abstract partial class UIElement : Element
         }
 
         var inWindow = TranslatePoint(point, window);
-        return window.ClientToScreen(inWindow);
+        var surface = ResolveInputHostWindow() ?? window;
+        return surface.ClientToScreen(surface.VisualTreePointToSurface(inWindow));
     }
 
     /// <summary>
@@ -721,7 +723,8 @@ public abstract partial class UIElement : Element
             throw new InvalidOperationException("The visual is not connected to a window.");
         }
 
-        var inWindow = window.ScreenToClient(point);
+        var surface = ResolveInputHostWindow() ?? window;
+        var inWindow = surface.SurfacePointToVisualTree(surface.ScreenToClient(point));
         return window.TranslatePoint(inWindow, this);
     }
 

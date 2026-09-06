@@ -84,7 +84,9 @@ internal sealed class MacOSWindowBackend : IWindowBackend
         _imeHasMarkedText || (_imeMode != ImeMode.Disabled && _window.FocusManager.FocusedElement is ITextInputClient);
 
     private bool _isHandlingKeyDown;
+    // Text insertText produced during the current keyDown, held until KeyDown routing decides its fate.
     private string? _pendingKeyDownTextInput;
+    private NSRange _pendingKeyDownReplacementRange;
 
     private void UpdateMetalLayerDisplaySyncIfNeeded()
     {
@@ -178,6 +180,8 @@ internal sealed class MacOSWindowBackend : IWindowBackend
         {
             throw new InvalidOperationException("NSWindow creation failed.");
         }
+
+        ApplyResolvedStartupPlacement();
 
         // Resolve DPI before the framework lays out (step 2) so measure/arrange use the correct scale.
         UpdateDpiIfNeeded();
@@ -598,20 +602,10 @@ internal sealed class MacOSWindowBackend : IWindowBackend
     // contract is top-left, Y-down (see IPlatformHost.GetCursorScreenPosition), matching Window.MoveTo. These
     // helpers convert between the two so all macOS screen pixels honor the top-down contract.
     private Point CocoaScreenPointToTopLeftPx(NSPoint cocoaPoint)
-    {
-        double scale = _lastDpiScale > 0 ? _lastDpiScale : 1.0;
-        var screenFrame = GetPositioningScreenFrame();
-        double topY = (screenFrame.origin.y + screenFrame.size.height) - cocoaPoint.y;
-        return new Point(cocoaPoint.x * scale, topY * scale);
-    }
+        => MacOSInterop.CocoaToScreenPixels(cocoaPoint);
 
     private NSPoint TopLeftPxToCocoaScreenPoint(Point topLeftPx)
-    {
-        double scale = _lastDpiScale > 0 ? _lastDpiScale : 1.0;
-        var screenFrame = GetPositioningScreenFrame();
-        double cocoaY = (screenFrame.origin.y + screenFrame.size.height) - (topLeftPx.Y / scale);
-        return new NSPoint(topLeftPx.X / scale, cocoaY);
-    }
+        => MacOSInterop.ScreenPixelsToCocoa(topLeftPx);
 
     public Point ClientToScreen(Point clientPointDip)
     {
@@ -1150,6 +1144,12 @@ internal sealed class MacOSWindowBackend : IWindowBackend
             return;
         }
 
+        if (_window.StartupPositionPx is { } positionPx)
+        {
+            SetPositionPx(positionPx.X, positionPx.Y);
+            return;
+        }
+
         switch (_window.EffectiveStartupLocation)
         {
             case WindowStartupLocation.CenterScreen:
@@ -1195,19 +1195,7 @@ internal sealed class MacOSWindowBackend : IWindowBackend
         }
     }
 
-    private NSRect GetPositioningScreenFrame()
-    {
-        if (_nsWindow != 0)
-        {
-            var screenFrame = MacOSWindowInterop.GetScreenFrame(_nsWindow);
-            if (screenFrame.size.width > 0 && screenFrame.size.height > 0)
-            {
-                return screenFrame;
-            }
-        }
-
-        return MacOSInterop.GetMainScreenFrame();
-    }
+    private NSRect GetPositioningScreenFrame() => MacOSInterop.GetReferenceScreenFrame();
 
     private void UpdateDpiIfNeeded(bool force = false)
     {
@@ -1734,32 +1722,26 @@ internal sealed class MacOSWindowBackend : IWindowBackend
                 return;
             }
 
+            // A handled KeyDown owns the keystroke: whatever text it would have typed is dropped.
+            if (args.Handled)
+            {
+                if (_pendingKeyDownTextInput != null)
+                {
+                    ImeLogger.Write($"  pending insertText suppressed by handled KeyDown. pending='{Truncate(_pendingKeyDownTextInput)}'");
+                }
+                return;
+            }
+
             if (!routeThroughTextInputClient)
             {
                 DispatchTextInputFromEventCharacters(ev, modifiers);
             }
 
-            // If insertText delivered a Tab/newline during this keyDown, defer it until after KeyDown routing.
-            // This allows KeyDown handlers (e.g. AcceptTab/AcceptReturn) to suppress text input consistently.
-            if (_pendingKeyDownTextInput is { Length: > 0 } pending)
+            // insertText ran inside interpretKeyEvents, before KeyDown routing; emit its text now so
+            // KeyDown handlers see the document before the insertion, as on the other platforms.
+            if (_pendingKeyDownTextInput != null)
             {
-                if (args.Handled)
-                {
-                    ImeLogger.Write($"  pending insertText suppressed by handled KeyDown. pending='{Truncate(pending)}'");
-                    return;
-                }
-
-                var textArgs = new TextInputEventArgs(pending);
-                _window.RaisePreviewTextInput(textArgs);
-                if (!textArgs.Handled)
-                {
-                    if (_window.FocusManager.FocusedElement is ITextInputClient client)
-                    {
-                        client.HandleTextInput(textArgs);
-                    }
-                }
-
-                ImeLogger.Write($"  pending insertText emitted TextInput handled={textArgs.Handled}");
+                EmitInsertedText(_pendingKeyDownTextInput, _pendingKeyDownReplacementRange);
             }
         }
         finally
@@ -1809,12 +1791,7 @@ internal sealed class MacOSWindowBackend : IWindowBackend
         }
 
         var textArgs = new TextInputEventArgs(text);
-        _window.RaisePreviewTextInput(textArgs);
-        if (!textArgs.Handled && _window.FocusManager.FocusedElement is ITextInputClient client)
-        {
-            client.HandleTextInput(textArgs);
-        }
-
+        WindowInputRouter.TextInput(_window, textArgs);
         ImeLogger.Write($"Event characters emitted TextInput handled={textArgs.Handled} text='{Truncate(text)}'");
     }
 
@@ -1993,6 +1970,25 @@ internal sealed class MacOSWindowBackend : IWindowBackend
             return;
         }
 
+        // Cocoa routes plain typing through insertText inside interpretKeyEvents, before the app's KeyDown.
+        // Hold it so a handled KeyDown can drop it; text arriving outside a keyDown (dictation, the character
+        // palette) is not a keystroke's and goes straight through.
+        if (_isHandlingKeyDown && !_imeHasMarkedText && _imeState == ImeState.Ground)
+        {
+            if (_pendingKeyDownTextInput == null)
+            {
+                _pendingKeyDownReplacementRange = replacementRange;
+            }
+            _pendingKeyDownTextInput += text;
+            ImeLogger.Write($"  insertText buffered for post-KeyDown dispatch. pending='{Truncate(_pendingKeyDownTextInput)}'");
+            return;
+        }
+
+        EmitInsertedText(text, replacementRange);
+    }
+
+    private void EmitInsertedText(string text, NSRange replacementRange)
+    {
         // If the platform provides a replacement range, align our selection/caret so the inserted text
         // replaces the intended portion of the document.
         if (replacementRange.location != NSNotFound && _window.FocusManager.FocusedElement is ITextCompositionEditor replaceEditor)
@@ -2000,18 +1996,6 @@ internal sealed class MacOSWindowBackend : IWindowBackend
             int start = (int)replacementRange.location;
             int end = start + (int)replacementRange.length;
             replaceEditor.SetSelectionRangeForPlatform(start, end);
-        }
-
-        // Cocoa routes plain text input through insertText during keyDown handling.
-        if (_isHandlingKeyDown && !_imeHasMarkedText && _imeState == ImeState.Ground)
-        {
-            var normalized = TextInputEventArgs.NormalizeText(text);
-            if (normalized is "\t" or "\n")
-            {
-                _pendingKeyDownTextInput = normalized;
-                ImeLogger.Write($"  insertText buffered for post-KeyDown dispatch. pending='{Truncate(normalized)}'");
-                return;
-            }
         }
 
         // Filter out non-text control characters.
@@ -2032,14 +2016,7 @@ internal sealed class MacOSWindowBackend : IWindowBackend
         }
 
         var textArgs = new TextInputEventArgs(text);
-        _window.RaisePreviewTextInput(textArgs);
-        if (!textArgs.Handled)
-        {
-            if (_window.FocusManager.FocusedElement is ITextInputClient client)
-            {
-                client.HandleTextInput(textArgs);
-            }
-        }
+        WindowInputRouter.TextInput(_window, textArgs);
         ImeLogger.Write($"  insertText emitted TextInput handled={textArgs.Handled}");
     }
 

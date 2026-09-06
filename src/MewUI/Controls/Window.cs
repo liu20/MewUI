@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 
@@ -158,6 +158,39 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
     private Point _hostedPortalOrigin;
     private Point _lastLayoutPortalOrigin;
+    private double _hostedPortalScale = 1.0;
+
+    internal double HostedPortalScale
+    {
+        get => _hostedPortalScale;
+        set
+        {
+            if (!double.IsFinite(value) || value <= 0) throw new ArgumentOutOfRangeException(nameof(value));
+            if (_hostedPortalScale == value) return;
+            _hostedPortalScale = value;
+            InvalidateMeasure();
+        }
+    }
+
+    // Sample a long segment to avoid integer screen-coordinate rounding at fractional DPI.
+    // macOS uses one virtual-desktop reference scale, independently of surface backing DPI.
+    internal double ScreenUnitsPerDip
+    {
+        get
+        {
+            if (Handle == 0) return DpiScale;
+            var a = ClientToScreen(Point.Zero);
+            var b = ClientToScreen(new Point(1024, 0));
+            return Math.Max(0.0001, Math.Abs(b.X - a.X) / 1024);
+        }
+    }
+
+    internal Point VisualTreePointToSurface(Point point)
+        => _hostedPortalRoot == null ? point : new Point(
+            (point.X - _hostedPortalOrigin.X) * _hostedPortalScale,
+            (point.Y - _hostedPortalOrigin.Y) * _hostedPortalScale);
+
+    internal virtual void OnSurfaceCreated() { }
 
     /// <summary>
     /// Position (in the owner window's coordinate space) where the hosted portal subtree is arranged.
@@ -189,7 +222,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             return surfacePoint;
         }
 
-        return new Point(surfacePoint.X + _hostedPortalOrigin.X, surfacePoint.Y + _hostedPortalOrigin.Y);
+        return new Point(surfacePoint.X / _hostedPortalScale + _hostedPortalOrigin.X, surfacePoint.Y / _hostedPortalScale + _hostedPortalOrigin.Y);
     }
 
     private readonly List<AdornerEntry> _adorners = new();
@@ -231,6 +264,62 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
     internal UIElement? MouseOverElement => _mouseOverElement;
 
+    // A bitmap-cache capture costs a render-target switch and a flush, which on a phone GPU is a
+    // dropped frame. While a scroll gesture runs no capture is taken (the subtree renders live), and
+    // for a short settle after it captures are rationed per frame so they do not all land at once.
+    private const int CAPTURES_PER_FRAME_WHILE_SETTLING = 1;
+    private const double SCROLL_SETTLE_MS = 500;
+    private bool _scrollGestureActive;
+    private long _scrollGestureEndedTicks = long.MinValue;
+    private int _captureBudgetRemaining = int.MaxValue;
+
+    /// <summary>Tells the window whether a finger-driven scroll (pan or its coast) is in progress.</summary>
+    internal void SetScrollGestureActive(bool active)
+    {
+        if (_scrollGestureActive == active)
+        {
+            return;
+        }
+
+        _scrollGestureActive = active;
+        if (!active)
+        {
+            _scrollGestureEndedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        }
+    }
+
+    private void ResetCaptureBudgetForFrame()
+    {
+        if (_scrollGestureActive)
+        {
+            _captureBudgetRemaining = 0;
+        }
+        else if (System.Diagnostics.Stopwatch.GetElapsedTime(_scrollGestureEndedTicks).TotalMilliseconds < SCROLL_SETTLE_MS)
+        {
+            _captureBudgetRemaining = CAPTURES_PER_FRAME_WHILE_SETTLING;
+        }
+        else
+        {
+            _captureBudgetRemaining = int.MaxValue;
+        }
+    }
+
+    /// <summary>Claims one bitmap-cache capture for this frame; false means the element must render live and try again next frame.</summary>
+    internal bool TryTakeCaptureBudget()
+    {
+        if (_captureBudgetRemaining <= 0)
+        {
+            return false;
+        }
+
+        if (_captureBudgetRemaining != int.MaxValue)
+        {
+            _captureBudgetRemaining--;
+        }
+
+        return true;
+    }
+
     internal UIElement? CapturedElement => _capturedElement;
 
     internal bool HasMouseCapture => _capturedElement != null;
@@ -242,6 +331,15 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             _capturedElement.SetMouseCaptured(false);
             _capturedElement = null;
         }
+
+        NotifyCaptureLost();
+    }
+
+    private void NotifyCaptureLost()
+    {
+        var onCaptureLost = _captureLostCallback;
+        _captureLostCallback = null;
+        onCaptureLost?.Invoke();
     }
 
     internal void ClearMouseOverState()
@@ -302,6 +400,13 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     {
         ApplicationDispatcher?.BeginInvoke(DispatcherPriority.Layout, () =>
         {
+            // A finger does not hover, so a scroll it drives must not light whatever passes under
+            // its last position. Only a device that reports an in-range position re-evaluates.
+            if (_lastPointerType == PointerType.Touch)
+            {
+                return;
+            }
+
             // When layout/scroll offsets change without an actual mouse move, the element under the cursor can change.
             // Re-run hit testing at the last known mouse position to keep IsMouseOver state accurate.
             // Use a real hit test: mouse-over must track the pointer's actual target even during capture.
@@ -309,6 +414,12 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             WindowInputRouter.UpdateMouseOver(this, leaf);
         });
     }
+
+    // The device behind the most recent pointer event, so scroll-driven hover re-evaluation can
+    // tell a finger from a mouse.
+    private PointerType _lastPointerType;
+
+    internal void NoteLastPointerType(PointerType pointerType) => _lastPointerType = pointerType;
 
     internal void UpdateMouseOverChain(UIElement? oldLeaf, UIElement? newLeaf)
     {
@@ -1180,7 +1291,8 @@ public partial class Window : ContentControl, ILayoutRoundingHost
 
     /// <summary>
     /// Preview (tunneling) keyboard events for the whole window.
-    /// If <see cref="KeyEventArgs.Handled"/> is set, the focused element will not receive the event.
+    /// If <see cref="KeyEventArgs.Handled"/> is set, the focused element will not receive the event
+    /// and the text input that keystroke would produce is dropped.
     /// </summary>
     public event Action<KeyEventArgs>? PreviewKeyDown;
 
@@ -1324,6 +1436,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         //   4) PresentSurface  paint the hidden window, then reveal it (no flash; Loaded changes are in
         //                      the first on-screen frame)
         _backend!.CreateSurface();
+        OnSurfaceCreated();
         PerformLayout();
         RaiseLoadedIfReady();
         _backend!.PresentSurface();
@@ -2146,6 +2259,8 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             clientSize = _clientSizeDip;
             padding = Padding;
             var contentSize = clientSize.Deflate(padding);
+            if (_hostedPortalRoot != null)
+                contentSize = new Size(contentSize.Width / _hostedPortalScale, contentSize.Height / _hostedPortalScale);
 
             ulong generationBefore = _updateGeneration;
 
@@ -2442,7 +2557,14 @@ public partial class Window : ContentControl, ILayoutRoundingHost
     /// Captures mouse input for the specified element until released.
     /// </summary>
     /// <param name="element">Element that should receive captured mouse events.</param>
-    public void CaptureMouse(UIElement element)
+    public void CaptureMouse(UIElement element) => CaptureMouse(element, null);
+
+    /// <summary>
+    /// Captures mouse input for the element and runs <paramref name="onCaptureLost"/> once when the
+    /// capture ends for any reason: release, another element capturing, pointer cancel, or the
+    /// platform revoking it.
+    /// </summary>
+    internal void CaptureMouse(UIElement element, Action? onCaptureLost)
     {
         if (_lifetimeState == WindowLifetimeState.Closed)
         {
@@ -2456,7 +2578,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         if (inputHost != null && !ReferenceEquals(inputHost, this))
         {
             _captureDelegatedTo = inputHost;
-            inputHost.CaptureMouse(element);
+            inputHost.CaptureMouse(element, onCaptureLost);
             return;
         }
 
@@ -2472,15 +2594,20 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         if (_capturedElement != null && !ReferenceEquals(_capturedElement, element))
         {
             _capturedElement.SetMouseCaptured(false);
+            NotifyCaptureLost();
         }
 
         _capturedElement = element;
+        _captureLostCallback = onCaptureLost;
         element.SetMouseCaptured(true);
     }
 
     // The popup surface a capture was delegated to, so a later ReleaseMouseCapture on this owner window
     // (callers resolve capture/release symmetrically through FindVisualRoot) reaches the same surface.
     private Window? _captureDelegatedTo;
+
+    // Runs once when the current capture ends; set together with _capturedElement.
+    private Action? _captureLostCallback;
 
     /// <summary>
     /// Releases any active mouse capture for this window.
@@ -2748,6 +2875,8 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             return;
         }
 
+        ResetCaptureBudgetForFrame();
+
         // Some platforms can render before Loaded is raised due to Run/Show/Dispatcher ordering.
         // Ensure Loaded is raised as soon as the dispatcher is available, and always before FirstFrameRendered.
         if (!_loadedRaised && Application.IsRunning && Application.Current.Dispatcher != null)
@@ -2854,7 +2983,7 @@ public partial class Window : ContentControl, ILayoutRoundingHost
             // owner but inside this surface is not culled by the viewport-bounds check in Render.
             var previousCullViewport = UIElement.RenderCullViewport;
             UIElement.RenderCullViewport = new Rect(
-                _hostedPortalOrigin.X, _hostedPortalOrigin.Y, clientSize.Width, clientSize.Height);
+                _hostedPortalOrigin.X, _hostedPortalOrigin.Y, clientSize.Width / _hostedPortalScale, clientSize.Height / _hostedPortalScale);
 
             // Ensure nothing paints outside the client area.
             context.Save();
@@ -2866,11 +2995,12 @@ public partial class Window : ContentControl, ILayoutRoundingHost
                 phaseStart = profiling ? Stopwatch.GetTimestamp() : 0;
                 using (profiling ? ProfilerMarkers.ContentRender.Auto() : default)
                 {
-                    if (_hostedPortalRoot != null && _hostedPortalOrigin != default)
+                    if (_hostedPortalRoot != null)
                     {
                         // The portal subtree is arranged in the owner's coordinate space; shift it back
                         // to this surface's origin for painting.
                         context.Save();
+                        context.Scale(_hostedPortalScale, _hostedPortalScale);
                         context.Translate(-_hostedPortalOrigin.X, -_hostedPortalOrigin.Y);
                         _hostedPortalRoot.Render(context);
                         context.Restore();
@@ -3300,7 +3430,8 @@ public partial class Window : ContentControl, ILayoutRoundingHost
         OnDpiChanged(oldDpi, newDpi);
         DpiChanged?.Invoke(oldDpi, newDpi);
 
-        if (EffectiveVisualRoot != null)
+        // A portal keeps owner layout DPI; a surface DPI change only changes its output transform.
+        if (EffectiveVisualRoot != null && _hostedPortalRoot == null)
         {
             // Clear cached DPI values so subsequent GetDpi() calls don't traverse parents.
             // This also ensures subtrees moved between windows/tabs don't retain stale DPI.

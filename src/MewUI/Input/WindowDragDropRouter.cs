@@ -130,6 +130,13 @@ internal static class WindowDragDropRouter
         }
     }
 
+    /// <summary>Drops the pending drag candidate and cancels any active session when the pointer sequence is cancelled.</summary>
+    internal static void OnPointerCancel()
+    {
+        _candidate = null;
+        CancelActive();
+    }
+
     /// <summary>Cancels any active drag session (Esc, source window closing, etc.).</summary>
     public static void CancelActive()
     {
@@ -522,10 +529,10 @@ internal static class WindowDragDropRouter
     private static void MovePreviewWindow(Window previewWindow, DragSession session, Point screenPositionPx)
     {
         // Top-left = cursor - hotspot. screenPositionPx is top-left Y-down px (matches MoveTo).
-        double scale = previewWindow.DpiScale > 0 ? previewWindow.DpiScale : 1.0;
-        previewWindow.MoveTo(
-            screenPositionPx.X / scale - session.PreviewHotspot.X,
-            screenPositionPx.Y / scale - session.PreviewHotspot.Y);
+        double scale = previewWindow.ScreenUnitsPerDip;
+        previewWindow.MoveToPx(
+            (int)Math.Round(screenPositionPx.X - session.PreviewHotspot.X * scale),
+            (int)Math.Round(screenPositionPx.Y - session.PreviewHotspot.Y * scale));
     }
 
     private static void UpdatePreviewPosition(Window? targetWindow, DragSession session, Point cursorInWindow, Point screenPosition)

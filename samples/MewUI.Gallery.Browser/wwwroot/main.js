@@ -26,8 +26,10 @@ let pixelConfirmed = false;
 let frameErrorCount = 0;
 const MAX_LOGGED_FRAME_ERRORS = 5;
 
-// Floor for the IME field, so a caret near the right edge still has a box a pre-edit fits in.
-const MIN_TEXT_INPUT_WIDTH_PX = 200;
+// Text, IME composition and the hidden field they run through belong to the platform, which ships
+// this module beside the runtime; the page only wires it to its own canvas and field.
+const { createTextInputBridge } = await import(`./mewui-text-input.js${new URL(import.meta.url).search}`);
+
 let frameScheduled = false;
 let idleFrames = 0;
 let wakeTimer = 0;
@@ -36,14 +38,25 @@ const IDLE_FRAMES_BEFORE_SLEEP = 3;
 // Resizing the backing store clears the drawing buffer, and the context is created without
 // preserveDrawingBuffer, so the resize has to happen in the frame that redraws it. Doing this
 // from the resize event instead lets the browser composite a cleared buffer, which flickers.
+// CSS size of the canvas in its own box, kept for the frame that reports it to the app.
+let canvasCssWidth = 0;
+let canvasCssHeight = 0;
+
 function syncCanvasSize() {
     const dpr = window.devicePixelRatio || 1;
-    const width = Math.max(1, Math.round(canvas.clientWidth * dpr));
-    const height = Math.max(1, Math.round(canvas.clientHeight * dpr));
+
+    // The box is measured rather than read from clientWidth, which reports it rounded to whole CSS
+    // pixels. At a fractional display scale that rounding sizes the drawing buffer a pixel away
+    // from the box the browser composites it into, and the whole canvas is resampled to fit.
+    const rect = canvas.getBoundingClientRect();
+    canvasCssWidth = rect.width;
+    canvasCssHeight = rect.height;
+    const width = Math.max(1, Math.round(rect.width * dpr));
+    const height = Math.max(1, Math.round(rect.height * dpr));
     if (canvas.width !== width || canvas.height !== height) {
         canvas.width = width;
         canvas.height = height;
-        console.log(`[resize] css=${canvas.clientWidth}x${canvas.clientHeight} buffer=${width}x${height} dpr=${dpr}`);
+        console.log(`[resize] css=${rect.width}x${rect.height} buffer=${width}x${height} dpr=${dpr}`);
     }
 
     return dpr;
@@ -55,24 +68,12 @@ const { getAssemblyExports, getConfig, runMain, setModuleImports } = await dotne
 // Writing needs a user gesture, which a copy or cut always is, and nothing waits on the result.
 setModuleImports('main.js', {
     writeClipboard: text => { navigator.clipboard?.writeText(text).catch(() => {}); },
-    // The browser hangs the IME candidate list off the focused field, so the field has to sit on
-    // the caret. Left where it starts, the candidates appear in the top left corner of the page.
-    moveTextInput: (x, y, height) => {
-        const rect = canvas.getBoundingClientRect();
-        textInput.style.left = `${rect.left + x}px`;
-        textInput.style.top = `${rect.top + y}px`;
-        textInput.style.height = `${Math.max(1, height)}px`;
-
-        // The browser lays the pre-edit out inside this field and reports those bounds to the IME.
-        // A field too narrow for the pre-edit scrolls it instead, which walks the reported start
-        // leftward as the text grows and drags the candidate window along with it, so the field is
-        // given the room the text on screen has.
-        textInput.style.width = `${Math.max(MIN_TEXT_INPUT_WIDTH_PX, rect.width - x)}px`;
-    },
+    moveTextInput: (x, y, height) => textInputBridge.place(x, y, height),
 });
 const config = getConfig();
 const exports = await getAssemblyExports(config.mainAssemblyName);
 const app = exports.Aprillz.MewUI.Gallery.BrowserExports;
+const textInputBridge = createTextInputBridge({ app, canvas, field: textInput, wake });
 
 // ThemeVariant.System resolves through the host, so the page's colour scheme has to be in place
 // before the first window is created, and a later change has to re-resolve it.
@@ -190,7 +191,7 @@ canvas.addEventListener('pointermove', event => {
         }
     }
 
-    app.PointerMove(point.x, point.y, event.screenX, event.screenY, event.buttons, modifiersOf(event));
+    app.PointerMove(point.x, point.y, event.screenX, event.screenY, event.buttons, modifiersOf(event), pointerTypeOf(event));
     if (gesture !== null && app.CaptureConsumesDrag()) {
         endTouchGesture(event.pointerId);
     }
@@ -208,7 +209,7 @@ canvas.addEventListener('pointerdown', event => {
 
     // The press decides what has focus, so the text field follows it rather than the other way
     // round. This still runs inside the gesture, which is what lets a phone raise its keyboard.
-    syncTextInputFocus();
+    textInputBridge.sync();
 
     // Only the first finger drives a scroll; a second one is left to the normal pointer path.
     const tracksTouch = event.pointerType === 'touch' && !app.CaptureConsumesDrag() && touchGesture === null;
@@ -326,44 +327,6 @@ canvas.addEventListener('wheel', event => {
 
 canvas.addEventListener('contextmenu', event => event.preventDefault());
 
-// Text and composition run through a visually hidden input, because the canvas itself never
-// receives them. Focusing that input is what raises the on-screen keyboard on a phone, so it is
-// held only while a text control has focus; keys are taken from the window so they arrive either
-// way. Composition state has to settle before the focus moves, or the commit is lost.
-// Focusing and blurring raise their events while this is still running, and the handlers that
-// deliver text call back into here, so one pass has to finish before another starts.
-let syncingTextInput = false;
-
-function syncTextInputFocus() {
-    if (syncingTextInput) {
-        return;
-    }
-
-    syncingTextInput = true;
-    try {
-        const wanted = app.WantsTextInput();
-        if (wanted && document.activeElement !== textInput) {
-            textInput.focus({ preventScroll: true });
-        } else if (!wanted && !composing && document.activeElement === textInput) {
-            textInput.blur();
-        }
-
-        // The caret moves with every keystroke and every click inside the text, and the candidate
-        // list is placed when composition starts, so the field has to already be there.
-        if (wanted) {
-            app.SyncTextCaret();
-        }
-    } finally {
-        syncingTextInput = false;
-    }
-}
-
-let composing = false;
-
-// A soft keyboard reports 229 or no code at all, which is how an edit intent is told apart from a
-// hardware key that already delivered itself.
-let softKeyboardKey = false;
-
 // Set by a held-back paste shortcut, so the replay carries the modifier the user actually pressed.
 // A paste from the operating system menu leaves it null and falls back to the primary modifier.
 let pendingPasteModifiers = null;
@@ -386,8 +349,7 @@ textInput.addEventListener('paste', event => {
 
 window.addEventListener('keydown', event => {
     wake();
-    softKeyboardKey = !event.code || event.code === 'Unidentified' || event.keyCode === 229;
-    if (composing) {
+    if (textInputBridge.claimsKey(event)) {
         return;
     }
 
@@ -399,80 +361,32 @@ window.addEventListener('keydown', event => {
     }
 
     const handled = app.KeyDown(event.code, event.keyCode || 0, modifiersOf(event), event.repeat);
-    // Tab and browser shortcuts would otherwise move focus out of the canvas.
-    if (handled || event.code === 'Tab' || event.code === 'Space' || event.code.startsWith('Arrow')) {
+    // A key the app took must not also edit the field, and Tab or an arrow would otherwise move
+    // focus out of the canvas or scroll the page.
+    if (handled || event.code === 'Tab' || event.code.startsWith('Arrow')) {
         event.preventDefault();
     }
 
-    // A key can move focus onto or off a text control.
-    syncTextInputFocus();
+    // A key can move focus onto or off a text control, and one the app handled has moved its caret.
+    textInputBridge.sync();
 });
 
 window.addEventListener('keyup', event => {
     wake();
-    if (!composing) {
+    if (!textInputBridge.composing && event.keyCode !== 229 && event.key !== 'Process') {
         app.KeyUp(event.code, event.keyCode || 0, modifiersOf(event));
     }
 });
 
-// The pre-edit is routed rather than only its result, so a composing control shows the text being
-// built. Ending the composition commits what it carries, which is why no text input follows it.
-textInput.addEventListener('compositionstart', () => { wake(); composing = true; app.CompositionStart(); });
-textInput.addEventListener('compositionupdate', event => { wake(); app.CompositionUpdate(event.data ?? ''); });
-textInput.addEventListener('compositionend', event => {
-    wake();
-    composing = false;
-    app.CompositionEnd(event.data ?? '');
-    textInput.value = '';
-    syncTextInputFocus();
-});
-
-// A soft keyboard reports edits by intent rather than by key: it sends no usable key code, so the
-// editing ones are turned back into the key the control expects. A hardware key already delivered
-// its own keydown, and re-sending it here would apply the edit twice.
-const EDIT_INTENT_KEYS = {
-    deleteContentBackward: 'Backspace',
-    deleteContentForward: 'Delete',
-    deleteWordBackward: 'Backspace',
-    insertLineBreak: 'Enter',
-    insertParagraph: 'Enter',
-};
-
-textInput.addEventListener('beforeinput', event => {
-    if (event.isComposing || !softKeyboardKey) {
-        return;
-    }
-
-    const key = EDIT_INTENT_KEYS[event.inputType];
-    if (key === undefined) {
-        return;
-    }
-
-    wake();
-    app.KeyDown(key, 0, 0, false);
-    app.KeyUp(key, 0, 0);
-    event.preventDefault();
-});
-
-textInput.addEventListener('input', event => {
-    wake();
-    if (composing || event.isComposing) {
-        return;
-    }
-
-    if (event.inputType === 'insertText' && event.data) {
-        app.TextInput(event.data);
-        // keydown syncs before the text arrives, so without this the field trails the caret by a
-        // character and the next composition opens its candidates there.
-        syncTextInputFocus();
-    }
-
-    textInput.value = '';
-});
-
 // Window activation is the page's own, not the hidden input's, which comes and goes with text focus.
 window.addEventListener('focus', () => { wake(); app.FocusChanged(true); });
-window.addEventListener('blur', () => { wake(); app.FocusChanged(false); });
+window.addEventListener('blur', () => {
+    wake();
+    // A composition the page leaves mid-flight gets no compositionend of its own, and the control
+    // would keep showing a pre-edit nothing can finish.
+    textInputBridge.endComposition();
+    app.FocusChanged(false);
+});
 
 app.FocusChanged(document.hasFocus());
 
@@ -532,8 +446,8 @@ function frame(frameTimeMs) {
     try {
         const dpr = syncCanvasSize();
         const drew = app.RenderFrame(
-            canvas.clientWidth,
-            canvas.clientHeight,
+            canvasCssWidth,
+            canvasCssHeight,
             dpr,
             canvas.width,
             canvas.height,

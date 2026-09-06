@@ -16,7 +16,7 @@ public sealed class TextBox : SingleLineTextBase
     public string Text
     {
         get => GetTextSnapshot();
-        set => SetValue(TextProperty, value ?? string.Empty);
+        set => SetExternalText(TextProperty, value ?? string.Empty);
     }
 
     private protected override MewProperty<string>? TextSyncProperty => TextProperty;
@@ -25,6 +25,8 @@ public sealed class TextBox : SingleLineTextBase
     /// Gets the currently selected text.
     /// </summary>
     public string SelectedText => GetSelectedDocumentText();
+
+    private protected override bool SupportsClipboardCopy => true;
 
     private protected override string? GetClipboardCopyText() => SelectedText;
 }

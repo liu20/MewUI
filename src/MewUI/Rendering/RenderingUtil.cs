@@ -1,14 +1,52 @@
+using System.Numerics;
+
 namespace Aprillz.MewUI.Rendering;
 
 internal static class RenderingUtil
 {
-    public static int RoundToPixelInt(double value, double dpiScale)
+    // 1/64 px, the 26.6 fixed-point grid font rasterizers already quantize to.
+    private const double DEVICE_SUBPIXEL_GRID = 64;
+
+    /// <summary>Rounds a device-pixel coordinate to a whole pixel, identically in every pass.</summary>
+    public static int RoundDevicePixel(double devicePixels)
     {
-        // Quantized to the 1/64 px font grid before rounding: a cache pass differs from the window
-        // pass only by a float-precision translation, and folding that error away keeps a midpoint
-        // coordinate from rounding to different pixels in the two passes.
-        double devicePx = Math.Round(value * dpiScale * 64) / 64;
-        return (int)Math.Round(devicePx, MidpointRounding.AwayFromZero);
+        // A capture's integer-pixel translate rides in a float matrix, and that error flips an exact
+        // half pixel to the other pixel; quantizing to the subpixel grid first folds it away.
+        double quantized = Math.Round(devicePixels * DEVICE_SUBPIXEL_GRID) / DEVICE_SUBPIXEL_GRID;
+        return (int)Math.Round(quantized, MidpointRounding.AwayFromZero);
+    }
+
+    public static int RoundToPixelInt(double value, double dpiScale)
+        => RoundDevicePixel(value * dpiScale);
+
+    /// <summary>
+    /// Snaps a text origin onto the device pixel grid with the transform's translation included, and
+    /// returns it in the caller's own coordinates. A rotated or skewed transform returns it unchanged.
+    /// </summary>
+    public static Point SnapTextOriginToDevice(Point origin, in Matrix3x2 transform, double dpiScale)
+    {
+        // Snapping local coordinates instead would put a capture's rows on a different grid than the
+        // window pass, because only one of the two carries the capture's translation.
+        if (transform.M12 != 0f || transform.M21 != 0f)
+        {
+            return origin;
+        }
+
+        double x = origin.X;
+        double y = origin.Y;
+        if (transform.M11 != 0f)
+        {
+            double world = x * transform.M11 + transform.M31;
+            x = (RoundDevicePixel(world * dpiScale) / dpiScale - transform.M31) / transform.M11;
+        }
+
+        if (transform.M22 != 0f)
+        {
+            double world = y * transform.M22 + transform.M32;
+            y = (RoundDevicePixel(world * dpiScale) / dpiScale - transform.M32) / transform.M22;
+        }
+
+        return new Point(x, y);
     }
 
     public static int CeilToPixelInt(double value, double dpiScale)

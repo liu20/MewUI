@@ -1,3 +1,4 @@
+using Aprillz.MewUI.Input;
 using Aprillz.MewUI.Platform.Browser;
 
 namespace Aprillz.MewUI;
@@ -30,8 +31,9 @@ public static class BrowserPlatform
     {
         // The canvas is the only surface, so popups, menus and drag previews have to live inside it.
         PopupManager.PreferNativePopups = false;
-        Input.WindowDragDropRouter.PreferNativePreviewWindow = false;
+        WindowDragDropRouter.PreferNativePreviewWindow = false;
         Window.PreferNativeDialogWindows = false;
+        
         Application.RegisterPlatformHost(
             static () => new BrowserPlatformHost(),
             Platform.PlatformSurfaceKind.Browser,
@@ -53,8 +55,9 @@ public static class BrowserPlatform
     /// <summary>Milliseconds until a scheduled timer needs the loop again, or -1 when nothing is due.</summary>
     public static int NextWakeDelayMs() => BrowserPlatformHost.Active?.NextWakeDelayMs() ?? -1;
 
-    public static bool PointerMove(double x, double y, double screenX, double screenY, int buttons, ModifierKeys modifiers)
-        => BrowserPlatformHost.Active?.PointerMove(x, y, screenX, screenY, buttons, modifiers) == true;
+    /// <summary>Routes a pointer move; pointerType is 0 for a mouse, 1 for touch, 2 for a pen.</summary>
+    public static bool PointerMove(double x, double y, double screenX, double screenY, int buttons, ModifierKeys modifiers, int pointerType)
+        => BrowserPlatformHost.Active?.PointerMove(x, y, screenX, screenY, buttons, modifiers, MapPointerType(pointerType)) == true;
 
     /// <summary>
     /// Routes a pointer press or release; pointerType is 0 for a mouse, 1 for touch, 2 for a pen.
@@ -63,8 +66,10 @@ public static class BrowserPlatform
     public static bool PointerButton(double x, double y, double screenX, double screenY, int button, int buttons,
         bool isDown, double timeStampMs, ModifierKeys modifiers, int pointerType)
         => BrowserPlatformHost.Active?.PointerButton(
-            x, y, screenX, screenY, button, buttons, isDown, timeStampMs, modifiers,
-            pointerType switch { 1 => PointerType.Touch, 2 => PointerType.Pen, _ => PointerType.Mouse }) == true;
+            x, y, screenX, screenY, button, buttons, isDown, timeStampMs, modifiers, MapPointerType(pointerType)) == true;
+
+    private static PointerType MapPointerType(int pointerType)
+        => pointerType switch { 1 => PointerType.Touch, 2 => PointerType.Pen, _ => PointerType.Mouse };
 
     public static void PointerWheel(double x, double y, double screenX, double screenY,
         double deltaX, double deltaY, int buttons, ModifierKeys modifiers)
@@ -126,6 +131,16 @@ public static class BrowserPlatform
 
     public static bool TextInput(string text)
         => BrowserPlatformHost.Active?.TextInput(text) == true;
+
+    /// <summary>
+    /// Text around the caret for the page to mirror into its IME field, as "start:end:text" over
+    /// that text; empty when nothing editable holds focus.
+    /// </summary>
+    public static string GetTextInputState() => BrowserPlatformHost.Active?.GetTextInputState() ?? string.Empty;
+
+    /// <summary>Replaces the given number of characters around the caret with <paramref name="text"/>.</summary>
+    public static void ReplaceText(int replacePrevious, int replaceNext, string text)
+        => BrowserPlatformHost.Active?.ReplaceText(replacePrevious, replaceNext, text);
 
     public static void FocusChanged(bool focused)
     {

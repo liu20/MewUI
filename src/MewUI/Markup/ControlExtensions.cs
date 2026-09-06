@@ -1444,6 +1444,17 @@ public static class ControlExtensions
     }
 
     /// <summary>
+    /// Sets the value the control hands its command as the invocation argument.
+    /// </summary>
+    public static T CommandData<T>(this T control, object? data)
+        where T : CommandSourceControl
+    {
+        ArgumentNullException.ThrowIfNull(control);
+        control.CommandData = data;
+        return control;
+    }
+
+    /// <summary>
     /// Sets what the control builds a tooltip from when it has no tooltip of its own.
     /// </summary>
     /// <param name="control">Target command source.</param>
@@ -3622,6 +3633,47 @@ public static class ControlExtensions
     }
 
     /// <summary>
+    /// Configures the container placed around each row once its content is bound, so behavior can be
+    /// attached to the whole row, indent and expander included, instead of to the template. Without
+    /// a hook the template root sits in the content area and no container exists.
+    /// </summary>
+    /// <remarks>
+    /// The callback runs on every bind, which includes scrolling a row back into view, so keep it
+    /// cheap. Register event subscriptions through the supplied context and they are removed before
+    /// the next item is bound; properties assigned directly are reset by the framework instead.
+    /// </remarks>
+    /// <typeparam name="T">Item type.</typeparam>
+    /// <param name="treeView">Target tree view.</param>
+    /// <param name="prepare">Container configuration callback.</param>
+    /// <returns>The tree view for chaining.</returns>
+    public static TreeView PrepareContainer<T>(this TreeView treeView, PrepareContainerHandler<ItemContainer, T> prepare)
+    {
+        ArgumentNullException.ThrowIfNull(treeView);
+        ArgumentNullException.ThrowIfNull(prepare);
+
+        treeView.SetPrepareContainer((container, item, index, context) => prepare(container, (T)item!, index, context));
+        return treeView;
+    }
+
+    /// <summary>
+    /// Releases what <see cref="PrepareContainer{T}(TreeView, PrepareContainerHandler{ItemContainer, T})"/>
+    /// attached outside the template context, before the container takes another item. Most hooks
+    /// need no counterpart: context subscriptions and container properties are undone for you.
+    /// </summary>
+    /// <typeparam name="T">Item type.</typeparam>
+    /// <param name="treeView">Target tree view.</param>
+    /// <param name="clear">Container release callback.</param>
+    /// <returns>The tree view for chaining.</returns>
+    public static TreeView ClearContainer<T>(this TreeView treeView, PrepareContainerHandler<ItemContainer, T> clear)
+    {
+        ArgumentNullException.ThrowIfNull(treeView);
+        ArgumentNullException.ThrowIfNull(clear);
+
+        treeView.SetClearContainer((container, item, index, context) => clear(container, (T)item!, index, context));
+        return treeView;
+    }
+
+    /// <summary>
     /// Uses fixed-height row virtualization (default). Rows assume <see cref="GridView.RowHeight"/>
     /// or the theme default; cell content taller than that clips.
     /// </summary>
@@ -3962,6 +4014,17 @@ public static class ControlExtensions
         return menu;
     }
 
+    /// <summary>
+    /// Adds a command item that passes <paramref name="data"/> as the invocation argument, so several
+    /// items can share one command and differ only in the value they pass.
+    /// </summary>
+    public static ContextMenu Item(this ContextMenu menu, string text, Command command, object? data)
+    {
+        ArgumentNullException.ThrowIfNull(menu);
+        menu.AddItem(text, command, data);
+        return menu;
+    }
+
     /// <summary>Adds a non-executable presentation item.</summary>
     public static ContextMenu Item(this ContextMenu menu, string text, bool isEnabled = true)
     {
@@ -4169,6 +4232,38 @@ public static class ControlExtensions
         Action<FrameworkElement, TItem, int, TemplateContext> bind,
         Action<FrameworkElement, TItem, int, TemplateContext>? unbind = null)
         => ItemTemplate(comboBox, new DelegateTemplate<TItem>(build, bind, unbind));
+
+    /// <summary>
+    /// Sets the template that presents the selected item in the header. Without it the header
+    /// falls back to the item template, then to the item text.
+    /// </summary>
+    /// <param name="comboBox">Target combo box.</param>
+    /// <param name="template">Selected item template.</param>
+    /// <returns>The combo box for chaining.</returns>
+    public static ComboBox SelectedItemTemplate(this ComboBox comboBox, IDataTemplate template)
+    {
+        ArgumentNullException.ThrowIfNull(comboBox);
+        ArgumentNullException.ThrowIfNull(template);
+
+        comboBox.SelectedItemTemplate = template;
+        return comboBox;
+    }
+
+    /// <summary>
+    /// Sets the selected item template using delegate-based templating.
+    /// </summary>
+    /// <typeparam name="TItem">Item type.</typeparam>
+    /// <param name="comboBox">Target combo box.</param>
+    /// <param name="build">Template build callback.</param>
+    /// <param name="bind">Template bind callback.</param>
+    /// <param name="unbind">Optional template cleanup callback.</param>
+    /// <returns>The combo box for chaining.</returns>
+    public static ComboBox SelectedItemTemplate<TItem>(
+        this ComboBox comboBox,
+        Func<TemplateContext, FrameworkElement> build,
+        Action<FrameworkElement, TItem, int, TemplateContext> bind,
+        Action<FrameworkElement, TItem, int, TemplateContext>? unbind = null)
+        => SelectedItemTemplate(comboBox, new DelegateTemplate<TItem>(build, bind, unbind));
 
     /// <summary>
     /// Sets the selected index.

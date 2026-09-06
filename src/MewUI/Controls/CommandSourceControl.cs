@@ -17,12 +17,21 @@ public abstract class CommandSourceControl : ContentControl, ICommandSource
 
     /// <summary>
     /// Which parts of the command this control builds a tooltip from when it has no
-    /// <see cref="Control.ToolTip"/> of its own. Defaults to none: a control that shows its command's
+    /// <see cref="FrameworkElement.ToolTip"/> of its own. Defaults to none: a control that shows its command's
     /// text and icon has already said what a tooltip would say.
     /// </summary>
     public static readonly MewProperty<CommandToolTipMode> CommandToolTipModeProperty =
         MewProperty<CommandToolTipMode>.Register<CommandSourceControl>(nameof(CommandToolTipMode),
             CommandToolTipMode.None, MewPropertyOptions.None);
+
+    /// <summary>
+    /// The value this control hands its command as the invocation argument. Null lets the nearest
+    /// <see cref="ICommandArgumentSource"/> above the control supply the argument instead.
+    /// </summary>
+    public static readonly MewProperty<object?> CommandDataProperty =
+        MewProperty<object?>.Register<CommandSourceControl>(nameof(CommandData), null,
+            MewPropertyOptions.None,
+            static (self, _, _) => self.ReevaluateSuggestedIsEnabled());
 
     private Window? _commandSourceWindow;
 
@@ -31,6 +40,13 @@ public abstract class CommandSourceControl : ContentControl, ICommandSource
     {
         get => GetValue(CommandToolTipModeProperty);
         set => SetValue(CommandToolTipModeProperty, value);
+    }
+
+    /// <inheritdoc cref="CommandDataProperty"/>
+    public object? CommandData
+    {
+        get => GetValue(CommandDataProperty);
+        set => SetValue(CommandDataProperty, value);
     }
 
     /// <summary>
@@ -90,7 +106,7 @@ public abstract class CommandSourceControl : ContentControl, ICommandSource
         string? shortcut = null;
         if (mode.HasFlag(CommandToolTipMode.Shortcut) && FindVisualRoot() is Window window)
         {
-            shortcut = InputMapResolver.GetEffectiveGestureText(window, command, origin: this);
+            shortcut = InputMapResolver.GetEffectiveGestureText(window, command, origin: this, CommandData);
         }
 
         string? description = mode.HasFlag(CommandToolTipMode.Description) ? command.Description : null;
@@ -124,7 +140,10 @@ public abstract class CommandSourceControl : ContentControl, ICommandSource
     {
         if (GetValue(CommandProperty) is Command command && FindVisualRoot() is Window window)
         {
-            return window.CommandRouter.CanExecute(command, CommandTarget.From(this));
+            var target = CommandTarget.From(this);
+            return CommandData is object data
+                ? window.CommandRouter.CanExecute(command, target, data)
+                : window.CommandRouter.CanExecute(command, target);
         }
 
         return true;
@@ -137,7 +156,15 @@ public abstract class CommandSourceControl : ContentControl, ICommandSource
     {
         if (GetValue(CommandProperty) is Command command && FindVisualRoot() is Window window)
         {
-            window.CommandRouter.TryExecuteFromInput(command, CommandTarget.From(this), this);
+            var target = CommandTarget.From(this);
+            if (CommandData is object data)
+            {
+                window.CommandRouter.TryExecuteFromInput(command, target, this, data);
+            }
+            else
+            {
+                window.CommandRouter.TryExecuteFromInput(command, target, this);
+            }
         }
     }
 

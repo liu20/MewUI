@@ -35,8 +35,8 @@ internal static partial class BrowserExports
     internal static int NextWakeDelayMs() => BrowserPlatform.NextWakeDelayMs();
 
     [JSExport]
-    internal static bool PointerMove(double x, double y, double screenX, double screenY, int buttons, int modifiers)
-        => BrowserPlatform.PointerMove(x, y, screenX, screenY, buttons, (ModifierKeys)modifiers);
+    internal static bool PointerMove(double x, double y, double screenX, double screenY, int buttons, int modifiers, int pointerType)
+        => BrowserPlatform.PointerMove(x, y, screenX, screenY, buttons, (ModifierKeys)modifiers, pointerType);
 
     [JSExport]
     internal static bool PointerButton(double x, double y, double screenX, double screenY, int button, int buttons,
@@ -99,6 +99,13 @@ internal static partial class BrowserExports
 
     [JSExport]
     internal static bool TextInput(string text) => BrowserPlatform.TextInput(text);
+
+    [JSExport]
+    internal static string GetTextInputState() => BrowserPlatform.GetTextInputState();
+
+    [JSExport]
+    internal static void ReplaceText(int replacePrevious, int replaceNext, string text)
+        => BrowserPlatform.ReplaceText(replacePrevious, replaceNext, text);
 
     [JSExport]
     internal static void FocusChanged(bool focused) => BrowserPlatform.FocusChanged(focused);

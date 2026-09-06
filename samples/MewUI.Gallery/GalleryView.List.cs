@@ -328,9 +328,30 @@ partial class GalleryView
             treeView.Expand(treeItems[0]);
             treeView.Expand(treeItems[0].Children[0]);
 
+            var expandNode = new Command("gallery.tree.expand", "_Expand");
+            var collapseNode = new Command("gallery.tree.collapse", "_Collapse");
+            var copyName = new Command("gallery.tree.copyName", "Copy _Name");
+
+            // One menu for every row, attached to the row container so it opens over the indent and the
+            // expander as well as the text; the node it opened over reaches the handlers as the argument.
+            var nodeMenu = new ContextMenu()
+                .Item(expandNode)
+                .Item(collapseNode)
+                .Separator()
+                .Item(copyName);
+            treeView.PrepareContainer<TreeViewNode>((container, _, _, _) => container.ContextMenu = nodeMenu);
+
             return new DockPanel()
                         .Height(240)
                         .Spacing(6)
+                        .Apply(card =>
+                        {
+                            card.Commands.Register(expandNode, (TreeViewNode node) => treeView.Expand(node),
+                                (TreeViewNode node) => node.HasChildren && !treeView.IsExpanded(node));
+                            card.Commands.Register(collapseNode, (TreeViewNode node) => treeView.Collapse(node),
+                                (TreeViewNode node) => node.HasChildren && treeView.IsExpanded(node));
+                            card.Commands.Register(copyName, (TreeViewNode node) => CopyToClipboard(node.Text, $"Copied \"{node.Text}\""));
+                        })
                         .Children(
                             new TextBlock()
                                 .DockBottom()
@@ -537,6 +558,26 @@ partial class GalleryView
         var status = new ObservableValue<string>(string.Empty);
         void UpdateStatus() => status.Value = $"Messages: {messages.Count}   OffsetY: {list.VerticalOffset:0.#}";
 
+        var replyCommand = new Command("gallery.chat.reply", "Reply");
+        var deleteCommand = new Command("gallery.chat.delete", "Delete");
+        var copyCommand = new Command("gallery.chat.copy", "Copy");
+
+        // One menu instance for every row: it captures the message of the container it opens over,
+        // and the typed handlers on the card receive that message.
+        var messageMenu = new ContextMenu()
+            .Item("Reply", replyCommand)
+            .Item("Delete", deleteCommand)
+            .Separator()
+            .Item("Copy", copyCommand);
+
+        void Reply(ChatMessage msg)
+        {
+            input.Value = $"@{msg.Sender} ";
+            ScrollToBottom();
+        }
+
+        void Copy(ChatMessage msg) => CopyToClipboard(msg.Text, "Copied message");
+
         return Card(
             "ItemsControl (chat / variable height)",
             new DockPanel()
@@ -544,6 +585,12 @@ partial class GalleryView
                 .MaxWidth(960)
                 .Height(320)
                 .Spacing(6)
+                .Apply(card =>
+                {
+                    card.Commands.Register(replyCommand, (ChatMessage msg) => Reply(msg));
+                    card.Commands.Register(deleteCommand, (ChatMessage msg) => messages.Remove(msg), (ChatMessage msg) => msg.Mine);
+                    card.Commands.Register(copyCommand, (ChatMessage msg) => Copy(msg));
+                })
                 .Children(
                     new StackPanel()
                         .DockTop()
@@ -611,6 +658,7 @@ partial class GalleryView
                             .BorderThickness(t.Metrics.ControlBorderThickness))
                         .ItemsSource(view)
                         .ItemPadding(Thickness.Zero)
+                        .PrepareContainer<ChatMessage>((container, _, _, _) => container.ContextMenu = messageMenu)
                         .ItemTemplate(new DelegateTemplate<ChatMessage>(
                             build: ctx => new Border()
                                 .Register(ctx, "Bubble")
